@@ -34,10 +34,10 @@ object BigoBroadcastReceiver {
                 ctx.registerReceiver(receiver, filter)
             }
             registered = true
-            Log.i(TAG, "BigoBroadcastReceiver terdaftar (ACTION_BIGO_CMD)")
+            BigoMainHook.logInfo("BigoBroadcastReceiver terdaftar (ACTION_BIGO_CMD)")
             true
         } catch (t: Throwable) {
-            Log.w(TAG, "Gagal mendaftarkan BigoBroadcastReceiver: ${t.message}")
+            BigoMainHook.logWarn("Gagal mendaftarkan BigoBroadcastReceiver: ${t.message}")
             false
         }
     }
@@ -45,7 +45,7 @@ object BigoBroadcastReceiver {
     private fun handleIntent(context: Context, intent: Intent?) {
         if (intent?.action != BigoConfigStore.ACTION_BIGO_CMD) return
         val cmd = intent.getStringExtra("extra_bigo_cmd") ?: "UPDATE_CONFIG"
-        Log.d(TAG, "Menerima broadcast BIGO cmd=$cmd")
+        BigoMainHook.logDebug("Menerima broadcast BIGO cmd=$cmd", sendToXposed = true)
 
         val cur = BigoMainHook.liveConfig
         when (cmd) {

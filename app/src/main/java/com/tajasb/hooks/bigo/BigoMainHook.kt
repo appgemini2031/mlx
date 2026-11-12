@@ -1,16 +1,21 @@
 package com.tajasb.hooks.bigo
 
 import android.app.Activity
+import android.app.AndroidAppHelper
 import android.app.Application
 import android.content.Context
 import android.graphics.SurfaceTexture
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Surface
+import com.tajasb.debug.LogLevel
+import com.tajasb.debug.VcamDebugLogger
 import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import org.json.JSONObject
@@ -25,10 +30,10 @@ import java.util.concurrent.Executors
  *
  * Prinsip isolasi ketat:
  * 1. Hanya mengeksekusi hook penuh pada proses utama (processName == packageName).
- * 2. Membaca konfigurasi vcam_config_bigo HANYA melalui VcamContentProvider (/bigo/config),
- *    bukan SharedPreferences lokal milik proses BIGO.
+ * 2. Membaca konfigurasi vcam_config_bigo melalui VcamContentProvider (/bigo/config),
+ *    dengan fallback read-only ke video aktif Tajasb bila override BIGO belum disetel.
  * 3. Menggunakan cache buffer terpisah (virtual_vcam_bigo_feed_a/b/c.mp4) dan
- *    broadcast terpisah (com.tajasb.ACTION_BIGO_CMD) dengan tag Logcat "Tajasb-BIGO".
+ *    broadcast terpisah (com.tajasb.ACTION_BIGO_CMD) dengan tag "Tajasb-BIGO".
  */
 object BigoMainHook {
     const val TAG = "Tajasb-BIGO"
@@ -74,29 +79,95 @@ object BigoMainHook {
     @Volatile
     private var providerErrorLogged = false
 
+    @Volatile
+    private var activePackageName: String = "sg.bigo.live"
+
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val fetchLock = Any()
+
+    fun logDebug(msg: String, sendToXposed: Boolean = false) {
+        try { Log.d(TAG, msg) } catch (_: Throwable) {}
+        if (sendToXposed) {
+            try { XposedBridge.log("[$TAG] $msg") } catch (_: Throwable) {}
+        }
+        try {
+            appContext?.let { ctx ->
+                VcamDebugLogger.log(LogLevel.DEBUG, TAG, msg, null, ctx)
+            }
+        } catch (_: Throwable) {}
+    }
+
+    fun logInfo(msg: String, sendToXposed: Boolean = true) {
+        try { Log.i(TAG, msg) } catch (_: Throwable) {}
+        if (sendToXposed) {
+            try { XposedBridge.log("[$TAG] $msg") } catch (_: Throwable) {}
+        }
+        try {
+            appContext?.let { ctx ->
+                VcamDebugLogger.log(LogLevel.INFO, TAG, msg, null, ctx)
+            }
+        } catch (_: Throwable) {}
+    }
+
+    fun logWarn(msg: String, err: Throwable? = null, sendToXposed: Boolean = true) {
+        try {
+            if (err != null) Log.w(TAG, msg, err) else Log.w(TAG, msg)
+        } catch (_: Throwable) {}
+        if (sendToXposed) {
+            try {
+                val suffix = if (err != null) " (${err.javaClass.simpleName}: ${err.message})" else ""
+                XposedBridge.log("[$TAG][WARN] $msg$suffix")
+            } catch (_: Throwable) {}
+        }
+        try {
+            appContext?.let { ctx ->
+                VcamDebugLogger.log(LogLevel.WARN, TAG, msg, err, ctx)
+            }
+        } catch (_: Throwable) {}
+    }
 
     fun isBigoPackage(packageName: String?): Boolean {
         if (packageName.isNullOrBlank()) return false
         return BigoConfigStore.BIGO_PACKAGES.contains(packageName)
     }
 
+    private fun resolveAppContext(): Context? {
+        appContext?.let { return it }
+        return try {
+            val app = AndroidAppHelper.currentApplication()
+            if (app != null) {
+                val ctx = app.applicationContext ?: app
+                appContext = ctx
+                ctx
+            } else {
+                null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         val packageName = lpparam.packageName ?: return
         val processName = lpparam.processName ?: packageName
-        Log.d(TAG, "Loaded package=$packageName process=$processName")
+        activePackageName = packageName
+        logInfo("Loaded package=$packageName process=$processName")
 
         if (!BigoHookRouter.isMainBigoProcess(packageName, processName)) {
-            Log.d(TAG, "Melewati sub-proses BIGO ($processName) untuk mencegah dual-watcher & tabrakan cache.")
+            logInfo("Melewati sub-proses BIGO ($processName) untuk mencegah dual-watcher & tabrakan cache.")
             return
         }
 
-        fun onContextReady(ctx: Context) {
-            appContext = ctx.applicationContext ?: ctx
-            BigoBroadcastReceiver.createAndRegister(appContext ?: ctx)
+        fun onContextReady(ctx: Context, source: String) {
+            val resolved = ctx.applicationContext ?: ctx
+            val firstTime = (appContext == null)
+            appContext = resolved
+            BigoBroadcastReceiver.createAndRegister(resolved)
             startWatcherThread(packageName)
+            if (firstTime) {
+                logInfo("Context BIGO siap ($source): pkg=$packageName")
+            }
         }
 
         try {
@@ -105,7 +176,7 @@ object BigoMainHook {
                 "onCreate",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        (param.thisObject as? Context)?.let { onContextReady(it) }
+                        (param.thisObject as? Context)?.let { onContextReady(it, "Application.onCreate") }
                     }
                 }
             )
@@ -119,7 +190,7 @@ object BigoMainHook {
                 Context::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        (param.args[0] as? Context)?.let { onContextReady(it) }
+                        (param.args[0] as? Context)?.let { onContextReady(it, "attachBaseContext") }
                     }
                 }
             )
@@ -132,7 +203,7 @@ object BigoMainHook {
                 Bundle::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        (param.thisObject as? Context)?.let { onContextReady(it) }
+                        (param.thisObject as? Context)?.let { onContextReady(it, "Activity.onCreate") }
                     }
                 }
             )
@@ -163,7 +234,7 @@ object BigoMainHook {
         }
         BigoHookRouter.installHooks(lpparam.classLoader, packageName)
 
-        Log.i(TAG, "Modul VCam BIGO terisolasi siap pada $packageName ($processName)")
+        logInfo("Modul VCam BIGO terisolasi siap pada $packageName ($processName)")
     }
 
     private fun resolveAuthorities(ctx: Context?): List<String> {
@@ -186,7 +257,7 @@ object BigoMainHook {
         return list
     }
 
-    fun queryConfigFromProvider(ctx: Context? = appContext): BigoVcamConfig? {
+    fun queryConfigFromProvider(ctx: Context? = resolveAppContext()): BigoVcamConfig? {
         val context = ctx ?: return null
         val authorities = resolveAuthorities(context)
         for (auth in authorities) {
@@ -198,9 +269,10 @@ object BigoMainHook {
                     null
                 )
                 if (bundle != null && bundle.getBoolean("success", false)) {
+                    val firstConnect = (cachedAuthority == null)
                     cachedAuthority = auth
                     providerErrorLogged = false
-                    return BigoVcamConfig(
+                    val cfg = BigoVcamConfig(
                         enabled = bundle.getBoolean("enabled", true),
                         videoPath = bundle.getString("videoPath") ?: "",
                         audioPath = bundle.getString("audioPath") ?: "",
@@ -216,6 +288,10 @@ object BigoMainHook {
                         fps = bundle.getInt("fps", 30).coerceIn(15, 60),
                         version = bundle.getLong("version", 1L)
                     )
+                    if (firstConnect) {
+                        logInfo("Terhubung ke VcamContentProvider ($auth), videoPath=${cfg.videoPath.ifBlank { "<kosong>" }}")
+                    }
+                    return cfg
                 }
             } catch (_: Throwable) {}
 
@@ -233,13 +309,42 @@ object BigoMainHook {
         }
         if (!providerErrorLogged) {
             providerErrorLogged = true
-            Log.w(TAG, "Belum dapat mengakses content://<authority>/bigo/config (pastikan app Tajasb terpasang & authority aktif)")
+            logWarn("Belum dapat mengakses content://<authority>/bigo/config (pastikan app Tajasb terpasang & authority aktif)")
         }
         return null
     }
 
-    fun getVirtualVideoFile(forceRefresh: Boolean = false): File? = synchronized(fetchLock) {
-        val ctx = appContext ?: return null
+    private fun resolveLocalFallbackVideoFile(pkg: String?): File? {
+        val targetPkg = pkg?.takeIf { it.isNotBlank() } ?: activePackageName
+        val candidates = listOf(
+            File("/storage/emulated/0/Android/data/$targetPkg/files/Camera1/virtual.mp4"),
+            File("/data/user/0/$targetPkg/files/Camera1/virtual.mp4"),
+            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "Camera1/virtual.mp4"),
+            File("/sdcard/DCIM/Camera1/virtual.mp4"),
+            File("/storage/emulated/0/DCIM/Camera1/virtual.mp4")
+        )
+        for (f in candidates) {
+            try {
+                if (f.exists() && f.canRead() && f.length() > 1024L) {
+                    return f
+                }
+            } catch (_: Throwable) {}
+        }
+        return null
+    }
+
+    fun hasVirtualVideoAvailable(pkg: String? = activePackageName): Boolean {
+        if (!liveConfig.enabled) return false
+        val current = currentRenderer?.videoFile
+        if (current != null && current.exists() && current.length() > 1024L) return true
+        return getVirtualVideoFile(forceRefresh = false, pkg = pkg) != null
+    }
+
+    fun getVirtualVideoFile(forceRefresh: Boolean = false, pkg: String? = activePackageName): File? = synchronized(fetchLock) {
+        val ctx = resolveAppContext()
+        if (ctx == null) {
+            return resolveLocalFallbackVideoFile(pkg)
+        }
         val cfg = queryConfigFromProvider(ctx) ?: liveConfig
         liveConfig = cfg
         if (!cfg.enabled) return null
@@ -278,7 +383,7 @@ object BigoMainHook {
                             cachedAuthority = auth
                             lastExtractedVersion = cfg.version
                             lastExtractedPath = cfg.videoPath
-                            Log.i(TAG, "Video BIGO disalin ke ${nextCache.name} (${nextCache.length()} bytes)")
+                            logInfo("Video BIGO disalin ke ${nextCache.name} (${nextCache.length()} bytes)")
                             return nextCache
                         }
                     }
@@ -286,7 +391,15 @@ object BigoMainHook {
             } catch (_: Throwable) {}
         }
 
-        return if (curCache.exists() && curCache.length() > 1024L) curCache else null
+        if (curCache.exists() && curCache.length() > 1024L) {
+            return curCache
+        }
+        val localFallback = resolveLocalFallbackVideoFile(pkg)
+        if (localFallback != null) {
+            logInfo("Menggunakan video fallback lokal untuk BIGO: ${localFallback.absolutePath}")
+            return localFallback
+        }
+        return null
     }
 
     private fun startWatcherThread(packageName: String) {
@@ -296,7 +409,7 @@ object BigoMainHook {
             while (true) {
                 try {
                     Thread.sleep(1500L)
-                    val ctx = appContext ?: continue
+                    val ctx = resolveAppContext() ?: continue
                     val remoteCfg = queryConfigFromProvider(ctx) ?: continue
                     val prevCfg = liveConfig
                     val videoChanged = (remoteCfg.version != prevCfg.version && remoteCfg.videoPath != prevCfg.videoPath) ||
@@ -307,7 +420,7 @@ object BigoMainHook {
                         applyLiveConfig(remoteCfg, ctx)
                     }
                     if (videoChanged && currentRenderer?.isRunning == true) {
-                        val updatedVid = getVirtualVideoFile(forceRefresh = true)
+                        val updatedVid = getVirtualVideoFile(forceRefresh = true, pkg = packageName)
                         if (updatedVid != null) {
                             currentRenderer?.switchVideoFile(updatedVid)
                         }
@@ -324,7 +437,7 @@ object BigoMainHook {
                 } catch (_: InterruptedException) {
                     break
                 } catch (t: Throwable) {
-                    Log.w(TAG, "BigoWatcherThread warning: ${t.message}")
+                    logWarn("BigoWatcherThread warning: ${t.message}")
                 }
             }
         }
@@ -345,7 +458,7 @@ object BigoMainHook {
 
     fun reloadVideoFromProviderAsync(ctx: Context, forceRefresh: Boolean) {
         ioExecutor.execute {
-            val file = getVirtualVideoFile(forceRefresh = forceRefresh) ?: return@execute
+            val file = getVirtualVideoFile(forceRefresh = forceRefresh, pkg = ctx.packageName) ?: return@execute
             currentRenderer?.switchVideoFile(file)
         }
     }
@@ -383,11 +496,14 @@ object BigoMainHook {
     fun playVideoOnSurface(surface: Surface, pkg: String?) {
         if (!surface.isValid) return
 
-        val ctx = appContext
+        val ctx = resolveAppContext()
         if (ctx != null) {
             queryConfigFromProvider(ctx)?.let { liveConfig = it }
         }
-        if (!liveConfig.enabled) return
+        if (!liveConfig.enabled) {
+            logWarn("playVideoOnSurface dilewati karena BigoVcamConfig.enabled=false")
+            return
+        }
 
         val existing = currentRenderer
         if (existing != null && existing.isRunning) {
@@ -400,9 +516,9 @@ object BigoMainHook {
             return
         }
 
-        val videoFile = getVirtualVideoFile(forceRefresh = false)
+        val videoFile = getVirtualVideoFile(forceRefresh = false, pkg = pkg)
         if (videoFile == null || !videoFile.exists() || videoFile.length() <= 0L) {
-            Log.w(TAG, "Video virtual BIGO belum tersedia di /bigo/virtual.mp4 untuk $pkg")
+            logWarn("Video virtual BIGO belum tersedia di /bigo/virtual.mp4 ataupun DCIM/Camera1 untuk $pkg")
             return
         }
 
@@ -422,13 +538,13 @@ object BigoMainHook {
             initialFrontFacing = BigoHookRouter.isFrontFacing
         )
         currentRenderer = renderer
-        renderer.start()
-        Log.i(TAG, "BigoGlVideoRenderer dimulai untuk $pkg (${videoFile.name})")
+        renderer.start(waitForEglMs = 250L)
+        logInfo("BigoGlVideoRenderer dimulai untuk $pkg (${videoFile.name}, ${videoFile.length()} bytes)")
     }
 
     fun scheduleSessionCloseCheck(reason: String, packageName: String) {
         if (BigoHookRouter.isAnyCameraActive()) {
-            Log.d(TAG, "$reason diabaikan karena kamera BIGO lain masih aktif (transisi Preview/Live/PK)")
+            logDebug("$reason diabaikan karena kamera BIGO lain masih aktif (transisi Preview/Live/PK)")
             return
         }
         mainHandler.postDelayed({
@@ -454,6 +570,6 @@ object BigoMainHook {
         } catch (_: Throwable) {}
         currentRenderer = null
         activeSurface = null
-        Log.i(TAG, "Playback BIGO dihentikan (alasan=$reason, force=$force)")
+        logInfo("Playback BIGO dihentikan (alasan=$reason, force=$force)")
     }
 }

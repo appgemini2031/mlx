@@ -3,6 +3,7 @@
 package com.tajasb.hooks.bigo
 
 import android.graphics.Bitmap
+import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
 import android.hardware.Camera
 import android.hardware.camera2.CameraCaptureSession
@@ -11,9 +12,11 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.media.Image
+import android.media.ImageReader
+import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.os.Handler
-import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
 import com.tajasb.hook.YuvFrameConverter
@@ -22,17 +25,18 @@ import de.robv.android.xposed.XposedHelpers
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * BigoHookRouter:
  * Router & pencegat pipeline kamera terisolasi untuk BIGO Live (sg.bigo.live / sg.bigo.lite).
  * Mencakup audit tipe Surface (TextureView / ImageReader / Beauty SDK),
- * pelacakan Multi-Camera ID (0/1), dukungan Camera1 setPreviewCallbackWithBuffer dengan
- * validasi ukuran buffer NV21, serta hook Camera2 SessionConfiguration & CaptureRequest.
+ * pelacakan Multi-Camera ID (0/1), isolasi SurfaceTexture Camera1 (dummy texture untuk HAL),
+ * dukungan Camera1 setPreviewCallbackWithBuffer dengan refresh NV21 asinkron,
+ * hook Camera2 SessionConfiguration & CaptureRequest, serta audit/injeksi ImageReader YUV_420_888.
  */
 object BigoHookRouter {
-    private const val TAG = "Tajasb-BIGO"
-
     @Volatile
     var currentActiveCameraId: String = "0"
         private set
@@ -45,11 +49,25 @@ object BigoHookRouter {
     private val loggedSurfaceTypes = ConcurrentHashMap.newKeySet<String>()
     private val hookedCallbackClasses = ConcurrentHashMap.newKeySet<String>()
 
+    @Volatile
+    private var dummyCamera1Texture: SurfaceTexture? = null
+
+    @Volatile
     private var cachedNv21Data: ByteArray? = null
+    @Volatile
     private var cachedNv21Width = 0
+    @Volatile
     private var cachedNv21Height = 0
+    @Volatile
     private var cachedNv21Rot = -1
+    @Volatile
     private var cachedNv21Mirror = false
+    @Volatile
+    private var lastNv21RefreshMs = 0L
+    @Volatile
+    private var nv21TimeCursorMs = 0L
+    private val nv21Refreshing = AtomicBoolean(false)
+    private val nv21Executor = Executors.newSingleThreadExecutor()
 
     fun isMainBigoProcess(packageName: String?, processName: String?): Boolean {
         if (packageName.isNullOrBlank()) return false
@@ -88,6 +106,11 @@ object BigoHookRouter {
 
     fun isAnyCameraActive(): Boolean = activeCameraTokens.isNotEmpty()
 
+    private fun isImageReaderSurface(surface: Surface): Boolean {
+        val desc = try { surface.toString() } catch (_: Throwable) { "" }
+        return desc.contains("ImageReader", ignoreCase = true)
+    }
+
     private fun auditSurface(surface: Surface, sourceMethod: String) {
         val desc = try { surface.toString() } catch (_: Throwable) { "Surface@unknown" }
         val kind = when {
@@ -97,14 +120,29 @@ object BigoHookRouter {
         }
         val key = "$sourceMethod:$kind"
         if (loggedSurfaceTypes.add(key)) {
-            Log.d(TAG, "Audit Surface [$sourceMethod] -> $kind ($desc)")
+            BigoMainHook.logInfo("Audit Surface [$sourceMethod] -> $kind ($desc)")
         }
+    }
+
+    private fun pickPreferredSurface(surfaces: Collection<*>): Surface? {
+        var fallbackImageReader: Surface? = null
+        for (item in surfaces) {
+            if (item is Surface && item.isValid) {
+                if (!isImageReaderSurface(item)) {
+                    return item
+                }
+                if (fallbackImageReader == null) {
+                    fallbackImageReader = item
+                }
+            }
+        }
+        return fallbackImageReader
     }
 
     private fun notifyCameraSwitched(cameraId: String) {
         currentActiveCameraId = cameraId
         isFrontFacing = (cameraId == "1")
-        Log.i(TAG, "Kamera BIGO aktif: ID=$cameraId (Front=$isFrontFacing)")
+        BigoMainHook.logInfo("Kamera BIGO aktif: ID=$cameraId (Front=$isFrontFacing)")
         BigoMainHook.onFrontFacingChanged(isFrontFacing)
     }
 
@@ -112,6 +150,7 @@ object BigoHookRouter {
         hookCameraManager(classLoader)
         hookCamera1(classLoader, packageName)
         hookCamera2(classLoader, packageName)
+        hookImageReader(classLoader, packageName)
     }
 
     private fun hookCameraManager(classLoader: ClassLoader) {
@@ -130,7 +169,7 @@ object BigoHookRouter {
                 }
             )
         } catch (t: Throwable) {
-            Log.w(TAG, "CameraManager.openCamera(Handler) hook skipped: ${t.message}")
+            BigoMainHook.logWarn("CameraManager.openCamera(Handler) hook skipped: ${t.message}")
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -149,7 +188,7 @@ object BigoHookRouter {
                     }
                 )
             } catch (t: Throwable) {
-                Log.w(TAG, "CameraManager.openCamera(Executor) hook skipped: ${t.message}")
+                BigoMainHook.logWarn("CameraManager.openCamera(Executor) hook skipped: ${t.message}")
             }
         }
 
@@ -166,8 +205,20 @@ object BigoHookRouter {
                 }
             )
         } catch (t: Throwable) {
-            Log.w(TAG, "Camera.open(int) hook skipped: ${t.message}")
+            BigoMainHook.logWarn("Camera.open(int) hook skipped: ${t.message}")
         }
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                Camera::class.java,
+                "open",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        notifyCameraSwitched("0")
+                    }
+                }
+            )
+        } catch (_: Throwable) {}
     }
 
     private fun hookCamera1(classLoader: ClassLoader, packageName: String) {
@@ -185,6 +236,20 @@ object BigoHookRouter {
                         val surface = Surface(texture)
                         auditSurface(surface, "Camera1.setPreviewTexture")
                         BigoMainHook.playVideoOnSurface(surface, packageName)
+
+                        // Alihkan kamera asli ke SurfaceTexture dummy offscreen agar Camera HAL tidak
+                        // merebut BufferQueue milik texture yang sedang digambar BigoGlVideoRenderer!
+                        if (BigoMainHook.hasVirtualVideoAvailable(packageName)) {
+                            try {
+                                dummyCamera1Texture?.release()
+                            } catch (_: Throwable) {}
+                            val dummy = SurfaceTexture(0)
+                            dummyCamera1Texture = dummy
+                            param.args[0] = dummy
+                            if (loggedSurfaceTypes.add("camera1_dummy_swap")) {
+                                BigoMainHook.logInfo("Camera1 setPreviewTexture dialihkan ke dummy texture agar VCam eksklusif")
+                            }
+                        }
                     }
                 }
             )
@@ -212,6 +277,9 @@ object BigoHookRouter {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         registerCameraOpened(param.thisObject)
+                        if (loggedSurfaceTypes.add("camera1_startPreview")) {
+                            BigoMainHook.logInfo("Camera1.startPreview dipanggil di $packageName")
+                        }
                         BigoMainHook.onStartPreviewRequested(packageName)
                     }
                 }
@@ -233,6 +301,12 @@ object BigoHookRouter {
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         registerCameraClosed(param.thisObject)
+                        if (!isAnyCameraActive()) {
+                            try {
+                                dummyCamera1Texture?.release()
+                            } catch (_: Throwable) {}
+                            dummyCamera1Texture = null
+                        }
                         BigoMainHook.scheduleSessionCloseCheck("Camera1.release", packageName)
                     }
                 }
@@ -247,7 +321,7 @@ object BigoHookRouter {
                 Camera.PictureCallback::class.java,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        val videoFile = BigoMainHook.getVirtualVideoFile() ?: return
+                        val videoFile = BigoMainHook.getVirtualVideoFile(pkg = packageName) ?: return
                         var bitmap = YuvFrameConverter.extractVideoFrameBitmap(videoFile) ?: return
                         try {
                             val cfg = BigoMainHook.liveConfig
@@ -264,7 +338,7 @@ object BigoHookRouter {
                             jpegCallback?.onPictureTaken(jpegBytes, param.thisObject as? Camera)
                             param.result = null
                         } catch (t: Throwable) {
-                            Log.w(TAG, "Camera1 takePicture BIGO error: ${t.message}")
+                            BigoMainHook.logWarn("Camera1 takePicture BIGO error: ${t.message}")
                         }
                     }
                 }
@@ -278,21 +352,69 @@ object BigoHookRouter {
                         Camera.PreviewCallback::class.java,
                         object : XC_MethodHook() {
                             override fun beforeHookedMethod(param: MethodHookParam) {
-                                Log.d(TAG, "Audit Camera1: $methodName dipanggil di $packageName")
-                                hookPreviewCallback(param)
+                                if (loggedSurfaceTypes.add("cb:$methodName")) {
+                                    BigoMainHook.logInfo("Audit Camera1: $methodName dipanggil di $packageName")
+                                }
+                                hookPreviewCallback(param, packageName)
                             }
                         }
                     )
                 } catch (_: Throwable) {}
             }
 
-            Log.i(TAG, "Camera1 hook BIGO terpasang di $packageName")
+            BigoMainHook.logInfo("Camera1 hook BIGO terpasang di $packageName")
         } catch (t: Throwable) {
-            Log.w(TAG, "Camera1 hook BIGO dilewati: ${t.message}")
+            BigoMainHook.logWarn("Camera1 hook BIGO dilewati: ${t.message}")
         }
     }
 
-    private fun hookPreviewCallback(param: XC_MethodHook.MethodHookParam) {
+    private fun extractNv21Frame(width: Int, height: Int, rot: Int, mirror: Boolean, packageName: String, timeUs: Long = 0L): ByteArray? {
+        val videoFile = BigoMainHook.getVirtualVideoFile(pkg = packageName) ?: return null
+        val retriever = MediaMetadataRetriever()
+        val rawBmp = try {
+            retriever.setDataSource(videoFile.absolutePath)
+            val durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+            val durUs = (durStr?.toLongOrNull() ?: 0L) * 1000L
+            val targetUs = if (durUs > 0L) timeUs % durUs else 0L
+            retriever.getFrameAtTime(targetUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        } catch (_: Throwable) {
+            null
+        } finally {
+            try { retriever.release() } catch (_: Throwable) {}
+        } ?: return null
+
+        val transformed = YuvFrameConverter.transformBitmap(rawBmp, rot, mirror)
+        val nv21 = YuvFrameConverter.bitmapToNv21(transformed, width, height)
+        if (transformed != rawBmp && !transformed.isRecycled) transformed.recycle()
+        if (!rawBmp.isRecycled) rawBmp.recycle()
+        return nv21
+    }
+
+    private fun scheduleAsyncNv21Refresh(width: Int, height: Int, rot: Int, mirror: Boolean, packageName: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastNv21RefreshMs < 150L) return
+        if (!nv21Refreshing.compareAndSet(false, true)) return
+        lastNv21RefreshMs = now
+        nv21Executor.execute {
+            try {
+                nv21TimeCursorMs += 150L
+                val fresh = extractNv21Frame(width, height, rot, mirror, packageName, nv21TimeCursorMs * 1000L)
+                if (fresh != null) {
+                    cachedNv21Data = fresh
+                    cachedNv21Width = width
+                    cachedNv21Height = height
+                    cachedNv21Rot = rot
+                    cachedNv21Mirror = mirror
+                }
+            } catch (_: Throwable) {
+            } finally {
+                nv21Refreshing.set(false)
+            }
+        }
+    }
+
+    private fun hookPreviewCallback(param: XC_MethodHook.MethodHookParam, packageName: String) {
         val originalCallback = param.args[0] ?: return
         val cbClass = originalCallback.javaClass
         if (!hookedCallbackClasses.add(cbClass.name)) return
@@ -313,7 +435,7 @@ object BigoHookRouter {
                             if (!isNv21BufferValid(data, size.width, size.height)) {
                                 val mismatchKey = "nv21_mismatch:${size.width}x${size.height}:${data.size}"
                                 if (loggedSurfaceTypes.add(mismatchKey)) {
-                                    Log.w(TAG, "NV21 buffer mismatch: data=${data.size} bytes, expected>=${computeExpectedNv21Size(size.width, size.height)} (${size.width}x${size.height})")
+                                    BigoMainHook.logWarn("NV21 buffer mismatch: data=${data.size} bytes, expected>=${computeExpectedNv21Size(size.width, size.height)} (${size.width}x${size.height})")
                                 }
                                 return
                             }
@@ -322,7 +444,7 @@ object BigoHookRouter {
 
                             val nv21ActiveKey = "nv21_active:${size.width}x${size.height}"
                             if (loggedSurfaceTypes.add(nv21ActiveKey)) {
-                                Log.i(TAG, "Camera1 NV21 aktif pada ${size.width}x${size.height} (buffer=${data.size} bytes)")
+                                BigoMainHook.logInfo("Camera1 NV21 aktif pada ${size.width}x${size.height} (buffer=${data.size} bytes)")
                             }
 
                             val rot = (cfg.rotation + 270) % 360
@@ -334,16 +456,13 @@ object BigoHookRouter {
                                 cachedNv21Rot != rot ||
                                 cachedNv21Mirror != mirror
                             ) {
-                                val videoFile = BigoMainHook.getVirtualVideoFile() ?: return
-                                val rawBmp = YuvFrameConverter.extractVideoFrameBitmap(videoFile) ?: return
-                                val transformed = YuvFrameConverter.transformBitmap(rawBmp, rot, mirror)
-                                cachedNv21Data = YuvFrameConverter.bitmapToNv21(transformed, size.width, size.height)
+                                cachedNv21Data = extractNv21Frame(size.width, size.height, rot, mirror, packageName, 0L) ?: return
                                 cachedNv21Width = size.width
-                                cachedNv21Height = size.height
+                                cachedNv21Height = heightOrSize(size.height)
                                 cachedNv21Rot = rot
                                 cachedNv21Mirror = mirror
-                                if (transformed != rawBmp && !transformed.isRecycled) transformed.recycle()
-                                if (!rawBmp.isRecycled) rawBmp.recycle()
+                            } else if (!cfg.isPaused) {
+                                scheduleAsyncNv21Refresh(size.width, size.height, rot, mirror, packageName)
                             }
 
                             val expectedBytes = computeExpectedNv21Size(size.width, size.height)
@@ -352,11 +471,165 @@ object BigoHookRouter {
                                 System.arraycopy(fakeBytes, 0, data, 0, expectedBytes)
                             }
                         } catch (t: Throwable) {
-                            Log.w(TAG, "NV21 onPreviewFrame guard warning: ${t.message}")
+                            BigoMainHook.logWarn("NV21 onPreviewFrame guard warning: ${t.message}")
                         }
                     }
                 }
             )
+        } catch (_: Throwable) {}
+    }
+
+    private fun heightOrSize(h: Int): Int = h
+
+    private fun hookImageReader(classLoader: ClassLoader, packageName: String) {
+        try {
+            val irClass = XposedHelpers.findClass("android.media.ImageReader", classLoader)
+            XposedHelpers.findAndHookMethod(
+                irClass,
+                "newInstance",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val w = param.args[0] as? Int ?: 0
+                        val h = param.args[1] as? Int ?: 0
+                        val fmt = param.args[2] as? Int ?: 0
+                        val fmtName = when (fmt) {
+                            ImageFormat.YUV_420_888 -> "YUV_420_888"
+                            ImageFormat.PRIVATE -> "PRIVATE"
+                            ImageFormat.JPEG -> "JPEG"
+                            ImageFormat.NV21 -> "NV21"
+                            else -> "0x${Integer.toHexString(fmt)}"
+                        }
+                        val key = "ir_new:${w}x${h}:$fmtName"
+                        if (loggedSurfaceTypes.add(key)) {
+                            BigoMainHook.logInfo("Audit ImageReader.newInstance(${w}x${h}, format=$fmtName) di $packageName")
+                        }
+                    }
+                }
+            )
+
+            listOf("acquireLatestImage", "acquireNextImage").forEach { methodName ->
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        irClass,
+                        methodName,
+                        object : XC_MethodHook() {
+                            override fun afterHookedMethod(param: MethodHookParam) {
+                                val image = param.result as? Image ?: return
+                                if (image.format != ImageFormat.YUV_420_888) return
+                                val cfg = BigoMainHook.liveConfig
+                                if (!cfg.enabled) return
+
+                                val key = "ir_acq:${methodName}:${image.width}x${image.height}"
+                                if (loggedSurfaceTypes.add(key)) {
+                                    BigoMainHook.logInfo("ImageReader.$methodName aktif (${image.width}x${image.height}, planes=${image.planes.size})")
+                                }
+
+                                val planes = image.planes
+                                if (planes.size < 3) return
+                                val yBuf = planes[0].buffer
+                                val uBuf = planes[1].buffer
+                                val vBuf = planes[2].buffer
+                                if (yBuf.isReadOnly || uBuf.isReadOnly || vBuf.isReadOnly) {
+                                    if (loggedSurfaceTypes.add("ir_readonly:${image.width}x${image.height}")) {
+                                        BigoMainHook.logDebug("ImageReader planes bersifat read-only pada ${image.width}x${image.height}", sendToXposed = true)
+                                    }
+                                    return
+                                }
+
+                                val rot = (cfg.rotation + 270) % 360
+                                val mirror = if (isFrontFacing) !cfg.isMirrored else cfg.isMirrored
+                                val w = image.width
+                                val h = image.height
+
+                                if (cachedNv21Data == null ||
+                                    cachedNv21Width != w ||
+                                    cachedNv21Height != h ||
+                                    cachedNv21Rot != rot ||
+                                    cachedNv21Mirror != mirror
+                                ) {
+                                    cachedNv21Data = extractNv21Frame(w, h, rot, mirror, packageName, 0L) ?: return
+                                    cachedNv21Width = w
+                                    cachedNv21Height = h
+                                    cachedNv21Rot = rot
+                                    cachedNv21Mirror = mirror
+                                } else if (!cfg.isPaused) {
+                                    scheduleAsyncNv21Refresh(w, h, rot, mirror, packageName)
+                                }
+
+                                val nv21 = cachedNv21Data ?: return
+                                if (!isNv21BufferValid(nv21, w, h)) return
+
+                                writeNv21IntoYuv420Planes(nv21, w, h, planes)
+                            }
+                        }
+                    )
+                } catch (_: Throwable) {}
+            }
+        } catch (t: Throwable) {
+            BigoMainHook.logWarn("ImageReader hook BIGO dilewati: ${t.message}")
+        }
+    }
+
+    private fun writeNv21IntoYuv420Planes(nv21: ByteArray, width: Int, height: Int, planes: Array<Image.Plane>) {
+        try {
+            val yPlane = planes[0]
+            val uPlane = planes[1]
+            val vPlane = planes[2]
+
+            val yBuf = yPlane.buffer
+            val yRowStride = yPlane.rowStride
+            val yPixelStride = yPlane.pixelStride
+            if (yPixelStride == 1 && yRowStride == width && yBuf.remaining() >= width * height) {
+                yBuf.duplicate().apply {
+                    position(0)
+                    put(nv21, 0, width * height)
+                }
+            } else {
+                val yDup = yBuf.duplicate()
+                for (row in 0 until height) {
+                    val dstOffset = row * yRowStride
+                    val srcOffset = row * width
+                    if (yPixelStride == 1 && dstOffset + width <= yDup.limit()) {
+                        yDup.position(dstOffset)
+                        yDup.put(nv21, srcOffset, width)
+                    } else {
+                        for (col in 0 until width) {
+                            val idx = dstOffset + col * yPixelStride
+                            if (idx < yDup.limit()) {
+                                yDup.put(idx, nv21[srcOffset + col])
+                            }
+                        }
+                    }
+                }
+            }
+
+            val uvStart = width * height
+            val chromaH = height / 2
+            val chromaW = width / 2
+            val uDup = uPlane.buffer.duplicate()
+            val vDup = vPlane.buffer.duplicate()
+            val uRowStride = uPlane.rowStride
+            val vRowStride = vPlane.rowStride
+            val uPixelStride = uPlane.pixelStride
+            val vPixelStride = vPlane.pixelStride
+
+            for (row in 0 until chromaH) {
+                for (col in 0 until chromaW) {
+                    val nv21Idx = uvStart + row * width + col * 2
+                    if (nv21Idx + 1 >= nv21.size) break
+                    val vVal = nv21[nv21Idx]
+                    val uVal = nv21[nv21Idx + 1]
+
+                    val uIdx = row * uRowStride + col * uPixelStride
+                    val vIdx = row * vRowStride + col * vPixelStride
+                    if (uIdx < uDup.limit()) uDup.put(uIdx, uVal)
+                    if (vIdx < vDup.limit()) vDup.put(vIdx, vVal)
+                }
+            }
         } catch (_: Throwable) {}
     }
 
@@ -375,7 +648,9 @@ object BigoHookRouter {
                         val targetSurface = param.args[0] as? Surface ?: return
                         if (targetSurface.isValid) {
                             auditSurface(targetSurface, "CaptureRequest.Builder.addTarget")
-                            BigoMainHook.playVideoOnSurface(targetSurface, packageName)
+                            if (!isImageReaderSurface(targetSurface)) {
+                                BigoMainHook.playVideoOnSurface(targetSurface, packageName)
+                            }
                         }
                     }
                 }
@@ -402,15 +677,13 @@ object BigoHookRouter {
                             override fun beforeHookedMethod(param: MethodHookParam) {
                                 registerCameraOpened(param.thisObject)
                                 val surfaces = param.args[0] as? List<*> ?: return
-                                var played = false
                                 for (item in surfaces) {
                                     if (item is Surface && item.isValid) {
                                         auditSurface(item, "CameraDevice.createCaptureSession")
-                                        if (!played) {
-                                            BigoMainHook.playVideoOnSurface(item, packageName)
-                                            played = true
-                                        }
                                     }
+                                }
+                                pickPreferredSurface(surfaces)?.let { preferred ->
+                                    BigoMainHook.playVideoOnSurface(preferred, packageName)
                                 }
                             }
                         }
@@ -428,13 +701,14 @@ object BigoHookRouter {
                                     override fun beforeHookedMethod(param: MethodHookParam) {
                                         registerCameraOpened(param.thisObject)
                                         val sessionConfig = param.args[0] as? SessionConfiguration ?: return
-                                        for (output in sessionConfig.outputConfigurations) {
-                                            output.surface?.let { surf ->
-                                                if (surf.isValid) {
-                                                    auditSurface(surf, "CameraDevice.$methodName(SessionConfig)")
-                                                    BigoMainHook.playVideoOnSurface(surf, packageName)
-                                                }
+                                        val allSurfaces = sessionConfig.outputConfigurations.mapNotNull { it.surface }
+                                        for (surf in allSurfaces) {
+                                            if (surf.isValid) {
+                                                auditSurface(surf, "CameraDevice.$methodName(SessionConfig)")
                                             }
+                                        }
+                                        pickPreferredSurface(allSurfaces)?.let { preferred ->
+                                            BigoMainHook.playVideoOnSurface(preferred, packageName)
                                         }
                                     }
                                 }
@@ -454,15 +728,14 @@ object BigoHookRouter {
                             override fun beforeHookedMethod(param: MethodHookParam) {
                                 registerCameraOpened(param.thisObject)
                                 val configs = param.args[0] as? List<*> ?: return
-                                for (cfg in configs) {
-                                    if (cfg is OutputConfiguration) {
-                                        cfg.surface?.let { surf ->
-                                            if (surf.isValid) {
-                                                auditSurface(surf, "CameraDevice.createCaptureSessionByOutputConfigurations")
-                                                BigoMainHook.playVideoOnSurface(surf, packageName)
-                                            }
-                                        }
+                                val allSurfaces = configs.filterIsInstance<OutputConfiguration>().mapNotNull { it.surface }
+                                for (surf in allSurfaces) {
+                                    if (surf.isValid) {
+                                        auditSurface(surf, "CameraDevice.createCaptureSessionByOutputConfigurations")
                                     }
+                                }
+                                pickPreferredSurface(allSurfaces)?.let { preferred ->
+                                    BigoMainHook.playVideoOnSurface(preferred, packageName)
                                 }
                             }
                         }
@@ -495,7 +768,9 @@ object BigoHookRouter {
                                 val surf = param.args[0] as? Surface ?: return
                                 if (surf.isValid) {
                                     auditSurface(surf, "OutputConfiguration.addSurface")
-                                    BigoMainHook.playVideoOnSurface(surf, packageName)
+                                    if (!isImageReaderSurface(surf)) {
+                                        BigoMainHook.playVideoOnSurface(surf, packageName)
+                                    }
                                 }
                             }
                         }
@@ -566,9 +841,9 @@ object BigoHookRouter {
                 } catch (_: Throwable) {}
             }
 
-            Log.i(TAG, "Camera2 hook BIGO terpasang di $packageName")
+            BigoMainHook.logInfo("Camera2 hook BIGO terpasang di $packageName")
         } catch (t: Throwable) {
-            Log.w(TAG, "Camera2 hook BIGO error: ${t.message}")
+            BigoMainHook.logWarn("Camera2 hook BIGO error: ${t.message}")
         }
     }
 
@@ -584,10 +859,11 @@ object BigoHookRouter {
                 for (t in targets) {
                     if (t is Surface && t.isValid) {
                         auditSurface(t, "CaptureSession.$source")
-                        BigoMainHook.playVideoOnSurface(t, packageName)
-                        found = true
-                        break
                     }
+                }
+                pickPreferredSurface(targets)?.let { preferred ->
+                    BigoMainHook.playVideoOnSurface(preferred, packageName)
+                    found = true
                 }
             }
         } catch (_: Throwable) {}
@@ -606,10 +882,11 @@ object BigoHookRouter {
                     for (t in items) {
                         if (t is Surface && t.isValid) {
                             auditSurface(t, "CaptureSession.$source(mSurfaces)")
-                            BigoMainHook.playVideoOnSurface(t, packageName)
-                            found = true
-                            break
                         }
+                    }
+                    pickPreferredSurface(items)?.let { preferred ->
+                        BigoMainHook.playVideoOnSurface(preferred, packageName)
+                        found = true
                     }
                 }
             } catch (_: Throwable) {}

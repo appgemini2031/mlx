@@ -144,6 +144,51 @@ object BigoConfigStore {
         return updated
     }
 
+    fun getEffectiveConfig(context: Context): BigoVcamConfig {
+        val local = getConfig(context)
+        val hasDedicatedVideo = local.videoPath.isNotBlank() ||
+            File(getMediaDirectory(context), "virtual.mp4").let { it.exists() && it.length() > 0L }
+        if (hasDedicatedVideo) {
+            return local
+        }
+
+        // Jika belum ada override khusus di vcam_config_bigo, cerminkan konfigurasi aktif
+        // dari VcamRepository (read-only) agar video & kontrol Tajasb langsung bekerja di BIGO.
+        return try {
+            val repo = com.tajasb.data.VcamRepository.getInstance(context)
+            val cfg = repo.config.value
+            val activeVideoPath = cfg.currentVideo?.path?.takeIf { it.isNotBlank() } ?: cfg.videoPath
+            val activeAudioPath = cfg.currentAudio?.path?.takeIf { it.isNotBlank() } ?: cfg.audioPath
+            val resolvedFile = if (activeVideoPath.isNotBlank()) File(activeVideoPath) else null
+            val fallbackPath = if (resolvedFile != null && resolvedFile.exists() && resolvedFile.length() > 0L) {
+                resolvedFile.absolutePath
+            } else {
+                File(context.filesDir, "Camera1/virtual.mp4")
+                    .takeIf { it.exists() && it.length() > 0L }
+                    ?.absolutePath ?: activeVideoPath
+            }
+
+            local.copy(
+                enabled = local.enabled,
+                videoPath = fallbackPath,
+                audioPath = activeAudioPath,
+                rotation = cfg.rotation,
+                isMirrored = cfg.isMirrored,
+                isVerticalFlipped = cfg.isVerticalFlipped,
+                zoomFactor = cfg.zoomFactor.coerceIn(0.3f, 5.0f),
+                scaleMode = cfg.scaleMode.name,
+                isPaused = cfg.isVideoPaused,
+                isMuted = !cfg.audioEnabled,
+                isVideoAudioMuted = cfg.currentVideo?.isMuted ?: cfg.isVideoAudioMuted,
+                isMp3AudioPaused = cfg.isMp3AudioPaused,
+                fps = cfg.fps.coerceIn(15, 60),
+                version = maxOf(local.version, repo.playlistVersion)
+            )
+        } catch (_: Throwable) {
+            local
+        }
+    }
+
     fun getMediaDirectory(context: Context): File {
         val dir = File(context.filesDir, BIGO_MEDIA_DIR)
         if (!dir.exists()) {
@@ -164,6 +209,24 @@ object BigoConfigStore {
         if (dedicated.exists() && dedicated.canRead() && dedicated.length() > 0L) {
             return dedicated
         }
+
+        // Fallback read-only ke video aktif di VcamRepository / Camera1 internal vault
+        try {
+            val repo = com.tajasb.data.VcamRepository.getInstance(context)
+            val repoCfg = repo.config.value
+            val repoPath = repoCfg.currentVideo?.path?.takeIf { it.isNotBlank() } ?: repoCfg.videoPath
+            if (repoPath.isNotBlank()) {
+                val rf = File(repoPath)
+                if (rf.exists() && rf.canRead() && rf.length() > 0L) {
+                    return rf
+                }
+            }
+        } catch (_: Throwable) {}
+
+        val internalVirtual = File(context.filesDir, "Camera1/virtual.mp4")
+        if (internalVirtual.exists() && internalVirtual.canRead() && internalVirtual.length() > 0L) {
+            return internalVirtual
+        }
         return null
     }
 
@@ -183,11 +246,32 @@ object BigoConfigStore {
                 return f
             }
         }
+
+        // Fallback read-only ke audio aktif di VcamRepository / Camera1 internal vault
+        try {
+            val repo = com.tajasb.data.VcamRepository.getInstance(context)
+            val repoCfg = repo.config.value
+            val repoAudio = repoCfg.currentAudio?.path?.takeIf { it.isNotBlank() } ?: repoCfg.audioPath
+            if (repoAudio.isNotBlank()) {
+                val af = File(repoAudio)
+                if (af.exists() && af.canRead() && af.length() > 0L) {
+                    return af
+                }
+            }
+        } catch (_: Throwable) {}
+
+        val internalCamDir = File(context.filesDir, "Camera1")
+        for (name in names) {
+            val f = File(internalCamDir, name)
+            if (f.exists() && f.canRead() && f.length() > 0L) {
+                return f
+            }
+        }
         return null
     }
 
     fun getOrCreateConfigJsonFile(context: Context): File {
-        val cfg = getConfig(context)
+        val cfg = getEffectiveConfig(context)
         return writeConfigJsonFile(context, cfg)
     }
 

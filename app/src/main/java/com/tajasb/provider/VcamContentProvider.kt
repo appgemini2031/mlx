@@ -42,8 +42,9 @@ class VcamContentProvider : ContentProvider() {
         }
 
         val pm = ctx.packageManager
-        val callerPkg = callingPackage ?: pm.getPackagesForUid(callingUid)?.firstOrNull() ?: ""
-        if (callerPkg == ctx.packageName) {
+        val uidPackages = try { pm.getPackagesForUid(callingUid)?.toList() ?: emptyList() } catch (_: Throwable) { emptyList() }
+        val callerPkg = callingPackage ?: uidPackages.firstOrNull() ?: ""
+        if (callerPkg == ctx.packageName || uidPackages.contains(ctx.packageName)) {
             return true
         }
 
@@ -58,10 +59,12 @@ class VcamContentProvider : ContentProvider() {
             val repo = VcamRepository.getInstance(ctx)
             val cfg = repo.config.value
             val primary = cfg.primaryTargetPackage
-            if (primary.isNotBlank() && callerPkg == primary) {
+            if (primary.isNotBlank() && (callerPkg == primary || uidPackages.contains(primary))) {
                 return true
             }
-            if (callerPkg.isNotBlank() && cfg.targetPackages.contains(callerPkg)) {
+            if ((callerPkg.isNotBlank() && cfg.targetPackages.contains(callerPkg)) ||
+                uidPackages.any { cfg.targetPackages.contains(it) }
+            ) {
                 return true
             }
 
@@ -104,7 +107,8 @@ class VcamContentProvider : ContentProvider() {
                 "io.va.",
                 "top.niunaijun."
             )
-            if (knownTargetPrefixes.any { callerPkg.startsWith(it) || callerPkg.contains(it) }) {
+            val allCallers = (listOf(callerPkg) + uidPackages).filter { it.isNotBlank() }
+            if (allCallers.any { pkg -> knownTargetPrefixes.any { pkg.startsWith(it) || pkg.contains(it) } }) {
                 return true
             }
         } catch (_: Throwable) {}
@@ -126,7 +130,7 @@ class VcamContentProvider : ContentProvider() {
             val repo = VcamRepository.getInstance(ctx)
             when (method) {
                 "bigoGetConfig" -> {
-                    val bCfg = com.tajasb.hooks.bigo.BigoConfigStore.getConfig(ctx)
+                    val bCfg = com.tajasb.hooks.bigo.BigoConfigStore.getEffectiveConfig(ctx)
                     Bundle().apply {
                         putBoolean("success", true)
                         putBoolean("enabled", bCfg.enabled)

@@ -126,7 +126,7 @@ class BigoGlVideoRenderer(
         }
     }
 
-    fun start() {
+    fun start(waitForEglMs: Long = 0L) {
         if (isRunning || released.get()) return
         isRunning = true
 
@@ -136,15 +136,23 @@ class BigoGlVideoRenderer(
         val handler = Handler(thread.looper)
         renderHandler = handler
 
+        val latch = if (waitForEglMs > 0L) java.util.concurrent.CountDownLatch(1) else null
         handler.post {
             try {
                 initGlAndMedia()
+                latch?.countDown()
                 handler.post(frameDrawRunnable)
             } catch (t: Throwable) {
-                Log.w(TAG, "EGL init failed for Surface (${targetSurface}), fallback MediaPlayer: ${t.message}")
+                BigoMainHook.logWarn("EGL init failed for Surface ($targetSurface), fallback MediaPlayer: ${t.message}")
                 releaseGlOnly()
                 startFallbackMediaPlayer(targetSurface, videoFile)
+                latch?.countDown()
             }
+        }
+        if (latch != null) {
+            try {
+                latch.await(waitForEglMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {}
         }
     }
 

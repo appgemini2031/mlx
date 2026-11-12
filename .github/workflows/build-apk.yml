@@ -1,0 +1,193 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+          validate-wrappers: false
+          cache-read-only: false
+
+      - name: Prepare Keystore & Environment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          touch .env .env.example
+          echo 'org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8 -Djava.awt.headless=true' > gradle.properties
+          echo 'org.gradle.parallel=true' >> gradle.properties
+          echo 'org.gradle.caching=true' >> gradle.properties
+          echo 'android.useAndroidX=true' >> gradle.properties
+          echo 'android.nonTransitiveRClass=true' >> gradle.properties
+          if [ -n "$ANDROID_HOME" ]; then
+            echo "sdk.dir=$ANDROID_HOME" > local.properties
+            yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || yes | sdkmanager --licenses 2>/dev/null || true
+          fi
+          # Keystore Permanen Tunggal (SHA-1: CB:91:04:91:62:F3:07:7C:DC:21:A6:2F:81:89:4E:FB:DF:9D:42:D5)
+          # Menjamin 100% setiap APK hasil build GitHub Actions maupun AI Studio selalu menggunakan sertifikat yang persis sama
+          CANONICAL_B64="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"
+          printf "%s" "$CANONICAL_B64" > debug.keystore.base64
+          rm -f debug.keystore
+          python3 -c "import base64, re; raw = re.sub(r'[^A-Za-z0-9+/=]', '', open('debug.keystore.base64').read()); open('debug.keystore','wb').write(base64.b64decode(raw))"
+          if [ -s "debug.keystore" ] && keytool -list -keystore debug.keystore -storepass android -alias androiddebugkey >/dev/null 2>&1; then
+            echo "Permanent Keystore verified successfully (SHA-1: CB:91:04:91:62:F3:07:7C:DC:21:A6:2F:81:89:4E:FB:DF:9D:42:D5):"
+            ls -lh debug.keystore
+          else
+            echo "ERROR: Permanent debug.keystore could not be verified!"
+            exit 1
+          fi
+          # Pastikan VERSION_MAJOR/MINOR/PATCH dan VERSION_CODE selalu mengikuti Release tertinggi + 1 jika file lokal lebih rendah
+          if [ -f "app/version.properties" ]; then
+            python3 - << 'PYEOF'
+          import os, re, json, urllib.request
+          prop_path = "app/version.properties"
+          txt = open(prop_path).read() if os.path.exists(prop_path) else ""
+          def get_int(k, d):
+              m = re.search(rf"^{k}=(\d+)", txt, re.M)
+              return int(m.group(1)) if m else d
+          cur = (get_int("VERSION_MAJOR", 1), get_int("VERSION_MINOR", 0), get_int("VERSION_PATCH", 50))
+          code = get_int("VERSION_CODE", 2550)
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          tok = os.environ.get("GH_TOKEN", "")
+          best_rel = (0, 0, 0)
+          if repo:
+              headers = {"Accept": "application/vnd.github+json", "User-Agent": "Tajasb-CI"}
+              if tok:
+                  headers["Authorization"] = f"Bearer {tok}"
+              for ep in [f"https://api.github.com/repos/{repo}/releases?per_page=30", f"https://api.github.com/repos/{repo}/tags?per_page=30"]:
+                  try:
+                      req = urllib.request.Request(ep, headers=headers)
+                      with urllib.request.urlopen(req, timeout=8) as r:
+                          data = json.loads(r.read().decode("utf-8", errors="ignore"))
+                          if isinstance(data, list):
+                              for item in data:
+                                  for s in [str(item.get("tag_name", "")), str(item.get("name", ""))]:
+                                      for m in re.finditer(r"v?(\d+)\.(\d+)\.(\d+)", s):
+                                          v = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                                          if v > best_rel:
+                                              best_rel = v
+                  except Exception:
+                      pass
+          if best_rel >= cur and best_rel > (0, 0, 0):
+              cur = (best_rel[0], best_rel[1], best_rel[2] + 1)
+          run_num = int(os.environ.get("GITHUB_RUN_NUMBER", "1") or "1")
+          code = max(code, 2550 + run_num, 2500 + cur[2])
+          with open(prop_path, "w") as f:
+              f.write(f"# Auto-generated Version Properties\nVERSION_MAJOR={cur[0]}\nVERSION_MINOR={cur[1]}\nVERSION_PATCH={cur[2]}\nVERSION_CODE={code}\n")
+          print(f"Synced app/version.properties -> v{cur[0]}.{cur[1]}.{cur[2]} (code {code})")
+          PYEOF
+          fi
+
+      - name: Compile APK
+        run: |
+          find app -type f \( -name "*.kt" -o -name "*.kts" \) -exec sed -i -e '/com\.intellij/d' -e '/ksp\.com\.intellij/d' {} \; 2>/dev/null || true
+          gradle assembleDebug --build-cache --stacktrace
+
+      - name: Determine Version
+        id: get_version
+        run: |
+          if [ -f "app/version.properties" ]; then
+            MAJOR=$(grep -E "^VERSION_MAJOR=" app/version.properties | head -n 1 | cut -d'=' -f2 | tr -d '\r\n ' || echo "1")
+            MINOR=$(grep -E "^VERSION_MINOR=" app/version.properties | head -n 1 | cut -d'=' -f2 | tr -d '\r\n ' || echo "0")
+            PATCH=$(grep -E "^VERSION_PATCH=" app/version.properties | head -n 1 | cut -d'=' -f2 | tr -d '\r\n ' || echo "50")
+            CODE=$(grep -E "^VERSION_CODE=" app/version.properties | head -n 1 | cut -d'=' -f2 | tr -d '\r\n ' || echo "2550")
+            [ -z "$MAJOR" ] && MAJOR="1"
+            [ -z "$MINOR" ] && MINOR="0"
+            [ -z "$PATCH" ] && PATCH="50"
+            echo "APP_VER=${MAJOR}.${MINOR}.${PATCH}" >> $GITHUB_OUTPUT
+            echo "TAG_NAME=v${MAJOR}.${MINOR}.${PATCH}-b${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "RELEASE_TITLE=Tajasb v${MAJOR}.${MINOR}.${PATCH} (Build ${{ github.run_number }})" >> $GITHUB_OUTPUT
+          else
+            echo "APP_VER=1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "TAG_NAME=v1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "RELEASE_TITLE=Tajasb v1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Prepare Release APK Name
+        run: |
+          mkdir -p release_assets
+          APP_VER="${{ steps.get_version.outputs.APP_VER }}"
+          APK_FILE=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
+          if [ -n "$APK_FILE" ] && [ -f "$APK_FILE" ]; then
+            echo "Found compiled APK: $APK_FILE"
+            # Berkas APK langsung versi otomatis tanpa prefix nama: v1.0.xx.apk
+            cp "$APK_FILE" "release_assets/v${APP_VER}.apk"
+            ls -la release_assets/
+          else
+            echo "Error: No compiled APK found in app/build/outputs/apk!"
+            exit 1
+          fi
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tajasb-apk-${{ steps.get_version.outputs.TAG_NAME }}
+          path: release_assets/v${{ steps.get_version.outputs.APP_VER }}.apk
+          retention-days: 14
+
+      - name: Publish Release via GitHub CLI (Anti-Tag-Conflict)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.get_version.outputs.TAG_NAME }}"
+          TITLE="${{ steps.get_version.outputs.RELEASE_TITLE }}"
+          APP_VER="${{ steps.get_version.outputs.APP_VER }}"
+          APK_PATH="release_assets/v${APP_VER}.apk"
+
+          echo "Publishing $APK_PATH to GitHub Releases with tag $TAG..."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Existing release $TAG found (e.g. after repo switch/force-push). Updating asset..."
+            if gh release upload "$TAG" "$APK_PATH" --clobber; then
+              echo "Successfully updated APK asset in existing release $TAG!"
+              exit 0
+            fi
+            gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          fi
+
+          # Bersihkan orphan tag jika ada dari riwayat sebelum pindah repo / force-push
+          git push origin ":refs/tags/$TAG" 2>/dev/null || true
+
+          if gh release create "$TAG" "$APK_PATH" \
+            --title "$TITLE" \
+            --notes "Automated APK Build v${APP_VER} (Commit: ${GITHUB_SHA::7})" \
+            --target "${{ github.sha }}"; then
+            echo "Successfully created GitHub Release $TAG!"
+          else
+            echo "gh release create returned non-zero, falling back to action-gh-release..."
+          fi
+        continue-on-error: true
+
+      - name: Release APK to GitHub (Fallback Guarantee)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_version.outputs.TAG_NAME }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.get_version.outputs.RELEASE_TITLE }}
+          files: |
+            release_assets/v${{ steps.get_version.outputs.APP_VER }}.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true

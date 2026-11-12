@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="xposed_scope">
+        <item>com.zhiliaoapp.musically</item>
+        <item>com.ss.android.ugc.trill</item>
+        <item>com.instagram.android</item>
+        <item>com.whatsapp</item>
+        <item>com.whatsapp.w4b</item>
+        <item>com.shopee.id</item>
+        <item>com.tokopedia.tkpd</item>
+        <item>com.lazada.android</item>
+        <item>sg.bigo.live</item>
+        <item>com.facebook.katana</item>
+        <item>com.facebook.orca</item>
+        <item>org.telegram.messenger</item>
+        <item>com.google.android.apps.meetings</item>
+        <item>us.zoom.videomeetings</item>
+        <item>com.snapchat.android</item>
+    </string-array>
+</resources>

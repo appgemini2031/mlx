@@ -1,0 +1,35 @@
+# Android Studio & Gradle
+.gradle/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+
+# Local Environment & Protected Configs
+.env
+.env.*
+!.env.example
+*.keystore
+!debug.keystore.base64
+.tajasb/
+.tajasb*
+tools/
+*.pem
+*.key
+*.conf
+*.cfg
+.*_token
+temp_update/
+download/
+*.zip
+
+# Kotlin & IntelliJ IDEA
+.idea/
+*.iml
+out/
+
+# System files
+.DS_Store
+Thumbs.db

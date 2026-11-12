@@ -1,0 +1,3 @@
+# Tajasb Remote Blacklist Noticeboard
+# Format: DEVICE_ID:TIMESTAMP:REASON (one entry per line)
+# Any device ID listed here will be instantly locked and wiped upon connecting to internet.

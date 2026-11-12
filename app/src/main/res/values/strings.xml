@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Tajasb</string>
+    <string name="floating_service_started">Tajasb Floating Control Aktif</string>
+    <string name="floating_service_desc">Kontrol virtual kamera dan overlay melayang</string>
+</resources>

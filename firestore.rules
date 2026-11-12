@@ -1,0 +1,98 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidTimestamp(val) {
+      return val is timestamp && val <= request.time;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.userId == userId &&
+        data.email is string &&
+        data.email.size() > 3 &&
+        (!('displayName' in data) || data.displayName is string) &&
+        (!('photoUrl' in data) || data.photoUrl is string) &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidVcamConfig(data, userId) {
+      return data.userId == userId &&
+        isValidTimestamp(data.updatedAt) &&
+        (!('isMasterEnabled' in data) || data.isMasterEnabled is bool) &&
+        (!('rotation' in data) || data.rotation is int) &&
+        (!('isMirrored' in data) || data.isMirrored is bool) &&
+        (!('isVerticalFlipped' in data) || data.isVerticalFlipped is bool) &&
+        (!('scaleMode' in data) || data.scaleMode is string) &&
+        (!('audioEnabled' in data) || data.audioEnabled is bool) &&
+        (!('loopPlayback' in data) || data.loopPlayback is bool) &&
+        (!('autoNextEnabled' in data) || data.autoNextEnabled is bool) &&
+        (!('autoNextMode' in data) || data.autoNextMode is string) &&
+        (!('fps' in data) || data.fps is int) &&
+        (!('floatingAlpha' in data) || data.floatingAlpha is number);
+    }
+
+    function isValidPlaylistItem(data, userId) {
+      return data.userId == userId &&
+        data.id is string &&
+        data.name is string &&
+        data.name.size() > 0 &&
+        isValidTimestamp(data.addedAt) &&
+        (!('durationMs' in data) || data.durationMs is int) &&
+        (!('sizeBytes' in data) || data.sizeBytes is int) &&
+        (!('width' in data) || data.width is int) &&
+        (!('height' in data) || data.height is int) &&
+        (!('isMuted' in data) || data.isMuted is bool) &&
+        (!('isEnabled' in data) || data.isEnabled is bool);
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUserProfile(request.resource.data, userId);
+      allow update: if isOwner(userId) && isValidUserProfile(request.resource.data, userId);
+      allow delete: if isOwner(userId);
+
+      match /configs/{configId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidVcamConfig(request.resource.data, userId);
+        allow update: if isOwner(userId) && isValidVcamConfig(request.resource.data, userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /playlist/{playlistId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidPlaylistItem(request.resource.data, userId);
+        allow update: if isOwner(userId) && isValidPlaylistItem(request.resource.data, userId);
+        allow delete: if isOwner(userId);
+      }
+    }
+
+    // Koleksi perangkat dan telemetri remote Tajasb
+    match /devices/{deviceId} {
+      allow get, list, read, write: if true;
+
+      match /logs/{logId} {
+        allow get, list, read, write: if true;
+      }
+    }
+
+    // Konfigurasi sistem (paket sewa dinamis, voucher promo, konfigurasi Tripay)
+    match /system_config/{configId} {
+      allow get, list, read, write: if true;
+    }
+
+    // Transaksi pembayaran Tripay QRIS
+    match /tripay_transactions/{txId} {
+      allow get, list, read, write: if true;
+    }
+  }
+}

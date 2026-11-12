@@ -55,6 +55,31 @@ object VcamDebugLogger {
     private val nextId = AtomicLong(1L)
     private val lock = Any()
     private val logQueue = ArrayDeque<LogEntry>(MAX_LOGS + 1)
+    private val recentRemoteKeys = ArrayDeque<String>(128)
+    private val ipcExecutor by lazy { java.util.concurrent.Executors.newSingleThreadExecutor() }
+
+    private val KNOWN_PROVIDER_AUTHORITIES = listOf(
+        "com.tajasb.provider",
+        "com.tajasb.pro.issber.provider",
+        "com.tajasb.pro.provider",
+        "com.aistudio.tajasb.provider",
+        "com.aistudio.cuancame.provider",
+        "com.example.provider"
+    )
+
+    private val KNOWN_RECEIVER_PACKAGES = listOf(
+        "com.tajasb.pro.tqnzya",
+        "com.tajasb.pro.tdlclp",
+        "com.tajasb.pro.issber",
+        "com.tajasb.pro",
+        "com.tajasb",
+        "com.aistudio.tajasb",
+        "com.aistudio.cuancame",
+        "com.example"
+    )
+
+    @Volatile
+    private var cachedProviderAuthority: String? = null
 
     private val _isLoggingEnabled = MutableStateFlow(true)
     val isLoggingEnabled: StateFlow<Boolean> = _isLoggingEnabled.asStateFlow()
@@ -63,6 +88,14 @@ object VcamDebugLogger {
     val logsFlow: StateFlow<List<LogEntry>> = _logsFlow.asStateFlow()
 
     private var logReceiver: BroadcastReceiver? = null
+
+    private fun isSelfTajasbProcess(context: Context?): Boolean {
+        val pkg = context?.packageName?.lowercase() ?: return false
+        return pkg.startsWith("com.tajasb") ||
+            pkg.startsWith("com.aistudio.tajasb") ||
+            pkg.startsWith("com.aistudio.cuancame") ||
+            pkg == "com.example"
+    }
 
     fun setLoggingEnabled(enabled: Boolean) {
         if (_isLoggingEnabled.value == enabled) return
@@ -81,11 +114,108 @@ object VcamDebugLogger {
     fun clearLogs(silent: Boolean = false) {
         synchronized(lock) {
             logQueue.clear()
+            recentRemoteKeys.clear()
             _logsFlow.value = emptyList()
         }
         if (!silent && _isLoggingEnabled.value) {
             log(LogLevel.INFO, "VcamDebug", "🗑️ Log dibersihkan oleh pengguna")
         }
+    }
+
+    fun appendRemoteLog(
+        level: LogLevel,
+        tag: String,
+        message: String,
+        errorDetails: String? = null,
+        pid: Int = 0,
+        timestamp: Long = System.currentTimeMillis()
+    ) {
+        if (!_isLoggingEnabled.value) return
+        if (pid != 0 && pid == Process.myPid()) return
+
+        val dedupeKey = "$pid:$timestamp:${level.name}:$tag:$message"
+        val timeStr = synchronized(timeFormat) { timeFormat.format(Date(timestamp)) }
+        val entry = LogEntry(
+            id = nextId.getAndIncrement(),
+            timestamp = timestamp,
+            timeFormatted = timeStr,
+            level = level,
+            tag = if (pid > 0) "[$pid]$tag" else tag,
+            message = message,
+            errorDetails = errorDetails,
+            processId = pid
+        )
+
+        synchronized(lock) {
+            if (recentRemoteKeys.contains(dedupeKey)) {
+                return
+            }
+            while (recentRemoteKeys.size >= 120) {
+                recentRemoteKeys.pollFirst()
+            }
+            recentRemoteKeys.offerLast(dedupeKey)
+            while (logQueue.size >= MAX_LOGS) {
+                logQueue.pollFirst()
+            }
+            logQueue.offerLast(entry)
+            _logsFlow.value = logQueue.toList()
+        }
+    }
+
+    private fun pushRemoteLogViaProviderAsync(
+        context: Context,
+        level: LogLevel,
+        tag: String,
+        message: String,
+        errStr: String?,
+        now: Long,
+        pid: Int
+    ) {
+        try {
+            val appCtx = context.applicationContext ?: context
+            ipcExecutor.execute {
+                val authorities = mutableListOf<String>()
+                cachedProviderAuthority?.let { authorities.add(it) }
+                try {
+                    val providers = appCtx.packageManager.queryContentProviders(null, 0, 0)
+                    for (p in providers) {
+                        val auth = p.authority ?: continue
+                        if ((auth.contains("tajasb") || auth.contains("cuancame")) && !authorities.contains(auth)) {
+                            authorities.add(auth)
+                        }
+                    }
+                } catch (_: Throwable) {}
+                for (a in KNOWN_PROVIDER_AUTHORITIES) {
+                    if (!authorities.contains(a)) authorities.add(a)
+                }
+
+                val extras = android.os.Bundle().apply {
+                    putString("level", level.name)
+                    putString("tag", tag)
+                    putString("msg", message)
+                    putString("message", message)
+                    putString("err", errStr)
+                    putBoolean("isError", level == LogLevel.ERROR || level == LogLevel.WARN)
+                    putLong("time", now)
+                    putInt("pid", pid)
+                }
+
+                for (auth in authorities) {
+                    try {
+                        val res = appCtx.contentResolver.call(
+                            android.net.Uri.parse("content://$auth"),
+                            "pushLog",
+                            null,
+                            extras
+                        )
+                        if (res != null && res.getBoolean("success", false)) {
+                            cachedProviderAuthority = auth
+                            break
+                        }
+                    } catch (_: Throwable) {}
+                }
+            }
+        } catch (_: Throwable) {}
     }
 
     fun log(
@@ -102,6 +232,7 @@ object VcamDebugLogger {
         val now = System.currentTimeMillis()
         val timeStr = synchronized(timeFormat) { timeFormat.format(Date(now)) }
         val errStr = throwable?.let { Log.getStackTraceString(it) }
+        val myPid = Process.myPid()
 
         // Standard Android Logcat output
         val fullMsg = if (errStr.isNullOrBlank()) message else "$message\n$errStr"
@@ -121,7 +252,7 @@ object VcamDebugLogger {
             tag = tag,
             message = message,
             errorDetails = errStr,
-            processId = Process.myPid()
+            processId = myPid
         )
 
         synchronized(lock) {
@@ -132,8 +263,11 @@ object VcamDebugLogger {
             _logsFlow.value = logQueue.toList()
         }
 
-        // If context provided or called from hooked process, broadcast for IPC
-        if (context != null) {
+        // If running inside a hooked target/cloned process, forward to Tajasb Floating Control
+        // via BOTH ContentProvider ("pushLog") AND Broadcast (explicit + implicit) so Android 14+/HyperOS
+        // or cloner sandboxes cannot drop logs!
+        if (context != null && !isSelfTajasbProcess(context)) {
+            pushRemoteLogViaProviderAsync(context, level, tag, message, errStr, now, myPid)
             try {
                 val intent = Intent(ACTION_DEBUG_LOG).apply {
                     putExtra(EXTRA_LOG_LEVEL, level.name)
@@ -141,9 +275,15 @@ object VcamDebugLogger {
                     putExtra(EXTRA_LOG_MSG, message)
                     putExtra(EXTRA_LOG_TIME, now)
                     putExtra(EXTRA_LOG_ERR, errStr)
-                    putExtra(EXTRA_LOG_PID, Process.myPid())
+                    putExtra(EXTRA_LOG_PID, myPid)
                 }
                 context.sendBroadcast(intent)
+                for (targetPkg in KNOWN_RECEIVER_PACKAGES) {
+                    try {
+                        intent.setPackage(targetPkg)
+                        context.sendBroadcast(intent)
+                    } catch (_: Throwable) {}
+                }
             } catch (_: Throwable) {}
         }
     }
@@ -168,29 +308,7 @@ object VcamDebugLogger {
                 val time = intent.getLongExtra(EXTRA_LOG_TIME, System.currentTimeMillis())
                 val err = intent.getStringExtra(EXTRA_LOG_ERR)
                 val pid = intent.getIntExtra(EXTRA_LOG_PID, 0)
-
-                // Avoid duplicating if message is from same process
-                if (pid == Process.myPid()) return
-
-                val timeStr = synchronized(timeFormat) { timeFormat.format(Date(time)) }
-                val entry = LogEntry(
-                    id = nextId.getAndIncrement(),
-                    timestamp = time,
-                    timeFormatted = timeStr,
-                    level = lvl,
-                    tag = "[$pid]$tag",
-                    message = msg,
-                    errorDetails = err,
-                    processId = pid
-                )
-
-                synchronized(lock) {
-                    while (logQueue.size >= MAX_LOGS) {
-                        logQueue.pollFirst()
-                    }
-                    logQueue.offerLast(entry)
-                    _logsFlow.value = logQueue.toList()
-                }
+                appendRemoteLog(lvl, tag, msg, err, pid, time)
             }
         }
 

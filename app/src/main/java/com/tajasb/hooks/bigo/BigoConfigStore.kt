@@ -82,6 +82,14 @@ object BigoConfigStore {
         "sg.bigo.lite"
     )
 
+    private val discoveredBigoPackages = java.util.concurrent.CopyOnWriteArraySet<String>()
+
+    fun registerDiscoveredPackage(pkg: String?) {
+        if (!pkg.isNullOrBlank()) {
+            discoveredBigoPackages.add(pkg)
+        }
+    }
+
     private const val KEY_ENABLED = "bigo_enabled"
     private const val KEY_VIDEO_PATH = "bigo_video_path"
     private const val KEY_AUDIO_PATH = "bigo_audio_path"
@@ -292,7 +300,8 @@ object BigoConfigStore {
     }
 
     fun sendCommandBroadcast(context: Context, command: String, config: BigoVcamConfig = getConfig(context)) {
-        for (pkg in BIGO_PACKAGES) {
+        val targets = (BIGO_PACKAGES + discoveredBigoPackages).distinct()
+        for (pkg in targets) {
             try {
                 val intent = Intent(ACTION_BIGO_CMD).apply {
                     setPackage(pkg)

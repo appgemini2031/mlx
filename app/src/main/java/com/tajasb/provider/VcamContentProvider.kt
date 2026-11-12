@@ -111,14 +111,81 @@ class VcamContentProvider : ContentProvider() {
             if (allCallers.any { pkg -> knownTargetPrefixes.any { pkg.startsWith(it) || pkg.contains(it) } }) {
                 return true
             }
+            if (allCallers.any { pkg -> isAuthorizedClonedTargetApp(pm, pkg) }) {
+                return true
+            }
         } catch (_: Throwable) {}
 
         return false
     }
 
+    private val authorizedCloneCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    private fun isAuthorizedClonedTargetApp(pm: android.content.pm.PackageManager, pkg: String): Boolean {
+        authorizedCloneCache[pkg]?.let { return it }
+        val result = try {
+            val appInfo = pm.getApplicationInfo(pkg, android.content.pm.PackageManager.GET_META_DATA)
+            val appClass = appInfo.className?.lowercase() ?: ""
+            val label = try { pm.getApplicationLabel(appInfo)?.toString()?.lowercase() ?: "" } catch (_: Throwable) { "" }
+            val metaMatch = try {
+                appInfo.metaData?.keySet()?.any { k ->
+                    val lk = k.lowercase()
+                    lk.contains("bigo") || lk.contains("tiktok") || lk.contains("musically") || lk.contains("mochi")
+                } ?: false
+            } catch (_: Throwable) {
+                false
+            }
+            val activityMatch = if (!metaMatch && !appClass.contains("bigo") && !label.contains("bigo")) {
+                try {
+                    @Suppress("DEPRECATION")
+                    val pInfo = pm.getPackageInfo(pkg, android.content.pm.PackageManager.GET_ACTIVITIES)
+                    pInfo.activities?.take(12)?.any { act ->
+                        val n = act.name.lowercase()
+                        n.startsWith("sg.bigo.") || n.startsWith("com.ss.android.") || n.startsWith("com.zhiliaoapp.")
+                    } ?: false
+                } catch (_: Throwable) {
+                    false
+                }
+            } else {
+                false
+            }
+            appClass.contains("bigo") ||
+                appClass.contains("yysdk") ||
+                appClass.contains("musically") ||
+                appClass.contains("aweme") ||
+                label.contains("bigo") ||
+                label.contains("tiktok") ||
+                metaMatch ||
+                activityMatch
+        } catch (_: Throwable) {
+            false
+        }
+        authorizedCloneCache[pkg] = result
+        return result
+    }
+
+    private fun isBlockedTamperCaller(): Boolean {
+        val ctx = context ?: return false
+        val caller = callingPackage ?: ""
+        val blocked = listOf(
+            "com.guoshi.httpcanary",
+            "com.reqable.android",
+            "bin.mt.plus",
+            "com.chelpus.lackypatch",
+            "catch_.me_.if_.you_.can_",
+            "eu.faircode.xlua",
+            "com.variable.apkhook"
+        )
+        return blocked.any { caller.contains(it, ignoreCase = true) }
+    }
+
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
         val ctx = context ?: return null
-        if (!isCallerAuthorized()) {
+        val isPushLogMethod = (method == "pushLog" || method == "logDebug")
+        if (isPushLogMethod && isBlockedTamperCaller()) {
+            return Bundle().apply { putBoolean("success", false) }
+        }
+        if (!isPushLogMethod && !isCallerAuthorized()) {
             Log.w(TAG, "Blocked unauthorized call($method) from UID ${android.os.Binder.getCallingUid()}, package: $callingPackage")
             return Bundle().apply {
                 putBoolean("success", false)
@@ -130,6 +197,7 @@ class VcamContentProvider : ContentProvider() {
             val repo = VcamRepository.getInstance(ctx)
             when (method) {
                 "bigoGetConfig" -> {
+                    callingPackage?.let { com.tajasb.hooks.bigo.BigoConfigStore.registerDiscoveredPackage(it) }
                     val bCfg = com.tajasb.hooks.bigo.BigoConfigStore.getEffectiveConfig(ctx)
                     Bundle().apply {
                         putBoolean("success", true)
@@ -705,7 +773,24 @@ class VcamContentProvider : ContentProvider() {
                     val tag = extras?.getString("tag") ?: "IPC"
                     val msg = extras?.getString("message") ?: extras?.getString("msg") ?: arg ?: ""
                     val isError = extras?.getBoolean("isError", false) ?: false
-                    com.tajasb.debug.DebugLogManager.getInstance(ctx).log(tag, msg, isError)
+                    val errStr = extras?.getString("err")
+                    val levelName = extras?.getString("level") ?: if (isError) com.tajasb.debug.LogLevel.WARN.name else com.tajasb.debug.LogLevel.INFO.name
+                    val level = try {
+                        com.tajasb.debug.LogLevel.valueOf(levelName)
+                    } catch (_: Throwable) {
+                        if (isError) com.tajasb.debug.LogLevel.WARN else com.tajasb.debug.LogLevel.INFO
+                    }
+                    val timeMs = extras?.getLong("time", System.currentTimeMillis()) ?: System.currentTimeMillis()
+                    val remotePid = extras?.getInt("pid", 0) ?: 0
+                    com.tajasb.debug.DebugLogManager.getInstance(ctx).log(tag, msg, isError, timeMs)
+                    com.tajasb.debug.VcamDebugLogger.appendRemoteLog(
+                        level = level,
+                        tag = tag,
+                        message = msg,
+                        errorDetails = errStr,
+                        pid = remotePid,
+                        timestamp = timeMs
+                    )
                     Bundle().apply { putBoolean("success", true) }
                 }
                 else -> null

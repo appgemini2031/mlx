@@ -39,9 +39,9 @@ object BigoMainHook {
     const val TAG = "Tajasb-BIGO"
 
     private val KNOWN_AUTHORITIES = listOf(
+        "com.tajasb.provider",
         "com.tajasb.pro.issber.provider",
         "com.tajasb.pro.provider",
-        "com.tajasb.provider",
         "com.aistudio.tajasb.provider",
         "com.aistudio.cuancame.provider",
         "com.example.provider"
@@ -86,16 +86,45 @@ object BigoMainHook {
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val fetchLock = Any()
 
+    private data class EarlyLogItem(val level: LogLevel, val msg: String, val err: Throwable?)
+    private val pendingEarlyLogs = java.util.ArrayDeque<EarlyLogItem>(40)
+
+    private fun enqueueOrFlushToFloating(level: LogLevel, msg: String, err: Throwable? = null) {
+        val ctx = appContext
+        if (ctx != null) {
+            try {
+                VcamDebugLogger.log(level, TAG, msg, err, ctx)
+            } catch (_: Throwable) {}
+            return
+        }
+        synchronized(pendingEarlyLogs) {
+            while (pendingEarlyLogs.size >= 35) {
+                pendingEarlyLogs.pollFirst()
+            }
+            pendingEarlyLogs.offerLast(EarlyLogItem(level, msg, err))
+        }
+    }
+
+    private fun flushEarlyLogs(ctx: Context) {
+        val items = synchronized(pendingEarlyLogs) {
+            if (pendingEarlyLogs.isEmpty()) return
+            val copy = pendingEarlyLogs.toList()
+            pendingEarlyLogs.clear()
+            copy
+        }
+        for (item in items) {
+            try {
+                VcamDebugLogger.log(item.level, TAG, item.msg, item.err, ctx)
+            } catch (_: Throwable) {}
+        }
+    }
+
     fun logDebug(msg: String, sendToXposed: Boolean = false) {
         try { Log.d(TAG, msg) } catch (_: Throwable) {}
         if (sendToXposed) {
             try { XposedBridge.log("[$TAG] $msg") } catch (_: Throwable) {}
         }
-        try {
-            appContext?.let { ctx ->
-                VcamDebugLogger.log(LogLevel.DEBUG, TAG, msg, null, ctx)
-            }
-        } catch (_: Throwable) {}
+        enqueueOrFlushToFloating(LogLevel.DEBUG, msg, null)
     }
 
     fun logInfo(msg: String, sendToXposed: Boolean = true) {
@@ -103,11 +132,7 @@ object BigoMainHook {
         if (sendToXposed) {
             try { XposedBridge.log("[$TAG] $msg") } catch (_: Throwable) {}
         }
-        try {
-            appContext?.let { ctx ->
-                VcamDebugLogger.log(LogLevel.INFO, TAG, msg, null, ctx)
-            }
-        } catch (_: Throwable) {}
+        enqueueOrFlushToFloating(LogLevel.INFO, msg, null)
     }
 
     fun logWarn(msg: String, err: Throwable? = null, sendToXposed: Boolean = true) {
@@ -120,16 +145,59 @@ object BigoMainHook {
                 XposedBridge.log("[$TAG][WARN] $msg$suffix")
             } catch (_: Throwable) {}
         }
-        try {
-            appContext?.let { ctx ->
-                VcamDebugLogger.log(LogLevel.WARN, TAG, msg, err, ctx)
-            }
-        } catch (_: Throwable) {}
+        enqueueOrFlushToFloating(LogLevel.WARN, msg, err)
     }
 
     fun isBigoPackage(packageName: String?): Boolean {
         if (packageName.isNullOrBlank()) return false
         return BigoConfigStore.BIGO_PACKAGES.contains(packageName)
+    }
+
+    fun isBigoTarget(lpparam: XC_LoadPackage.LoadPackageParam): Boolean {
+        val pkg = lpparam.packageName ?: return false
+        if (isBigoPackage(pkg)) return true
+        if (isKnownNonBigoPackage(pkg)) return false
+
+        val appCls = try { lpparam.appInfo?.className?.lowercase() ?: "" } catch (_: Throwable) { "" }
+        if (appCls.startsWith("sg.bigo.") || appCls.contains("bigoapplication") || appCls.startsWith("com.yy.")) {
+            return true
+        }
+
+        val cl = lpparam.classLoader ?: return false
+        val probeClasses = listOf(
+            "sg.bigo.live.MyApplication",
+            "sg.bigo.live.LiveVideoOwnerActivity",
+            "sg.bigo.libvideo_v2.VideoSystemJni",
+            "com.yysdk.mobile.videosdk.YYVideo",
+            "sg.bigo.live.abtest.BigoAbTestConfig"
+        )
+        for (clsName in probeClasses) {
+            try {
+                if (XposedHelpers.findClassIfExists(clsName, cl) != null) {
+                    return true
+                }
+            } catch (_: Throwable) {}
+        }
+        return false
+    }
+
+    private fun isKnownNonBigoPackage(pkg: String): Boolean {
+        val lower = pkg.lowercase()
+        return lower.startsWith("com.zhiliaoapp.musically") ||
+            lower.startsWith("com.ss.android.ugc.") ||
+            lower.startsWith("com.tajasb") ||
+            lower.startsWith("com.aistudio.") ||
+            lower.startsWith("com.instagram.") ||
+            lower.startsWith("com.whatsapp") ||
+            lower.startsWith("com.shopee.") ||
+            lower.startsWith("com.tokopedia.") ||
+            lower.startsWith("com.lazada.") ||
+            lower.startsWith("com.facebook.") ||
+            lower.startsWith("org.telegram.") ||
+            lower.startsWith("com.android.") ||
+            lower.startsWith("com.google.") ||
+            lower == "android" ||
+            lower == "system"
     }
 
     private fun resolveAppContext(): Context? {
@@ -139,6 +207,7 @@ object BigoMainHook {
             if (app != null) {
                 val ctx = app.applicationContext ?: app
                 appContext = ctx
+                flushEarlyLogs(ctx)
                 ctx
             } else {
                 null
@@ -152,7 +221,8 @@ object BigoMainHook {
         val packageName = lpparam.packageName ?: return
         val processName = lpparam.processName ?: packageName
         activePackageName = packageName
-        logInfo("Loaded package=$packageName process=$processName")
+        val isClone = !isBigoPackage(packageName)
+        logInfo("Loaded package=$packageName process=$processName (clone=$isClone)")
 
         if (!BigoHookRouter.isMainBigoProcess(packageName, processName)) {
             logInfo("Melewati sub-proses BIGO ($processName) untuk mencegah dual-watcher & tabrakan cache.")
@@ -163,11 +233,12 @@ object BigoMainHook {
             val resolved = ctx.applicationContext ?: ctx
             val firstTime = (appContext == null)
             appContext = resolved
-            BigoBroadcastReceiver.createAndRegister(resolved)
-            startWatcherThread(packageName)
             if (firstTime) {
                 logInfo("Context BIGO siap ($source): pkg=$packageName")
+                flushEarlyLogs(resolved)
             }
+            BigoBroadcastReceiver.createAndRegister(resolved)
+            startWatcherThread(packageName)
         }
 
         try {
@@ -333,7 +404,13 @@ object BigoMainHook {
         return null
     }
 
+    fun ensureConfigSynced() {
+        val ctx = resolveAppContext() ?: return
+        queryConfigFromProvider(ctx)?.let { liveConfig = it }
+    }
+
     fun hasVirtualVideoAvailable(pkg: String? = activePackageName): Boolean {
+        ensureConfigSynced()
         if (!liveConfig.enabled) return false
         val current = currentRenderer?.videoFile
         if (current != null && current.exists() && current.length() > 1024L) return true

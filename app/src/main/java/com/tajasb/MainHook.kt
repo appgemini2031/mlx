@@ -2946,8 +2946,8 @@ class MainHook : IXposedHookLoadPackage {
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         val packageName = lpparam.packageName ?: return
 
-        // 0. Strict Isolation Router for BIGO Live (sg.bigo.live / sg.bigo.lite)
-        if (com.tajasb.hooks.bigo.BigoMainHook.isBigoPackage(packageName)) {
+        // 0. Strict Isolation Router for BIGO Live (sg.bigo.live / sg.bigo.lite & cloned BIGO packages)
+        if (com.tajasb.hooks.bigo.BigoMainHook.isBigoTarget(lpparam)) {
             com.tajasb.hooks.bigo.BigoMainHook.handleLoadPackage(lpparam)
             return
         }

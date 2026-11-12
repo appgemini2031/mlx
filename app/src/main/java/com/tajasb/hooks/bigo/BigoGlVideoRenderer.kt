@@ -70,6 +70,12 @@ class BigoGlVideoRenderer(
     @Volatile
     private var frameAvailable: Boolean = false
 
+    @Volatile
+    private var hasFirstFrame: Boolean = false
+
+    private val forceRedrawPending = AtomicBoolean(false)
+    private var lastDrawTimeMs: Long = 0L
+
     private val released = AtomicBoolean(false)
 
     private var renderThread: HandlerThread? = null
@@ -89,6 +95,8 @@ class BigoGlVideoRenderer(
 
     private val mvpMatrix = FloatArray(16)
     private val texMatrix = FloatArray(16)
+    private val queryWidthArr = IntArray(1)
+    private val queryHeightArr = IntArray(1)
 
     private val vertexBuffer: FloatBuffer = ByteBuffer
         .allocateDirect(GlShaderProgram.VERTEX_COORDS.size * 4)
@@ -107,22 +115,42 @@ class BigoGlVideoRenderer(
     private var uMVPMatrixLoc: Int = -1
     private var uTexMatrixLoc: Int = -1
     private var sTextureLoc: Int = -1
+    private var uAntiHashIntensityLoc: Int = -1
+    private var uTimeSeedLoc: Int = -1
+    private var uColorShiftLoc: Int = -1
+    private var uSessionGammaLoc: Int = -1
+    private var uSessionContrastLoc: Int = -1
+    private var uSessionWarmthLoc: Int = -1
+    private var uSessionTintLoc: Int = -1
+    private var uDctFreqLoc: Int = -1
+    private var uLightDirLoc: Int = -1
 
     private var fallbackPlayer: MediaPlayer? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private val frameDrawRunnable = object : Runnable {
+    private val delayedDrawRunnable = Runnable {
+        if (!isRunning || released.get()) return@Runnable
+        try {
+            checkPendingSurfaceMigration()
+            drawFrame(forceRedraw = forceRedrawPending.getAndSet(false))
+        } catch (t: Throwable) {
+            Log.w(TAG, "BigoGlVideoRenderer delayedDraw error: ${t.message}")
+        }
+    }
+
+    private val keepaliveRunnable = object : Runnable {
         override fun run() {
             if (!isRunning || released.get()) return
             try {
                 checkPendingSurfaceMigration()
-                drawFrame()
+                if (hasFirstFrame && (currentConfig.isPaused || forceRedrawPending.get())) {
+                    drawFrame(forceRedraw = true)
+                    forceRedrawPending.set(false)
+                }
             } catch (t: Throwable) {
-                Log.w(TAG, "BigoGlVideoRenderer drawFrame error: ${t.message}")
+                Log.w(TAG, "BigoGlVideoRenderer keepalive error: ${t.message}")
             }
-            val fps = currentConfig.fps.coerceIn(15, 60)
-            val delayMs = (1000L / fps).coerceAtLeast(16L)
-            renderHandler?.postDelayed(this, delayMs)
+            renderHandler?.postDelayed(this, 500L)
         }
     }
 
@@ -141,7 +169,7 @@ class BigoGlVideoRenderer(
             try {
                 initGlAndMedia()
                 latch?.countDown()
-                handler.post(frameDrawRunnable)
+                handler.postDelayed(keepaliveRunnable, 500L)
             } catch (t: Throwable) {
                 BigoMainHook.logWarn("EGL init failed for Surface ($targetSurface), fallback MediaPlayer: ${t.message}")
                 releaseGlOnly()
@@ -157,6 +185,11 @@ class BigoGlVideoRenderer(
     }
 
     private fun initGlAndMedia() {
+        GlMatrix.setIdentityM(texMatrix, 0)
+        GlMatrix.setIdentityM(mvpMatrix, 0)
+        hasFirstFrame = false
+        frameAvailable = false
+
         val egl = EglSurfaceManager.initEgl(targetSurface, surfaceWidth, surfaceHeight)
         eglDisplay = egl.eglDisplay
         eglContext = egl.eglContext
@@ -173,6 +206,15 @@ class BigoGlVideoRenderer(
         uMVPMatrixLoc = GLES20.glGetUniformLocation(programId, "uMVPMatrix")
         uTexMatrixLoc = GLES20.glGetUniformLocation(programId, "uTexMatrix")
         sTextureLoc = GLES20.glGetUniformLocation(programId, "sTexture")
+        uAntiHashIntensityLoc = GLES20.glGetUniformLocation(programId, "uAntiHashIntensity")
+        uTimeSeedLoc = GLES20.glGetUniformLocation(programId, "uTimeSeed")
+        uColorShiftLoc = GLES20.glGetUniformLocation(programId, "uColorShift")
+        uSessionGammaLoc = GLES20.glGetUniformLocation(programId, "uSessionGamma")
+        uSessionContrastLoc = GLES20.glGetUniformLocation(programId, "uSessionContrast")
+        uSessionWarmthLoc = GLES20.glGetUniformLocation(programId, "uSessionWarmth")
+        uSessionTintLoc = GLES20.glGetUniformLocation(programId, "uSessionTint")
+        uDctFreqLoc = GLES20.glGetUniformLocation(programId, "uDctFreq")
+        uLightDirLoc = GLES20.glGetUniformLocation(programId, "uLightDir")
 
         val texIds = IntArray(1)
         GLES20.glGenTextures(1, texIds, 0)
@@ -209,6 +251,7 @@ class BigoGlVideoRenderer(
             if (w > 0 && h > 0) {
                 videoWidth = w
                 videoHeight = h
+                forceRedrawPending.set(true)
             }
         }
         mp.setOnPreparedListener { player ->
@@ -287,13 +330,20 @@ class BigoGlVideoRenderer(
     }
 
     override fun onFrameAvailable(surfaceTexture: SurfaceTexture?) {
+        if (!isRunning || released.get()) return
         frameAvailable = true
+        try {
+            checkPendingSurfaceMigration()
+            drawFrame(forceRedraw = forceRedrawPending.getAndSet(false))
+        } catch (t: Throwable) {
+            Log.w(TAG, "BigoGlVideoRenderer onFrameAvailable draw error: ${t.message}")
+        }
     }
 
     private fun checkPendingSurfaceMigration() {
         val nextSurf = pendingSurfaceUpdate ?: return
         pendingSurfaceUpdate = null
-        if (!nextSurf.isValid || eglDisplay == EGL14.EGL_NO_DISPLAY) return
+        if (!nextSurf.isValid || nextSurf === targetSurface || eglDisplay == EGL14.EGL_NO_DISPLAY) return
 
         try {
             EglSurfaceManager.destroySurface(eglDisplay, eglSurface)
@@ -301,34 +351,76 @@ class BigoGlVideoRenderer(
             if (newEglSurf != EGL14.EGL_NO_SURFACE) {
                 eglSurface = newEglSurf
                 targetSurface = nextSurf
-                val wArr = IntArray(1)
-                val hArr = IntArray(1)
-                EGL14.eglQuerySurface(eglDisplay, newEglSurf, EGL14.EGL_WIDTH, wArr, 0)
-                EGL14.eglQuerySurface(eglDisplay, newEglSurf, EGL14.EGL_HEIGHT, hArr, 0)
-                if (wArr[0] > 0) surfaceWidth = wArr[0]
-                if (hArr[0] > 0) surfaceHeight = hArr[0]
+                EGL14.eglQuerySurface(eglDisplay, newEglSurf, EGL14.EGL_WIDTH, queryWidthArr, 0)
+                EGL14.eglQuerySurface(eglDisplay, newEglSurf, EGL14.EGL_HEIGHT, queryHeightArr, 0)
+                if (queryWidthArr[0] > 0) surfaceWidth = queryWidthArr[0]
+                if (queryHeightArr[0] > 0) surfaceHeight = queryHeightArr[0]
+                forceRedrawPending.set(true)
                 Log.i(TAG, "Surface BIGO dimigrasikan seamless (${surfaceWidth}x${surfaceHeight})")
+            } else {
+                eglSurface = EGL14.EGL_NO_SURFACE
             }
         } catch (t: Throwable) {
             Log.w(TAG, "Gagal migrasi surface BIGO: ${t.message}")
         }
     }
 
-    private fun drawFrame() {
+    private fun drawFrame(forceRedraw: Boolean = false) {
         val st = videoSurfaceTexture ?: return
-        if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglSurface == EGL14.EGL_NO_SURFACE) return
+        if (!isRunning || released.get()) return
+        if (!targetSurface.isValid || eglDisplay == EGL14.EGL_NO_DISPLAY || eglSurface == EGL14.EGL_NO_SURFACE) return
 
-        if (frameAvailable) {
+        val hasNew = frameAvailable
+        if (!hasNew && (!forceRedraw || !hasFirstFrame)) {
+            return
+        }
+
+        val fps = currentConfig.fps.coerceIn(15, 60)
+        val minIntervalMs = if (fps >= 55) 0L else ((1000L / fps) - 6L).coerceAtLeast(0L)
+        val now = System.currentTimeMillis()
+        if (!forceRedraw && hasFirstFrame && minIntervalMs > 0L && (now - lastDrawTimeMs) < minIntervalMs) {
+            // Drain SurfaceTexture agar BufferQueue MediaCodec tidak macet, lalu pertahankan texMatrix terakhir
+            if (hasNew) {
+                frameAvailable = false
+                try {
+                    if (EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
+                        st.updateTexImage()
+                        st.getTransformMatrix(texMatrix)
+                        val strideCropV = com.tajasb.engine.BufferQueueManager.getStrideCropFactorV(surfaceWidth, surfaceHeight)
+                        if (strideCropV < 1.0f) {
+                            GlMatrix.scaleM(texMatrix, 0, 1.0f, strideCropV, 1.0f)
+                        }
+                    }
+                } catch (_: Throwable) {}
+            }
+            return
+        }
+
+        if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
+            return
+        }
+
+        if (hasNew) {
             frameAvailable = false
             try {
                 st.updateTexImage()
                 st.getTransformMatrix(texMatrix)
+                val strideCropV = com.tajasb.engine.BufferQueueManager.getStrideCropFactorV(surfaceWidth, surfaceHeight)
+                if (strideCropV < 1.0f) {
+                    GlMatrix.scaleM(texMatrix, 0, 1.0f, strideCropV, 1.0f)
+                }
+                hasFirstFrame = true
             } catch (_: Throwable) {
                 return
             }
-        } else {
-            GlMatrix.setIdentityM(texMatrix, 0)
         }
+
+        if (!hasFirstFrame) return
+
+        EGL14.eglQuerySurface(eglDisplay, eglSurface, EGL14.EGL_WIDTH, queryWidthArr, 0)
+        EGL14.eglQuerySurface(eglDisplay, eglSurface, EGL14.EGL_HEIGHT, queryHeightArr, 0)
+        if (queryWidthArr[0] > 0) surfaceWidth = queryWidthArr[0]
+        if (queryHeightArr[0] > 0) surfaceHeight = queryHeightArr[0]
 
         val cfg = currentConfig
         val scaleMode = when (cfg.scaleMode.uppercase()) {
@@ -365,14 +457,35 @@ class BigoGlVideoRenderer(
             aPositionLoc = aPositionLoc,
             aTextureCoordLoc = aTextureCoordLoc,
             vertexBuffer = vertexBuffer,
-            textureBuffer = texCoordBuffer
+            textureBuffer = texCoordBuffer,
+            antiHashIntensity = 0.0f,
+            timeSeed = 0.0f,
+            colorShift = 0.0f,
+            uAntiHashIntensityLoc = uAntiHashIntensityLoc,
+            uTimeSeedLoc = uTimeSeedLoc,
+            uColorShiftLoc = uColorShiftLoc,
+            sessionGamma = 1.0f,
+            sessionContrast = 1.0f,
+            sessionWarmth = 0.0f,
+            sessionTint = 0.0f,
+            dctFreqX = 9.4247f,
+            dctFreqY = 9.4247f,
+            lightDirX = 0.0f,
+            lightDirY = 0.0f,
+            uSessionGammaLoc = uSessionGammaLoc,
+            uSessionContrastLoc = uSessionContrastLoc,
+            uSessionWarmthLoc = uSessionWarmthLoc,
+            uSessionTintLoc = uSessionTintLoc,
+            uDctFreqLoc = uDctFreqLoc,
+            uLightDirLoc = uLightDirLoc
         )
 
         EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+        lastDrawTimeMs = now
     }
 
     fun updateTargetSurface(newSurface: Surface) {
-        if (!newSurface.isValid || targetSurface == newSurface) return
+        if (!newSurface.isValid || targetSurface === newSurface || pendingSurfaceUpdate === newSurface) return
         if (fallbackPlayer != null) {
             mainHandler.post {
                 try {
@@ -383,16 +496,23 @@ class BigoGlVideoRenderer(
             return
         }
         pendingSurfaceUpdate = newSurface
+        forceRedrawPending.set(true)
+        renderHandler?.post(delayedDrawRunnable)
     }
 
     fun setFrontFacing(front: Boolean) {
-        isFrontFacing = front
+        if (isFrontFacing != front) {
+            isFrontFacing = front
+            forceRedrawPending.set(true)
+            renderHandler?.post(delayedDrawRunnable)
+        }
     }
 
     fun applyConfig(newConfig: BigoVcamConfig) {
         val prevPaused = currentConfig.isPaused
         val prevMp3Paused = currentConfig.isMp3AudioPaused
         currentConfig = newConfig
+        forceRedrawPending.set(true)
 
         renderHandler?.post {
             try {
@@ -410,6 +530,11 @@ class BigoGlVideoRenderer(
                     } else if (!newConfig.isMp3AudioPaused && !newConfig.isPaused && prevMp3Paused && !amp.isPlaying) {
                         amp.start()
                     }
+                }
+                if (hasFirstFrame) {
+                    checkPendingSurfaceMigration()
+                    drawFrame(forceRedraw = true)
+                    forceRedrawPending.set(false)
                 }
             } catch (_: Throwable) {}
         }

@@ -404,8 +404,14 @@ object BigoMainHook {
         return null
     }
 
-    fun ensureConfigSynced() {
+    @Volatile
+    private var lastConfigSyncMs: Long = 0L
+
+    fun ensureConfigSynced(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && (now - lastConfigSyncMs) < 400L) return
         val ctx = resolveAppContext() ?: return
+        lastConfigSyncMs = now
         queryConfigFromProvider(ctx)?.let { liveConfig = it }
     }
 

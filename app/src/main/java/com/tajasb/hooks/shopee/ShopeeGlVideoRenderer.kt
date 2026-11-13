@@ -76,6 +76,7 @@ class ShopeeGlVideoRenderer(
 
     private val forceRedrawPending = AtomicBoolean(false)
     private var lastDrawTimeMs: Long = 0L
+    private var frameSeedCounter: Float = ((System.currentTimeMillis() and 0xFFL).toFloat() * 0.13f)
 
     private val released = AtomicBoolean(false)
 
@@ -444,6 +445,9 @@ class ShopeeGlVideoRenderer(
             userZoom = cfg.zoomFactor
         )
 
+        frameSeedCounter += 0.037f
+        if (frameSeedCounter > 10000.0f) frameSeedCounter = 0.0f
+
         GlShaderProgram.drawOesVideoQuad(
             surfaceWidth = surfaceWidth,
             surfaceHeight = surfaceHeight,
@@ -459,20 +463,20 @@ class ShopeeGlVideoRenderer(
             aTextureCoordLoc = aTextureCoordLoc,
             vertexBuffer = vertexBuffer,
             textureBuffer = texCoordBuffer,
-            antiHashIntensity = 0.0f,
-            timeSeed = 0.0f,
-            colorShift = 0.0f,
+            antiHashIntensity = 0.008f,
+            timeSeed = frameSeedCounter,
+            colorShift = 0.002f,
             uAntiHashIntensityLoc = uAntiHashIntensityLoc,
             uTimeSeedLoc = uTimeSeedLoc,
             uColorShiftLoc = uColorShiftLoc,
-            sessionGamma = 1.0f,
-            sessionContrast = 1.0f,
-            sessionWarmth = 0.0f,
+            sessionGamma = 1.01f,
+            sessionContrast = 1.01f,
+            sessionWarmth = 0.002f,
             sessionTint = 0.0f,
             dctFreqX = 9.4247f,
             dctFreqY = 9.4247f,
-            lightDirX = 0.0f,
-            lightDirY = 0.0f,
+            lightDirX = 0.002f,
+            lightDirY = -0.002f,
             uSessionGammaLoc = uSessionGammaLoc,
             uSessionContrastLoc = uSessionContrastLoc,
             uSessionWarmthLoc = uSessionWarmthLoc,
@@ -506,6 +510,28 @@ class ShopeeGlVideoRenderer(
             isFrontFacing = front
             forceRedrawPending.set(true)
             renderHandler?.post(delayedDrawRunnable)
+        }
+    }
+
+    fun ensurePlayingIfActive() {
+        if (!isRunning || released.get()) return
+        forceRedrawPending.set(true)
+        renderHandler?.post {
+            try {
+                if (!currentConfig.isPaused) {
+                    mediaPlayer?.let { mp ->
+                        if (!mp.isPlaying) mp.start()
+                    }
+                    extraAudioPlayer?.let { amp ->
+                        if (!currentConfig.isMp3AudioPaused && !amp.isPlaying) amp.start()
+                    }
+                }
+                if (hasFirstFrame) {
+                    checkPendingSurfaceMigration()
+                    drawFrame(forceRedraw = true)
+                    forceRedrawPending.set(false)
+                }
+            } catch (_: Throwable) {}
         }
     }
 

@@ -17,6 +17,7 @@ import android.media.ImageReader
 import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.view.Surface
 import android.view.SurfaceHolder
 import com.tajasb.hook.YuvFrameConverter
@@ -66,9 +67,20 @@ object ShopeeHookRouter {
     private val hookedPlaneClasses = ConcurrentHashMap.newKeySet<String>()
 
     private val swappedCamera2Surfaces = ConcurrentHashMap<Surface, Surface>()
+    private val dummyToRealSurface = ConcurrentHashMap<Surface, Surface>()
     private val dummyCamera2SurfaceSet: MutableSet<Surface> = Collections.newSetFromMap(ConcurrentHashMap())
     private val dummyCamera2Textures = ConcurrentHashMap<Surface, SurfaceTexture>()
+    private val dummyCamera2ImageReaders = ConcurrentHashMap<Surface, ImageReader>()
+    private val dummyImageReaderSet: MutableSet<ImageReader> = Collections.newSetFromMap(ConcurrentHashMap())
     private val isCreatingDummyOutputConfig = ThreadLocal<Boolean>()
+    private val isCreatingDummyImageReader = ThreadLocal<Boolean>()
+
+    private val halDrainThread by lazy {
+        HandlerThread("TajasbShopeeHalDrain").apply { start() }
+    }
+    private val halDrainHandler by lazy {
+        Handler(halDrainThread.looper)
+    }
 
     private val virtualPlaneBuffers: MutableMap<Any, ByteBuffer> =
         Collections.synchronizedMap(WeakHashMap())
@@ -124,7 +136,10 @@ object ShopeeHookRouter {
         "studio",
         "anchor",
         "rtc",
-        "creator"
+        "creator",
+        "sszmedia",
+        "mediasdk",
+        "mediaactivity"
     )
 
     fun isMainShopeeProcess(packageName: String?, processName: String?): Boolean {
@@ -158,8 +173,9 @@ object ShopeeHookRouter {
 
     fun onActivityResumed(activityName: String?) {
         if (activityName.isNullOrBlank()) return
+        val changed = (currentActivityName != activityName)
         currentActivityName = activityName
-        if (loggedActivities.size < 64 && loggedActivities.add(activityName)) {
+        if (changed) {
             ShopeeMainHook.logInfo("ActiveActivity=$activityName")
         }
         val cfg = ShopeeMainHook.liveConfig
@@ -168,7 +184,9 @@ object ShopeeHookRouter {
                 ShopeeMainHook.logInfo("Bypass VCam aktif untuk ActiveActivity=$activityName (kamera asli dipertahankan)")
             }
             ShopeeMainHook.stopVideoPlayback("Activity bypass ($activityName)", force = true)
+            return
         }
+        ShopeeMainHook.onActivityResumedRecovery(activityName)
     }
 
     private fun isCurrentlyBypassed(): Boolean {
@@ -217,25 +235,72 @@ object ShopeeHookRouter {
         return dummyCamera2SurfaceSet.contains(surface)
     }
 
+    fun resolveRealSurface(surface: Surface?): Surface? {
+        if (surface == null) return null
+        return dummyToRealSurface[surface]
+    }
+
     private fun getOrCreateDummyCamera2Surface(realSurface: Surface): Surface {
         swappedCamera2Surfaces[realSurface]?.let { existing ->
             if (existing.isValid) return existing
         }
+
+        // Gunakan ImageReader PRIV + listener drain agar HAL Camera2 tidak pernah stall (BufferQueue penuh)
+        // sehingga CaptureCallback.onCaptureCompleted tetap berjalan mulus 30fps.
+        val dummyFromReader = try {
+            isCreatingDummyImageReader.set(true)
+            val reader = ImageReader.newInstance(640, 480, ImageFormat.PRIVATE, 3)
+            reader.setOnImageAvailableListener({ r ->
+                try {
+                    r.acquireLatestImage()?.close()
+                } catch (_: Throwable) {}
+            }, halDrainHandler)
+            val surf = reader.surface
+            if (surf != null && surf.isValid) {
+                dummyImageReaderSet.add(reader)
+                dummyCamera2ImageReaders[surf] = reader
+                surf
+            } else {
+                try { reader.close() } catch (_: Throwable) {}
+                null
+            }
+        } catch (_: Throwable) {
+            null
+        } finally {
+            isCreatingDummyImageReader.set(false)
+        }
+
+        if (dummyFromReader != null) {
+            swappedCamera2Surfaces[realSurface] = dummyFromReader
+            dummyToRealSurface[dummyFromReader] = realSurface
+            dummyCamera2SurfaceSet.add(dummyFromReader)
+            return dummyFromReader
+        }
+
         val st = SurfaceTexture(0).apply {
             setDefaultBufferSize(1080, 1920)
+            setOnFrameAvailableListener({ tex ->
+                try { tex.releaseTexImage() } catch (_: Throwable) {}
+            }, halDrainHandler)
         }
         val dummy = Surface(st)
         swappedCamera2Surfaces[realSurface] = dummy
+        dummyToRealSurface[dummy] = realSurface
         dummyCamera2SurfaceSet.add(dummy)
         dummyCamera2Textures[dummy] = st
         return dummy
     }
 
-    private fun releaseAllDummyCamera2Surfaces() {
+    fun releaseAllDummyCamera2Surfaces() {
         val dummies = dummyCamera2SurfaceSet.toList()
         swappedCamera2Surfaces.clear()
+        dummyToRealSurface.clear()
         dummyCamera2SurfaceSet.clear()
         for (d in dummies) {
+            dummyCamera2ImageReaders.remove(d)?.let { reader ->
+                dummyImageReaderSet.remove(reader)
+                try { reader.close() } catch (_: Throwable) {}
+            }
             try { d.release() } catch (_: Throwable) {}
             try { dummyCamera2Textures.remove(d)?.release() } catch (_: Throwable) {}
         }
@@ -275,10 +340,16 @@ object ShopeeHookRouter {
         return fallbackImageReader
     }
 
-    private fun notifyCameraSwitched(cameraId: String) {
-        currentActiveCameraId = cameraId
-        isFrontFacing = (cameraId == "1")
-        ShopeeMainHook.logInfo("Kamera Shopee aktif: ID=$cameraId (Front=$isFrontFacing, Activity=${currentActivityName ?: "-"})")
+    fun sanitizeCameraId(rawId: String?): String {
+        val trimmed = rawId?.trim()
+        return if (trimmed.isNullOrEmpty()) "0" else trimmed
+    }
+
+    private fun notifyCameraSwitched(cameraId: String?) {
+        val normalized = sanitizeCameraId(cameraId)
+        currentActiveCameraId = normalized
+        isFrontFacing = (normalized == "1")
+        ShopeeMainHook.logInfo("Kamera Shopee aktif: ID=$normalized (Front=$isFrontFacing, Activity=${currentActivityName ?: "-"})")
         ShopeeMainHook.onFrontFacingChanged(isFrontFacing)
     }
 
@@ -634,6 +705,7 @@ object ShopeeHookRouter {
                 Int::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        if (isCreatingDummyImageReader.get() == true) return
                         val w = param.args[0] as? Int ?: 0
                         val h = param.args[1] as? Int ?: 0
                         val fmt = param.args[2] as? Int ?: 0
@@ -659,6 +731,8 @@ object ShopeeHookRouter {
                         methodName,
                         object : XC_MethodHook() {
                             override fun afterHookedMethod(param: MethodHookParam) {
+                                val readerObj = param.thisObject as? ImageReader
+                                if (readerObj != null && dummyImageReaderSet.contains(readerObj)) return
                                 val image = param.result as? Image ?: return
                                 if (image.format != ImageFormat.YUV_420_888) return
                                 ShopeeMainHook.ensureConfigSynced()
@@ -1046,9 +1120,6 @@ object ShopeeHookRouter {
                         object : XC_MethodHook() {
                             override fun afterHookedMethod(param: MethodHookParam) {
                                 registerCameraClosed(param.thisObject)
-                                if (!isAnyCameraActive()) {
-                                    releaseAllDummyCamera2Surfaces()
-                                }
                                 ShopeeMainHook.scheduleSessionCloseCheck("CameraDevice.close", packageName)
                             }
                         }
@@ -1159,15 +1230,24 @@ object ShopeeHookRouter {
             val targets = XposedHelpers.callMethod(request, "getTargets") as? Collection<*>
             if (!targets.isNullOrEmpty()) {
                 for (t in targets) {
-                    if (t is Surface && t.isValid && !isDummySurface(t)) {
-                        auditSurface(t, "CaptureSession.$source")
+                    if (t is Surface) {
+                        if (isDummySurface(t)) {
+                            resolveRealSurface(t)?.takeIf { it.isValid && !isImageReaderSurface(it) }?.let { real ->
+                                ShopeeMainHook.playVideoOnSurface(real, packageName)
+                                found = true
+                            }
+                        } else if (t.isValid) {
+                            auditSurface(t, "CaptureSession.$source")
+                        }
                     }
                 }
-                pickPreferredSurface(targets)?.let { preferred ->
-                    if (!isImageReaderSurface(preferred)) {
-                        ShopeeMainHook.playVideoOnSurface(preferred, packageName)
+                if (!found) {
+                    pickPreferredSurface(targets)?.let { preferred ->
+                        if (!isImageReaderSurface(preferred)) {
+                            ShopeeMainHook.playVideoOnSurface(preferred, packageName)
+                        }
+                        found = true
                     }
-                    found = true
                 }
             }
         } catch (_: Throwable) {}
@@ -1184,15 +1264,24 @@ object ShopeeHookRouter {
                         else -> emptyList<Any?>()
                     }
                     for (t in items) {
-                        if (t is Surface && t.isValid && !isDummySurface(t)) {
-                            auditSurface(t, "CaptureSession.$source(mSurfaces)")
+                        if (t is Surface) {
+                            if (isDummySurface(t)) {
+                                resolveRealSurface(t)?.takeIf { it.isValid && !isImageReaderSurface(it) }?.let { real ->
+                                    ShopeeMainHook.playVideoOnSurface(real, packageName)
+                                    found = true
+                                }
+                            } else if (t.isValid) {
+                                auditSurface(t, "CaptureSession.$source(mSurfaces)")
+                            }
                         }
                     }
-                    pickPreferredSurface(items)?.let { preferred ->
-                        if (!isImageReaderSurface(preferred)) {
-                            ShopeeMainHook.playVideoOnSurface(preferred, packageName)
+                    if (!found) {
+                        pickPreferredSurface(items)?.let { preferred ->
+                            if (!isImageReaderSurface(preferred)) {
+                                ShopeeMainHook.playVideoOnSurface(preferred, packageName)
+                            }
+                            found = true
                         }
-                        found = true
                     }
                 }
             } catch (_: Throwable) {}

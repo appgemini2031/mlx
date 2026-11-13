@@ -64,6 +64,9 @@ object ShopeeMainHook {
     private var activeSurface: Surface? = null
 
     @Volatile
+    private var lastValidSurface: Surface? = null
+
+    @Volatile
     private var lastTexture: SurfaceTexture? = null
 
     @Volatile
@@ -335,6 +338,7 @@ object ShopeeMainHook {
             )
         } catch (_: Throwable) {}
 
+        ShopeeStealthGuard.install(lpparam.classLoader)
         ShopeeAuto3AEngine.hookCaptureResult(lpparam.classLoader)
         ShopeeSensorCharacteristicsEngine.hookCharacteristics(lpparam.classLoader) {
             ShopeeHookRouter.currentActiveCameraId
@@ -349,11 +353,13 @@ object ShopeeMainHook {
         cachedAuthority?.let { list.add(it) }
         if (ctx != null) {
             try {
-                val providers = ctx.packageManager.queryContentProviders(null, 0, 0)
-                for (p in providers) {
-                    val auth = p.authority ?: continue
-                    if ((auth.contains("tajasb") || auth.contains("cuancame")) && !list.contains(auth)) {
-                        list.add(auth)
+                ShopeeStealthGuard.runInternal {
+                    val providers = ctx.packageManager.queryContentProviders(null, 0, 0)
+                    for (p in providers) {
+                        val auth = p.authority ?: continue
+                        if ((auth.contains("tajasb") || auth.contains("cuancame")) && !list.contains(auth)) {
+                            list.add(auth)
+                        }
                     }
                 }
             } catch (_: Throwable) {}
@@ -607,7 +613,26 @@ object ShopeeMainHook {
     }
 
     fun onFallbackActiveSurfaceRequested(packageName: String) {
-        activeSurface?.takeIf { it.isValid }?.let { playVideoOnSurface(it, packageName) }
+        val candidate = activeSurface?.takeIf { it.isValid }
+            ?: lastValidSurface?.takeIf { it.isValid }
+            ?: lastTexture?.let { Surface(it) }?.takeIf { it.isValid }
+        candidate?.let { playVideoOnSurface(it, packageName) }
+    }
+
+    fun onActivityResumedRecovery(activityName: String) {
+        val existing = currentRenderer
+        if (existing != null && existing.isRunning) {
+            existing.ensurePlayingIfActive()
+            return
+        }
+        if (ShopeeHookRouter.isLiveOrVideoActivity(activityName)) {
+            val candidate = activeSurface?.takeIf { it.isValid }
+                ?: lastValidSurface?.takeIf { it.isValid }
+            if (candidate != null) {
+                logInfo("Memulihkan VCam Shopee saat kembali ke $activityName")
+                playVideoOnSurface(candidate, activePackageName)
+            }
+        }
     }
 
     fun onFrontFacingChanged(isFront: Boolean) {
@@ -629,6 +654,8 @@ object ShopeeMainHook {
         if (ShopeeHookRouter.shouldBypassForActivity(ShopeeHookRouter.currentActivityName, liveConfig)) {
             return
         }
+
+        lastValidSurface = surface
 
         val existing = currentRenderer
         if (existing != null && existing.isRunning) {
@@ -695,6 +722,9 @@ object ShopeeMainHook {
         } catch (_: Throwable) {}
         currentRenderer = null
         activeSurface = null
+        if (!ShopeeHookRouter.isAnyCameraActive()) {
+            ShopeeHookRouter.releaseAllDummyCamera2Surfaces()
+        }
         logInfo("Playback Shopee dihentikan (alasan=$reason, force=$force)")
     }
 }

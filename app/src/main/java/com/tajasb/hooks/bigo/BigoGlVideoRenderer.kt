@@ -234,7 +234,7 @@ class BigoGlVideoRenderer(
         prepareVideoPlayer(videoFile, inputSurf)
         audioFile?.let { prepareExtraAudioPlayer(it) }
 
-        Log.i(TAG, "BigoGlVideoRenderer aktif (${surfaceWidth}x${surfaceHeight}), file=${videoFile.name}")
+        BigoMainHook.logInfo("BigoGlVideoRenderer v2 aktif (${surfaceWidth}x${surfaceHeight}), file=${videoFile.name}")
     }
 
     private fun prepareVideoPlayer(file: File, outputSurface: Surface) {
@@ -356,7 +356,7 @@ class BigoGlVideoRenderer(
                 if (queryWidthArr[0] > 0) surfaceWidth = queryWidthArr[0]
                 if (queryHeightArr[0] > 0) surfaceHeight = queryHeightArr[0]
                 forceRedrawPending.set(true)
-                Log.i(TAG, "Surface BIGO dimigrasikan seamless (${surfaceWidth}x${surfaceHeight})")
+                BigoMainHook.logInfo("Surface BIGO dimigrasikan seamless (${surfaceWidth}x${surfaceHeight})")
             } else {
                 eglSurface = EGL14.EGL_NO_SURFACE
             }

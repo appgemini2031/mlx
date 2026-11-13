@@ -21,6 +21,7 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import com.tajasb.hook.YuvFrameConverter
 import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -160,8 +161,8 @@ object BigoHookRouter {
             desc.contains("SurfaceTexture", ignoreCase = true) -> "SurfaceTexture"
             else -> "NativeSurface"
         }
-        val key = "$sourceMethod:$kind"
-        if (loggedSurfaceTypes.add(key)) {
+        val key = "$sourceMethod:$kind:${System.identityHashCode(surface)}"
+        if (loggedSurfaceTypes.size < 64 && loggedSurfaceTypes.add(key)) {
             BigoMainHook.logInfo("Audit Surface [$sourceMethod] -> $kind ($desc)")
         }
     }
@@ -768,35 +769,21 @@ object BigoHookRouter {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 try {
                     val outputConfigClass = XposedHelpers.findClass("android.hardware.camera2.params.OutputConfiguration", classLoader)
-                    XposedHelpers.findAndHookConstructor(
+                    XposedBridge.hookAllConstructors(
                         outputConfigClass,
-                        Surface::class.java,
                         object : XC_MethodHook() {
                             override fun beforeHookedMethod(param: MethodHookParam) {
                                 if (isCreatingDummyOutputConfig.get() == true) return
-                                val surf = param.args[0] as? Surface ?: return
-                                if (!surf.isValid || isDummySurface(surf) || isImageReaderSurface(surf)) return
-                                auditSurface(surf, "OutputConfiguration(Surface)")
-                                if (BigoMainHook.hasVirtualVideoAvailable(packageName)) {
-                                    BigoMainHook.playVideoOnSurface(surf, packageName)
-                                    param.args[0] = getOrCreateDummyCamera2Surface(surf)
-                                }
-                            }
-                        }
-                    )
-                    XposedHelpers.findAndHookConstructor(
-                        outputConfigClass,
-                        Int::class.javaPrimitiveType,
-                        Surface::class.java,
-                        object : XC_MethodHook() {
-                            override fun beforeHookedMethod(param: MethodHookParam) {
-                                if (isCreatingDummyOutputConfig.get() == true) return
-                                val surf = param.args[1] as? Surface ?: return
-                                if (!surf.isValid || isDummySurface(surf) || isImageReaderSurface(surf)) return
-                                auditSurface(surf, "OutputConfiguration(group, Surface)")
-                                if (BigoMainHook.hasVirtualVideoAvailable(packageName)) {
-                                    BigoMainHook.playVideoOnSurface(surf, packageName)
-                                    param.args[1] = getOrCreateDummyCamera2Surface(surf)
+                                val args = param.args ?: return
+                                for (i in args.indices) {
+                                    val arg = args[i]
+                                    if (arg is Surface && arg.isValid && !isDummySurface(arg) && !isImageReaderSurface(arg)) {
+                                        auditSurface(arg, "OutputConfiguration.ctor")
+                                        if (BigoMainHook.hasVirtualVideoAvailable(packageName)) {
+                                            BigoMainHook.playVideoOnSurface(arg, packageName)
+                                            args[i] = getOrCreateDummyCamera2Surface(arg)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -863,14 +850,47 @@ object BigoHookRouter {
                                         registerCameraOpened(param.thisObject)
                                         val sessionConfig = param.args[0] as? SessionConfiguration ?: return
                                         val canSwap = BigoMainHook.hasVirtualVideoAvailable(packageName)
-                                        val allSurfaces = sessionConfig.outputConfigurations.mapNotNull { it.surface }
-                                        for (surf in allSurfaces) {
-                                            if (surf.isValid && !isDummySurface(surf)) {
+                                        val origOutputs = sessionConfig.outputConfigurations
+                                        val newOutputs = ArrayList<OutputConfiguration>(origOutputs.size)
+                                        var didSwap = false
+                                        for (oc in origOutputs) {
+                                            val surf = oc.surface
+                                            if (surf != null && surf.isValid && !isDummySurface(surf)) {
                                                 auditSurface(surf, "CameraDevice.$methodName(SessionConfig)")
                                                 if (!isImageReaderSurface(surf) && canSwap) {
                                                     BigoMainHook.playVideoOnSurface(surf, packageName)
+                                                    val dummy = getOrCreateDummyCamera2Surface(surf)
+                                                    val newOc = try {
+                                                        isCreatingDummyOutputConfig.set(true)
+                                                        OutputConfiguration(dummy)
+                                                    } catch (_: Throwable) {
+                                                        oc
+                                                    } finally {
+                                                        isCreatingDummyOutputConfig.set(false)
+                                                    }
+                                                    newOutputs.add(newOc)
+                                                    if (newOc !== oc) didSwap = true
+                                                    continue
                                                 }
                                             }
+                                            newOutputs.add(oc)
+                                        }
+                                        if (didSwap) {
+                                            try {
+                                                val rebuilt = SessionConfiguration(
+                                                    sessionConfig.sessionType,
+                                                    newOutputs,
+                                                    sessionConfig.executor,
+                                                    sessionConfig.stateCallback
+                                                ).apply {
+                                                    sessionConfig.inputConfiguration?.let { inputConfiguration = it }
+                                                    sessionConfig.sessionParameters?.let { sessionParameters = it }
+                                                }
+                                                param.args[0] = rebuilt
+                                                if (loggedSurfaceTypes.add("camera2_dummy_swap_session_cfg")) {
+                                                    BigoMainHook.logInfo("Camera2 $methodName(SessionConfig) Surface dialihkan ke dummy")
+                                                }
+                                            } catch (_: Throwable) {}
                                         }
                                     }
                                 }

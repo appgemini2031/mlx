@@ -87,6 +87,7 @@ class VcamContentProvider : ContentProvider() {
                 "com.ss.android.ugc.trill",
                 "com.ss.android.ugc.aweme",
                 "com.shopee.",
+                "vhgh.wzia.dppd.apts.ohqa.qbgo",
                 "com.tokopedia.",
                 "com.lazada.",
                 "sg.bigo.",
@@ -107,8 +108,18 @@ class VcamContentProvider : ContentProvider() {
                 "io.va.",
                 "top.niunaijun."
             )
+            val customShopeePkgs = try {
+                val sc = com.tajasb.hooks.shopee.ShopeeConfigStore.getConfig(ctx)
+                com.tajasb.hooks.shopee.ShopeeConfigStore.parseCustomClonedPackages(sc.customClonedPackages)
+            } catch (_: Throwable) {
+                emptySet()
+            }
             val allCallers = (listOf(callerPkg) + uidPackages).filter { it.isNotBlank() }
-            if (allCallers.any { pkg -> knownTargetPrefixes.any { pkg.startsWith(it) || pkg.contains(it) } }) {
+            if (allCallers.any { pkg ->
+                    customShopeePkgs.contains(pkg) ||
+                        knownTargetPrefixes.any { pkg.startsWith(it) || pkg.contains(it) }
+                }
+            ) {
                 return true
             }
             if (allCallers.any { pkg -> isAuthorizedClonedTargetApp(pm, pkg) }) {
@@ -130,18 +141,24 @@ class VcamContentProvider : ContentProvider() {
             val metaMatch = try {
                 appInfo.metaData?.keySet()?.any { k ->
                     val lk = k.lowercase()
-                    lk.contains("bigo") || lk.contains("tiktok") || lk.contains("musically") || lk.contains("mochi")
+                    val vStr = try { appInfo.metaData?.get(k)?.toString()?.lowercase() ?: "" } catch (_: Throwable) { "" }
+                    lk.contains("bigo") || lk.contains("tiktok") || lk.contains("musically") ||
+                        lk.contains("shopee") || lk.contains("mochi") || vStr.contains("shopee")
                 } ?: false
             } catch (_: Throwable) {
                 false
             }
-            val activityMatch = if (!metaMatch && !appClass.contains("bigo") && !label.contains("bigo")) {
+            val activityMatch = if (!metaMatch && !appClass.contains("bigo") && !label.contains("bigo") &&
+                !appClass.contains("shopee") && !label.contains("shopee")
+            ) {
                 try {
                     @Suppress("DEPRECATION")
                     val pInfo = pm.getPackageInfo(pkg, android.content.pm.PackageManager.GET_ACTIVITIES)
-                    pInfo.activities?.take(12)?.any { act ->
+                    pInfo.activities?.take(16)?.any { act ->
                         val n = act.name.lowercase()
-                        n.startsWith("sg.bigo.") || n.startsWith("com.ss.android.") || n.startsWith("com.zhiliaoapp.")
+                        n.startsWith("sg.bigo.") || n.startsWith("com.ss.android.") ||
+                            n.startsWith("com.zhiliaoapp.") || n.startsWith("com.shopee.") ||
+                            n.startsWith("com.garena.")
                     } ?: false
                 } catch (_: Throwable) {
                     false
@@ -153,8 +170,10 @@ class VcamContentProvider : ContentProvider() {
                 appClass.contains("yysdk") ||
                 appClass.contains("musically") ||
                 appClass.contains("aweme") ||
+                appClass.contains("shopee") ||
                 label.contains("bigo") ||
                 label.contains("tiktok") ||
+                label.contains("shopee") ||
                 metaMatch ||
                 activityMatch
         } catch (_: Throwable) {
@@ -235,6 +254,56 @@ class VcamContentProvider : ContentProvider() {
                         fps = extras?.getInt("fps", cur.fps) ?: cur.fps
                     )
                     val saved = com.tajasb.hooks.bigo.BigoConfigStore.saveConfig(ctx, updated, broadcastUpdate = true)
+                    Bundle().apply {
+                        putBoolean("success", true)
+                        putLong("version", saved.version)
+                    }
+                }
+                "shopeeGetConfig" -> {
+                    callingPackage?.let { com.tajasb.hooks.shopee.ShopeeConfigStore.registerDiscoveredPackage(it) }
+                    val sCfg = com.tajasb.hooks.shopee.ShopeeConfigStore.getEffectiveConfig(ctx)
+                    Bundle().apply {
+                        putBoolean("success", true)
+                        putBoolean("enabled", sCfg.enabled)
+                        putString("videoPath", sCfg.videoPath)
+                        putString("audioPath", sCfg.audioPath)
+                        putInt("rotation", sCfg.rotation)
+                        putBoolean("isMirrored", sCfg.isMirrored)
+                        putBoolean("isVerticalFlipped", sCfg.isVerticalFlipped)
+                        putFloat("zoomFactor", sCfg.zoomFactor)
+                        putString("scaleMode", sCfg.scaleMode)
+                        putBoolean("isPaused", sCfg.isPaused)
+                        putBoolean("isMuted", sCfg.isMuted)
+                        putBoolean("isVideoAudioMuted", sCfg.isVideoAudioMuted)
+                        putBoolean("isMp3AudioPaused", sCfg.isMp3AudioPaused)
+                        putInt("fps", sCfg.fps)
+                        putBoolean("bypassScannerAndKyc", sCfg.bypassScannerAndKyc)
+                        putBoolean("onlyInLiveOrVideoActivity", sCfg.onlyInLiveOrVideoActivity)
+                        putString("customClonedPackages", sCfg.customClonedPackages)
+                        putLong("version", sCfg.version)
+                    }
+                }
+                "shopeeSaveConfig" -> {
+                    val cur = com.tajasb.hooks.shopee.ShopeeConfigStore.getConfig(ctx)
+                    val updated = cur.copy(
+                        enabled = extras?.getBoolean("enabled", cur.enabled) ?: cur.enabled,
+                        videoPath = extras?.getString("videoPath") ?: cur.videoPath,
+                        audioPath = extras?.getString("audioPath") ?: cur.audioPath,
+                        rotation = extras?.getInt("rotation", cur.rotation) ?: cur.rotation,
+                        isMirrored = extras?.getBoolean("isMirrored", cur.isMirrored) ?: cur.isMirrored,
+                        isVerticalFlipped = extras?.getBoolean("isVerticalFlipped", cur.isVerticalFlipped) ?: cur.isVerticalFlipped,
+                        zoomFactor = extras?.getFloat("zoomFactor", cur.zoomFactor) ?: cur.zoomFactor,
+                        scaleMode = extras?.getString("scaleMode") ?: cur.scaleMode,
+                        isPaused = extras?.getBoolean("isPaused", cur.isPaused) ?: cur.isPaused,
+                        isMuted = extras?.getBoolean("isMuted", cur.isMuted) ?: cur.isMuted,
+                        isVideoAudioMuted = extras?.getBoolean("isVideoAudioMuted", cur.isVideoAudioMuted) ?: cur.isVideoAudioMuted,
+                        isMp3AudioPaused = extras?.getBoolean("isMp3AudioPaused", cur.isMp3AudioPaused) ?: cur.isMp3AudioPaused,
+                        fps = extras?.getInt("fps", cur.fps) ?: cur.fps,
+                        bypassScannerAndKyc = extras?.getBoolean("bypassScannerAndKyc", cur.bypassScannerAndKyc) ?: cur.bypassScannerAndKyc,
+                        onlyInLiveOrVideoActivity = extras?.getBoolean("onlyInLiveOrVideoActivity", cur.onlyInLiveOrVideoActivity) ?: cur.onlyInLiveOrVideoActivity,
+                        customClonedPackages = extras?.getString("customClonedPackages") ?: cur.customClonedPackages
+                    )
+                    val saved = com.tajasb.hooks.shopee.ShopeeConfigStore.saveConfig(ctx, updated, broadcastUpdate = true)
                     Bundle().apply {
                         putBoolean("success", true)
                         putLong("version", saved.version)
@@ -873,11 +942,28 @@ class VcamContentProvider : ContentProvider() {
         }
     }
 
+    private fun getShopeeTargetFile(ctx: android.content.Context, subSegments: List<String>): File? {
+        if (subSegments.size != 1) return null
+        val sub = subSegments[0].trim()
+        if (sub.contains("..") || sub.contains("/") || sub.contains("\\") || sub.contains("%2e") || sub.contains("%2f")) {
+            return null
+        }
+        return when (sub) {
+            "config", "config.json" -> com.tajasb.hooks.shopee.ShopeeConfigStore.getOrCreateConfigJsonFile(ctx)
+            "virtual.mp4", "current_video.mp4" -> com.tajasb.hooks.shopee.ShopeeConfigStore.resolveShopeeVideoFile(ctx)
+            "audio.mp3", "audio.wav" -> com.tajasb.hooks.shopee.ShopeeConfigStore.resolveShopeeAudioFile(ctx)
+            else -> null
+        }
+    }
+
     private fun getTargetFile(uri: Uri): File? {
         val ctx = context ?: return null
         val segments = uri.pathSegments ?: emptyList()
         if (segments.firstOrNull() == "bigo") {
             return getBigoTargetFile(ctx, segments.drop(1))
+        }
+        if (segments.firstOrNull() == "shopee") {
+            return getShopeeTargetFile(ctx, segments.drop(1))
         }
 
         val rawSegment = uri.lastPathSegment ?: "virtual.mp4"

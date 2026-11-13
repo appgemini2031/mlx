@@ -190,6 +190,7 @@ object BigoMainHook {
             lower.startsWith("com.instagram.") ||
             lower.startsWith("com.whatsapp") ||
             lower.startsWith("com.shopee.") ||
+            lower == "vhgh.wzia.dppd.apts.ohqa.qbgo" ||
             lower.startsWith("com.tokopedia.") ||
             lower.startsWith("com.lazada.") ||
             lower.startsWith("com.facebook.") ||

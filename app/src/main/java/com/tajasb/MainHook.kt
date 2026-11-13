@@ -2952,6 +2952,12 @@ class MainHook : IXposedHookLoadPackage {
             return
         }
 
+        // 0b. Strict Isolation Router for Shopee Live & Video (com.shopee.* & cloned Shopee packages)
+        if (com.tajasb.hooks.shopee.ShopeeMainHook.isShopeeTarget(lpparam)) {
+            com.tajasb.hooks.shopee.ShopeeMainHook.handleLoadPackage(lpparam)
+            return
+        }
+
         // 1. Self-Package Detection: Hook VcamRepository so Tajasb UI reports Active
         if (packageName == "com.tajasb.pro.issber" ||
             packageName == "com.tajasb.pro" ||

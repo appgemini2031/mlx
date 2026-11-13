@@ -8,12 +8,34 @@ data class QuranImam(
     val displayName: String,
     val styleBadge: String,
     val primaryServerBaseUrl: String,
-    val fallbackServerBaseUrl: String
+    val fallbackServerBaseUrl: String,
+    val everyAyahFolder: String = "Alafasy_128kbps",
+    val fallbackEveryAyahFolder: String = "Alafasy_64kbps"
 ) {
+    val name: String get() = displayName
+    val style: String get() = styleBadge
+
     fun buildSurahAudioUrl(surahNumber: Int, useFallback: Boolean = false): String {
         val code3 = String.format(Locale.US, "%03d", surahNumber.coerceIn(1, 114))
         val base = (if (useFallback) fallbackServerBaseUrl else primaryServerBaseUrl).trimEnd('/')
         return "$base/$code3.mp3"
+    }
+
+    /**
+     * Menghasilkan URL audio MP3 Per-Ayat (SSSAAA.mp3, contoh: 001001.mp3, 002255.mp3)
+     * agar bacaan Imam sinkron tepat per-ayat dengan highlight huruf emas dan gulir 3-Zona Aman.
+     */
+    fun buildPerAyahAudioUrl(surahNumber: Int, ayahNumber: Int, useFallback: Boolean = false): String {
+        val sCode = String.format(Locale.US, "%03d", surahNumber.coerceIn(1, 114))
+        val aCode = String.format(Locale.US, "%03d", ayahNumber.coerceIn(1, 286))
+        val folder = (if (useFallback) fallbackEveryAyahFolder else everyAyahFolder).trim('/')
+        return "https://everyayah.com/data/$folder/${sCode}${aCode}.mp3"
+    }
+
+    fun buildPerAyahCacheFileName(surahNumber: Int, ayahNumber: Int): String {
+        val sCode = String.format(Locale.US, "%03d", surahNumber.coerceIn(1, 114))
+        val aCode = String.format(Locale.US, "%03d", ayahNumber.coerceIn(1, 286))
+        return "${id}_${sCode}${aCode}.mp3"
     }
 }
 
@@ -131,7 +153,9 @@ object QuranCatalog {
             displayName = "Mishary Rashid Alafasy",
             styleBadge = "Murattal Merdu",
             primaryServerBaseUrl = "https://server8.mp3quran.net/afs",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/mishaari_raashid_al_3afaasee"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/mishaari_raashid_al_3afaasee",
+            everyAyahFolder = "Alafasy_128kbps",
+            fallbackEveryAyahFolder = "Alafasy_64kbps"
         ),
         QuranImam(
             index = 2,
@@ -139,7 +163,9 @@ object QuranCatalog {
             displayName = "Abdurrahman As-Sudais",
             styleBadge = "Imam Masjidil Haram",
             primaryServerBaseUrl = "https://server11.mp3quran.net/sds",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/abdurrahmaan_as-sudays"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/abdurrahmaan_as-sudays",
+            everyAyahFolder = "Abdurrahmaan_As-Sudais_192kbps",
+            fallbackEveryAyahFolder = "Abdurrahmaan_As-Sudais_64kbps"
         ),
         QuranImam(
             index = 3,
@@ -147,7 +173,9 @@ object QuranCatalog {
             displayName = "Maher Al-Muaiqly",
             styleBadge = "Imam Masjidil Haram",
             primaryServerBaseUrl = "https://server12.mp3quran.net/maher",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/maher_256"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/maher_256",
+            everyAyahFolder = "MaherAlMuaiqly128kbps",
+            fallbackEveryAyahFolder = "Maher_AlMuaiqly_64kbps"
         ),
         QuranImam(
             index = 4,
@@ -155,7 +183,9 @@ object QuranCatalog {
             displayName = "Saud Ash-Shuraim",
             styleBadge = "Imam Masjidil Haram",
             primaryServerBaseUrl = "https://server7.mp3quran.net/shur",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/sa3ood_ash-shuraym"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/sa3ood_ash-shuraym",
+            everyAyahFolder = "Saood_ash-Shuraym_128kbps",
+            fallbackEveryAyahFolder = "Saood_ash-Shuraym_64kbps"
         ),
         QuranImam(
             index = 5,
@@ -163,7 +193,9 @@ object QuranCatalog {
             displayName = "Saad Al-Ghamdi",
             styleBadge = "Tartil Syahdu",
             primaryServerBaseUrl = "https://server7.mp3quran.net/s_gmd",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/sa3d_al-ghaamidi/complete"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/sa3d_al-ghaamidi/complete",
+            everyAyahFolder = "Ghamadi_40kbps",
+            fallbackEveryAyahFolder = "Alafasy_128kbps"
         ),
         QuranImam(
             index = 6,
@@ -171,7 +203,9 @@ object QuranCatalog {
             displayName = "Abdul Basit Abdus Samad (Murattal)",
             styleBadge = "Legendaris Mesir",
             primaryServerBaseUrl = "https://server7.mp3quran.net/basit",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/abdul_basit_murattal"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/abdul_basit_murattal",
+            everyAyahFolder = "Abdul_Basit_Murattal_192kbps",
+            fallbackEveryAyahFolder = "Abdul_Basit_Murattal_64kbps"
         ),
         QuranImam(
             index = 7,
@@ -179,7 +213,9 @@ object QuranCatalog {
             displayName = "Yasser Ad-Dossari",
             styleBadge = "Imam Masjidil Haram",
             primaryServerBaseUrl = "https://server11.mp3quran.net/yasser",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/yasser_ad-dussary"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/yasser_ad-dussary",
+            everyAyahFolder = "Yasser_Ad-Dussary_128kbps",
+            fallbackEveryAyahFolder = "Alafasy_128kbps"
         ),
         QuranImam(
             index = 8,
@@ -187,7 +223,9 @@ object QuranCatalog {
             displayName = "Nasser Al-Qatami",
             styleBadge = "Khusyuk & Menyentuh",
             primaryServerBaseUrl = "https://server6.mp3quran.net/qtm",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/nasser_bin_ali_alqatami"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/nasser_bin_ali_alqatami",
+            everyAyahFolder = "Nasser_Alqatami_128kbps",
+            fallbackEveryAyahFolder = "Alafasy_128kbps"
         ),
         QuranImam(
             index = 9,
@@ -195,7 +233,9 @@ object QuranCatalog {
             displayName = "Hani Ar-Rifai",
             styleBadge = "Tartil Lembut",
             primaryServerBaseUrl = "https://server8.mp3quran.net/hani",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/hani_ar-rifai"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/hani_ar-rifai",
+            everyAyahFolder = "Hani_Rifai_192kbps",
+            fallbackEveryAyahFolder = "Hani_Rifai_64kbps"
         ),
         QuranImam(
             index = 10,
@@ -203,7 +243,9 @@ object QuranCatalog {
             displayName = "Mahmoud Khalil Al-Hussary",
             styleBadge = "Tajwid Klasik",
             primaryServerBaseUrl = "https://server13.mp3quran.net/husr",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/mahmood_khaleel_al-husaree"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/mahmood_khaleel_al-husaree",
+            everyAyahFolder = "Husary_128kbps",
+            fallbackEveryAyahFolder = "Husary_64kbps"
         ),
         QuranImam(
             index = 11,
@@ -211,7 +253,9 @@ object QuranCatalog {
             displayName = "Mohamed Siddiq Al-Minshawi",
             styleBadge = "Murattal Klasik",
             primaryServerBaseUrl = "https://server10.mp3quran.net/minsh",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/muhammad_siddeeq_al-minshaawee"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/muhammad_siddeeq_al-minshaawee",
+            everyAyahFolder = "Minshawy_Murattal_128kbps",
+            fallbackEveryAyahFolder = "Alafasy_128kbps"
         ),
         QuranImam(
             index = 12,
@@ -219,7 +263,9 @@ object QuranCatalog {
             displayName = "Abu Bakr Ash-Shatri",
             styleBadge = "Suara Jernih",
             primaryServerBaseUrl = "https://server11.mp3quran.net/shatri",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/abu_bakr_ash-shaatree"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/abu_bakr_ash-shaatree",
+            everyAyahFolder = "Abu_Bakr_Ash-Shaatree_128kbps",
+            fallbackEveryAyahFolder = "Abu_Bakr_Ash-Shaatree_64kbps"
         ),
         QuranImam(
             index = 13,
@@ -227,7 +273,9 @@ object QuranCatalog {
             displayName = "Ahmad Al-Ajmi",
             styleBadge = "Lantunan Kuat",
             primaryServerBaseUrl = "https://server10.mp3quran.net/ajm",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/ahmed_ibn_3ali_al-3ajamy"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/ahmed_ibn_3ali_al-3ajamy",
+            everyAyahFolder = "ahmed_ibn_ali_al_ajamy_128kbps",
+            fallbackEveryAyahFolder = "Ahmed_ibn_Ali_al-Ajamy_64kbps_QuranExplorer.Com"
         ),
         QuranImam(
             index = 14,
@@ -235,7 +283,9 @@ object QuranCatalog {
             displayName = "Syaikh Ali Jaber",
             styleBadge = "Imam Masjidil Haram",
             primaryServerBaseUrl = "https://server11.mp3quran.net/a_jbr",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/ali_jaber"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/ali_jaber",
+            everyAyahFolder = "Ali_Jaber_64kbps",
+            fallbackEveryAyahFolder = "Alafasy_128kbps"
         ),
         QuranImam(
             index = 15,
@@ -243,7 +293,9 @@ object QuranCatalog {
             displayName = "Bandar Baleelah",
             styleBadge = "Imam Masjidil Haram",
             primaryServerBaseUrl = "https://server6.mp3quran.net/balilah",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/bandar_baleela"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/bandar_baleela",
+            everyAyahFolder = "Abdurrahmaan_As-Sudais_192kbps",
+            fallbackEveryAyahFolder = "Alafasy_128kbps"
         ),
         QuranImam(
             index = 16,
@@ -251,7 +303,9 @@ object QuranCatalog {
             displayName = "Abdullah Awad Al-Juhany",
             styleBadge = "Imam Masjidil Haram",
             primaryServerBaseUrl = "https://server11.mp3quran.net/jhn",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/abdullaah_3awwaad_al-juhaynee"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/abdullaah_3awwaad_al-juhaynee",
+            everyAyahFolder = "Abdullaah_3awwaad_Al-Juhaynee_128kbps",
+            fallbackEveryAyahFolder = "Alafasy_128kbps"
         ),
         QuranImam(
             index = 17,
@@ -259,7 +313,9 @@ object QuranCatalog {
             displayName = "Raad Muhammad Al-Kurdi",
             styleBadge = "Irama Tenang",
             primaryServerBaseUrl = "https://server6.mp3quran.net/kurdi",
-            fallbackServerBaseUrl = "https://server6.mp3quran.net/kurdi"
+            fallbackServerBaseUrl = "https://server6.mp3quran.net/kurdi",
+            everyAyahFolder = "Nasser_Alqatami_128kbps",
+            fallbackEveryAyahFolder = "Alafasy_128kbps"
         ),
         QuranImam(
             index = 18,
@@ -267,7 +323,9 @@ object QuranCatalog {
             displayName = "Idris Abkar",
             styleBadge = "Maqam Syahdu",
             primaryServerBaseUrl = "https://server6.mp3quran.net/abkr",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/idrees_abkar"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/idrees_abkar",
+            everyAyahFolder = "Yasser_Ad-Dussary_128kbps",
+            fallbackEveryAyahFolder = "Alafasy_128kbps"
         ),
         QuranImam(
             index = 19,
@@ -275,7 +333,9 @@ object QuranCatalog {
             displayName = "Fares Abbad",
             styleBadge = "Tartil Jernih",
             primaryServerBaseUrl = "https://server8.mp3quran.net/frs_a",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/fares"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/fares",
+            everyAyahFolder = "Fares_Abbad_64kbps",
+            fallbackEveryAyahFolder = "Alafasy_128kbps"
         ),
         QuranImam(
             index = 20,
@@ -283,7 +343,9 @@ object QuranCatalog {
             displayName = "Salah Al-Budair",
             styleBadge = "Imam Masjid Nabawi",
             primaryServerBaseUrl = "https://server6.mp3quran.net/s_bud",
-            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/salaah_bukhaatir"
+            fallbackServerBaseUrl = "https://download.quranicaudio.com/quran/salaah_bukhaatir",
+            everyAyahFolder = "Salah_Al_Budair_128kbps",
+            fallbackEveryAyahFolder = "Alafasy_128kbps"
         )
     )
 
@@ -407,6 +469,8 @@ object QuranCatalog {
     fun findImamById(id: String): QuranImam {
         return IMAMS.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: IMAMS.first()
     }
+
+    fun getImamById(id: String): QuranImam = findImamById(id)
 
     fun findSurahByNumber(number: Int): QuranSurah? {
         return SURAHS.getOrNull(number - 1)

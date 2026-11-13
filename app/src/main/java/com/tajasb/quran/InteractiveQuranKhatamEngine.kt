@@ -61,17 +61,21 @@ data class QuranKhatamState(
     val remainingStatsPosXpct: Float = 0.50f,
     val remainingStatsPosYpct: Float = 0.12f,
     val remainingStatsScale: Float = 1.0f,
-    val remainingStatsFontSizeSp: Float = 14.0f
+    val remainingStatsFontSizeSp: Float = 14.0f,
+    // Mode Per-Ayat 3-Zona Aman (Atas Redup N-1, Tengah Fokus Aman N, Bawah Antre N+1) & Auto-Play Suara Imam
+    val perAyahThreeZoneMode: Boolean = true,
+    val imamAutoPlayEnabled: Boolean = false,
+    val selectedImamId: String = "alafasy",
+    val scrollTransitionPhase: Float = 0f
 )
 
 /**
  * InteractiveQuranKhatamEngine:
  * Mesin utama Khatam Al-Qur'an 30 Juz Interaktif yang dioptimalkan dengan:
+ * - Mode Per-Ayat 3-Zona Aman (Atas Ayat N-1 redup, Tengah Ayat N fokus emas, Bawah Ayat N+1 antre)
+ * - Auto-Play Suara Imam Per-Ayat (SSSAAA.mp3) + Transisi Gulir Naik Halus (Cubic Ease-In-Out)
  * - Pre-indexed Non-Space Grapheme Clusters (O(1) substring slicing, bebas buang Like di spasi/waqaf)
- * - Carry-Over Limpahan Huruf lintas ayat saat menerima Like borongan atau Chat panjang
- * - Coalesced Overlay Broadcast (throttle 150ms saat banjir event, 0ms instan saat idle/UI klik)
- * - Lazy SharedPreferences Persistence (bebas bottleneck disk I/O di setiap ketukan Like)
- * - State Posisi & Transformasi Mandiri (tidak bertabrakan dengan Banner Doa)
+ * - Integrasi Kontribusi Penonton Termux (Doa, Saweran Gift, Tap Like, Leaderboard 4 Kategori)
  */
 class InteractiveQuranKhatamEngine private constructor(private val context: Context) {
 
@@ -79,7 +83,22 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
         private const val TAG = "QuranKhatamEngine"
         private const val PREFS_NAME = "quran_khatam_storage_v1"
         private const val BROADCAST_THROTTLE_MS = 150L
+        private const val FAST_ANIM_THROTTLE_MS = 28L
         private const val PERSIST_DEBOUNCE_MS = 2500L
+
+        /**
+         * Menghitung kurva ease-in-out kubik (0.0f..1.0f) agar pergerakan ayat naik dari Zona Bawah
+         * ke Zona Aman Tengah dan Zona Atas mengalir mulus tanpa patah-patah.
+         */
+        fun computeSmoothScrollEasing(t: Float): Float {
+            val clamped = t.coerceIn(0f, 1f)
+            return if (clamped < 0.5f) {
+                4f * clamped * clamped * clamped
+            } else {
+                val f = -2f * clamped + 2f
+                1f - (f * f * f) / 2f
+            }
+        }
 
         @Volatile
         private var instance: InteractiveQuranKhatamEngine? = null
@@ -150,6 +169,7 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val perAyahAudioPlayer = QuranPerAyahAudioPlayer(context)
 
     private val _state: MutableStateFlow<QuranKhatamState>
     val state: StateFlow<QuranKhatamState>
@@ -166,8 +186,11 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
     private var pendingLikeAccumulator: Int = 0
     @Volatile
     private var retainedArabicText: String = ""
+    @Volatile
+    private var hasCompletedAnyAyahInSession: Boolean = false
     private var pendingBroadcastJob: Job? = null
     private var pendingPersistJob: Job? = null
+    private var transitionAnimJob: Job? = null
 
     init {
         _state = MutableStateFlow(QuranKhatamState())
@@ -310,6 +333,9 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
         val remStatsPosY = prefs.getFloat("rem_stats_pos_y", 0.12f)
         val remStatsScale = prefs.getFloat("rem_stats_scale", 1.0f)
         val remStatsFontSize = prefs.getFloat("rem_stats_font_size", 14.0f)
+        val perAyahThreeZone = prefs.getBoolean("per_ayah_three_zone_mode", true)
+        val imamAutoPlay = prefs.getBoolean("imam_auto_play_enabled", false)
+        val selectedImamId = prefs.getString("selected_imam_id", "alafasy") ?: "alafasy"
 
         val verse = QuranTextCatalog.getVerse(surah, ayah)
         indexVerseGraphemes(verse.arabicText)
@@ -353,13 +379,20 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
             remainingStatsPosXpct = remStatsPosX,
             remainingStatsPosYpct = remStatsPosY,
             remainingStatsScale = remStatsScale,
-            remainingStatsFontSizeSp = remStatsFontSize
+            remainingStatsFontSizeSp = remStatsFontSize,
+            perAyahThreeZoneMode = perAyahThreeZone,
+            imamAutoPlayEnabled = imamAutoPlay,
+            selectedImamId = selectedImamId,
+            scrollTransitionPhase = 0f
         )
 
         if (enabled) {
             scope.launch {
                 delay(60L)
                 scheduleBroadcastToOverlay(immediate = true)
+                if (imamAutoPlay) {
+                    syncImamAutoPlayForCurrentAyah()
+                }
             }
         }
     }
@@ -402,6 +435,9 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
             putFloat("rem_stats_pos_y", s.remainingStatsPosYpct)
             putFloat("rem_stats_scale", s.remainingStatsScale)
             putFloat("rem_stats_font_size", s.remainingStatsFontSizeSp)
+            putBoolean("per_ayah_three_zone_mode", s.perAyahThreeZoneMode)
+            putBoolean("imam_auto_play_enabled", s.imamAutoPlayEnabled)
+            putString("selected_imam_id", s.selectedImamId)
             apply()
         }
     }
@@ -421,7 +457,7 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
     @Synchronized
     fun setEnabled(enabled: Boolean) {
         if (_state.value.isEnabled == enabled) return
-        _state.value = _state.value.copy(isEnabled = enabled)
+        _state.value = _state.value.copy(isEnabled = enabled, scrollTransitionPhase = 0f)
         schedulePersistState(immediate = true)
         if (enabled) {
             // Matikan sementara Tarik Tambang, Raja Singgasana, BeyBattle, & TrooperRoyale agar tidak bertabrakan di layar
@@ -430,7 +466,13 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
             com.tajasb.game.InteractiveBeyBattleEngine.peekInstance()?.setEnabled(false)
             com.tajasb.game.InteractiveTrooperRoyaleEngine.peekInstance()?.setEnabled(false)
             scheduleBroadcastToOverlay(immediate = true)
+            if (_state.value.imamAutoPlayEnabled) {
+                syncImamAutoPlayForCurrentAyah()
+            }
         } else {
+            transitionAnimJob?.cancel()
+            transitionAnimJob = null
+            perAyahAudioPlayer.stopPlayback()
             hideFromOverlay()
         }
     }
@@ -440,6 +482,185 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
         val next = !_state.value.isEnabled
         setEnabled(next)
         return next
+    }
+
+    // =========================================================================
+    // KONTROL MODE PER-AYAT 3-ZONA AMAN & AUTO-PLAY SUARA IMAM
+    // =========================================================================
+    @Synchronized
+    fun setPerAyahThreeZoneMode(enabled: Boolean) {
+        if (_state.value.perAyahThreeZoneMode == enabled) return
+        transitionAnimJob?.cancel()
+        transitionAnimJob = null
+        _state.value = _state.value.copy(
+            perAyahThreeZoneMode = enabled,
+            scrollTransitionPhase = 0f
+        )
+        schedulePersistState(immediate = true)
+        scheduleBroadcastToOverlay(immediate = true)
+    }
+
+    @Synchronized
+    fun togglePerAyahThreeZoneMode(): Boolean {
+        val next = !_state.value.perAyahThreeZoneMode
+        setPerAyahThreeZoneMode(next)
+        return next
+    }
+
+    @Synchronized
+    fun setImamAutoPlayEnabled(enabled: Boolean) {
+        if (_state.value.imamAutoPlayEnabled == enabled) return
+        val nextThreeZone = if (enabled) true else _state.value.perAyahThreeZoneMode
+        _state.value = _state.value.copy(
+            imamAutoPlayEnabled = enabled,
+            perAyahThreeZoneMode = nextThreeZone
+        )
+        schedulePersistState(immediate = true)
+        if (enabled && _state.value.isEnabled) {
+            syncImamAutoPlayForCurrentAyah()
+        } else {
+            perAyahAudioPlayer.stopPlayback()
+        }
+        scheduleBroadcastToOverlay(immediate = true)
+    }
+
+    @Synchronized
+    fun toggleImamAutoPlay(): Boolean {
+        val next = !_state.value.imamAutoPlayEnabled
+        setImamAutoPlayEnabled(next)
+        return next
+    }
+
+    @Synchronized
+    fun selectImamForPerAyah(imamId: String) {
+        val imam = QuranCatalog.findImamById(imamId)
+        if (_state.value.selectedImamId == imam.id) return
+        _state.value = _state.value.copy(selectedImamId = imam.id)
+        schedulePersistState(immediate = true)
+        if (_state.value.isEnabled && _state.value.imamAutoPlayEnabled) {
+            syncImamAutoPlayForCurrentAyah()
+        }
+        scheduleBroadcastToOverlay(immediate = true)
+    }
+
+    @Synchronized
+    fun cycleImamForPerAyah(): QuranImam {
+        val curId = _state.value.selectedImamId
+        val idx = QuranCatalog.IMAMS.indexOfFirst { it.id.equals(curId, ignoreCase = true) }
+        val nextIdx = if (idx >= 0) (idx + 1) % QuranCatalog.IMAMS.size else 0
+        val nextImam = QuranCatalog.IMAMS[nextIdx]
+        selectImamForPerAyah(nextImam.id)
+        return nextImam
+    }
+
+    private fun syncImamAutoPlayForCurrentAyah() {
+        val s = _state.value
+        if (!s.isEnabled || !s.imamAutoPlayEnabled) {
+            perAyahAudioPlayer.stopPlayback()
+            return
+        }
+        val imam = QuranCatalog.findImamById(s.selectedImamId)
+        val totalChars = currentGraphemes.size.coerceAtLeast(1)
+        val initialRatio = (s.revealedCharCount.toFloat() / totalChars.toFloat()).coerceIn(0f, 0.90f)
+        perAyahAudioPlayer.playAyah(
+            imam = imam,
+            surahNumber = s.currentSurahNumber,
+            ayahNumber = s.currentAyahNumber,
+            arabicText = s.currentVerse.arabicText,
+            graphemeCount = totalChars,
+            initialRatio = initialRatio,
+            onProgressRatio = { ratio ->
+                onImamAudioProgressRatio(ratio)
+            },
+            onAyahCompleted = {
+                onImamAudioAyahCompleted()
+            }
+        )
+    }
+
+    @Synchronized
+    private fun onImamAudioProgressRatio(ratio: Float) {
+        val s = _state.value
+        if (!s.isEnabled || !s.imamAutoPlayEnabled) return
+        val totalChars = currentGraphemes.size.coerceAtLeast(1)
+        val targetRevealed = (ratio.coerceIn(0f, 1f) * totalChars).toInt().coerceIn(0, totalChars)
+        if (targetRevealed <= s.revealedCharCount) return
+
+        val delta = targetRevealed - s.revealedCharCount
+        val (revealedText, unrevealedText) = sliceRevealedAndUnrevealed(targetRevealed)
+        _state.value = s.copy(
+            revealedCharCount = targetRevealed,
+            revealedArabicText = revealedText,
+            unrevealedArabicText = unrevealedText,
+            totalLettersWrittenSession = s.totalLettersWrittenSession + delta.toLong()
+        )
+        schedulePersistState(immediate = false)
+        scheduleBroadcastToOverlay(immediate = false, fastAnim = true)
+    }
+
+    @Synchronized
+    private fun onImamAudioAyahCompleted() {
+        val s = _state.value
+        if (!s.isEnabled || !s.imamAutoPlayEnabled) return
+        val totalChars = currentGraphemes.size.coerceAtLeast(1)
+        val remaining = (totalChars - s.revealedCharCount).coerceAtLeast(0)
+        val newTotalWritten = s.totalLettersWrittenSession + remaining.toLong()
+        val newTotalAyahs = s.totalAyahsCompletedSession + 1
+        val imam = QuranCatalog.findImamById(s.selectedImamId)
+
+        val contributor = if (s.lastContributorName.isNotBlank() && s.lastContributorName != "Menunggu Penonton") {
+            s.lastContributorName
+        } else {
+            "🎙️ ${imam.displayName}"
+        }
+        val desc = if (s.lastActionDescription.isNotBlank() && !s.lastActionDescription.startsWith("Tap Like")) {
+            s.lastActionDescription
+        } else {
+            "Tilawah Ayat ${s.currentSurahNumber}:${s.currentAyahNumber} Selesai ✨"
+        }
+
+        lastAyahCompletedAtMs = System.currentTimeMillis()
+        advanceToNextAyahInternal(
+            contributorName = contributor,
+            actionDesc = desc,
+            totalWritten = newTotalWritten,
+            totalAyahs = newTotalAyahs,
+            isFlash = false,
+            initialCarryOverLetters = 0,
+            animateThreeZoneScroll = true
+        )
+    }
+
+    /**
+     * Memulai animasi gulir naik 3-Zona Aman yang halus (scrollTransitionPhase: 1.0f -> 0.0f)
+     * selama ~450ms (13 frame @ ~30 FPS) menggunakan kurva Cubic Ease-In-Out.
+     * Pada saat scrollTransitionPhase = 1.0f, ayat yang baru selesai (Ayat N-1) masih berada tepat di
+     * Zona Aman Tengah dan ayat baru (Ayat N) berada di Zona Bawah, lalu keduanya mengalir naik ke atas.
+     */
+    private fun startSmoothUpwardRollAnimation() {
+        transitionAnimJob?.cancel()
+        if (!_state.value.isEnabled || !_state.value.perAyahThreeZoneMode) {
+            if (_state.value.scrollTransitionPhase != 0f) {
+                _state.value = _state.value.copy(scrollTransitionPhase = 0f)
+            }
+            return
+        }
+        transitionAnimJob = scope.launch {
+            val totalSteps = 13
+            for (step in 1..totalSteps) {
+                delay(32L)
+                val progress = step.toFloat() / totalSteps.toFloat()
+                val eased = computeSmoothScrollEasing(progress)
+                val remainingPhase = (1f - eased).coerceIn(0f, 1f)
+                synchronized(this@InteractiveQuranKhatamEngine) {
+                    if (!_state.value.isEnabled || !_state.value.perAyahThreeZoneMode) return@launch
+                    _state.value = _state.value.copy(
+                        scrollTransitionPhase = if (step == totalSteps) 0f else remainingPhase
+                    )
+                    scheduleBroadcastToOverlay(immediate = (step == totalSteps), fastAnim = true)
+                }
+            }
+        }
     }
 
     /**
@@ -452,6 +673,24 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
         if (!_state.value.isEnabled || lettersToAdd <= 0) return
 
         val s = _state.value
+        val actualName = contributorName.trim().ifBlank { "Penonton" }
+
+        // Jika mode Auto-Play Suara Imam aktif, bacaan & perpindahan ayat dipimpin oleh durasi suara Imam
+        // sedangkan setiap event penonton dari Termux tetap tercatat penuh pada statistik, leaderboard, dan dock kontributor!
+        if (s.imamAutoPlayEnabled) {
+            val newTotalWritten = s.totalLettersWrittenSession + lettersToAdd.toLong()
+            QuranKhatamLeaderboardTracker.getInstance(context).recordLetters(actualName, lettersToAdd)
+            com.tajasb.eventrelay.LiveEventReceiver.getInstance(context).scheduleRefreshTopLikers()
+            _state.value = s.copy(
+                lastContributorName = contributorName,
+                lastActionDescription = actionDesc,
+                totalLettersWrittenSession = newTotalWritten
+            )
+            schedulePersistState(immediate = false)
+            scheduleBroadcastToOverlay(immediate = true)
+            return
+        }
+
         val totalChars = currentGraphemes.size.coerceAtLeast(1)
         val remainingInCurrent = (totalChars - s.revealedCharCount).coerceAtLeast(0)
 
@@ -462,7 +701,6 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
             val newTotalWritten = s.totalLettersWrittenSession + actualAdded.toLong()
             val newTotalAyahs = s.totalAyahsCompletedSession + 1
 
-            val actualName = contributorName.trim().ifBlank { "Penonton" }
             val tracker = QuranKhatamLeaderboardTracker.getInstance(context)
             tracker.recordLetters(actualName, actualAdded)
             tracker.recordAyahCompleted(actualName)
@@ -473,14 +711,14 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
                 totalWritten = newTotalWritten,
                 totalAyahs = newTotalAyahs,
                 isFlash = false,
-                initialCarryOverLetters = 0
+                initialCarryOverLetters = 0,
+                animateThreeZoneScroll = s.perAyahThreeZoneMode
             )
         } else {
             val newRevealed = (s.revealedCharCount + lettersToAdd).coerceIn(0, totalChars)
             val (revealedText, unrevealedText) = sliceRevealedAndUnrevealed(newRevealed)
             val newTotalWritten = s.totalLettersWrittenSession + lettersToAdd.toLong()
 
-            val actualName = contributorName.trim().ifBlank { "Penonton" }
             QuranKhatamLeaderboardTracker.getInstance(context).recordLetters(actualName, lettersToAdd)
             com.tajasb.eventrelay.LiveEventReceiver.getInstance(context).scheduleRefreshTopLikers()
 
@@ -505,7 +743,23 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
         }
         val s = _state.value
         val remaining = (currentGraphemes.size - s.revealedCharCount).coerceAtLeast(1)
-        advanceLetters(remaining, contributorName, actionDesc)
+        if (s.imamAutoPlayEnabled) {
+            val actualName = contributorName.trim().ifBlank { "Penonton" }
+            val tracker = QuranKhatamLeaderboardTracker.getInstance(context)
+            tracker.recordLetters(actualName, remaining)
+            tracker.recordAyahCompleted(actualName)
+            advanceToNextAyahInternal(
+                contributorName = contributorName,
+                actionDesc = "$actionDesc (Ayat Selesai ✨)",
+                totalWritten = s.totalLettersWrittenSession + remaining.toLong(),
+                totalAyahs = s.totalAyahsCompletedSession + 1,
+                isFlash = false,
+                initialCarryOverLetters = 0,
+                animateThreeZoneScroll = s.perAyahThreeZoneMode
+            )
+        } else {
+            advanceLetters(remaining, contributorName, actionDesc)
+        }
     }
 
     private fun advanceToNextAyahInternal(
@@ -514,7 +768,8 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
         totalWritten: Long,
         totalAyahs: Int,
         isFlash: Boolean,
-        initialCarryOverLetters: Int = 0
+        initialCarryOverLetters: Int = 0,
+        animateThreeZoneScroll: Boolean = _state.value.perAyahThreeZoneMode
     ) {
         val s = _state.value
         val (nextSurah, nextAyah) = QuranTextCatalog.getNextCuratedCoord(
@@ -522,8 +777,13 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
             s.currentAyahNumber
         )
 
+        hasCompletedAnyAyahInSession = true
         // Simpan ayat yang baru saja tuntas agar transisi mengalir mulus tanpa fliker/kedip
-        retainedArabicText = s.currentVerse.arabicText + " ﴿" + QuranTextCatalog.toArabicDigits(s.currentAyahNumber) + "﴾ "
+        retainedArabicText = if (s.perAyahThreeZoneMode) {
+            ""
+        } else {
+            s.currentVerse.arabicText + " ﴿" + QuranTextCatalog.toArabicDigits(s.currentAyahNumber) + "﴾ "
+        }
 
         val nextVerse = QuranTextCatalog.getVerse(nextSurah, nextAyah)
         indexVerseGraphemes(nextVerse.arabicText)
@@ -542,6 +802,7 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
         }
         com.tajasb.eventrelay.LiveEventReceiver.getInstance(context).scheduleRefreshTopLikers()
 
+        val initialScrollPhase = if (animateThreeZoneScroll && s.perAyahThreeZoneMode) 1.0f else 0f
         _state.value = s.copy(
             currentSurahNumber = nextVerse.surahNumber,
             currentAyahNumber = nextVerse.ayahNumber,
@@ -554,10 +815,17 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
             lastActionDescription = actionDesc,
             totalLettersWrittenSession = totalWritten,
             totalAyahsCompletedSession = totalAyahs,
-            isAyahCompletedFlash = false
+            isAyahCompletedFlash = false,
+            scrollTransitionPhase = initialScrollPhase
         )
         schedulePersistState(immediate = true)
-        scheduleBroadcastToOverlay(immediate = true)
+        scheduleBroadcastToOverlay(immediate = true, fastAnim = initialScrollPhase > 0f)
+        if (initialScrollPhase > 0f) {
+            startSmoothUpwardRollAnimation()
+        }
+        if (s.isEnabled && s.imamAutoPlayEnabled) {
+            syncImamAutoPlayForCurrentAyah()
+        }
     }
 
     @Synchronized
@@ -569,13 +837,16 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
             totalWritten = _state.value.totalLettersWrittenSession,
             totalAyahs = _state.value.totalAyahsCompletedSession,
             isFlash = false,
-            initialCarryOverLetters = 0
+            initialCarryOverLetters = 0,
+            animateThreeZoneScroll = _state.value.perAyahThreeZoneMode
         )
     }
 
     @Synchronized
     fun prevAyah() {
         retainedArabicText = ""
+        transitionAnimJob?.cancel()
+        transitionAnimJob = null
         val s = _state.value
         val (prevSurah, prevAyah) = QuranTextCatalog.getPrevCuratedCoord(
             s.currentSurahNumber,
@@ -596,15 +867,21 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
             unrevealedArabicText = unrevealedText,
             lastContributorName = "Host Siaran",
             lastActionDescription = "Kembali ke Ayat Sebelumnya",
-            isAyahCompletedFlash = false
+            isAyahCompletedFlash = false,
+            scrollTransitionPhase = 0f
         )
         schedulePersistState(immediate = true)
         scheduleBroadcastToOverlay(immediate = true)
+        if (s.isEnabled && s.imamAutoPlayEnabled) {
+            syncImamAutoPlayForCurrentAyah()
+        }
     }
 
     @Synchronized
     fun jumpToSurah(surahNumber: Int, ayahNumber: Int = 1) {
         retainedArabicText = ""
+        transitionAnimJob?.cancel()
+        transitionAnimJob = null
         val validSurah = surahNumber.coerceIn(1, 114)
         val sInfo = QuranTextCatalog.getSurahInfo(validSurah)
         val validAyah = ayahNumber.coerceIn(1, sInfo.ayahCount)
@@ -624,10 +901,14 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
             unrevealedArabicText = unrevealedText,
             lastContributorName = "Host Siaran",
             lastActionDescription = "Memilih QS. ${verse.surahNameLatin} [${verse.surahNumber}:${verse.ayahNumber}] (Juz ${verse.juzNumber})",
-            isAyahCompletedFlash = false
+            isAyahCompletedFlash = false,
+            scrollTransitionPhase = 0f
         )
         schedulePersistState(immediate = true)
         scheduleBroadcastToOverlay(immediate = true)
+        if (_state.value.isEnabled && _state.value.imamAutoPlayEnabled) {
+            syncImamAutoPlayForCurrentAyah()
+        }
     }
 
     @Synchronized
@@ -838,6 +1119,8 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
      */
     @Synchronized
     fun resetCurrentAyah() {
+        transitionAnimJob?.cancel()
+        transitionAnimJob = null
         val s = _state.value
         val (revealedText, unrevealedText) = sliceRevealedAndUnrevealed(0)
         _state.value = s.copy(
@@ -846,18 +1129,24 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
             unrevealedArabicText = unrevealedText,
             lastContributorName = "Host Siaran",
             lastActionDescription = "Ulang Ayat Aktif",
-            isAyahCompletedFlash = false
+            isAyahCompletedFlash = false,
+            scrollTransitionPhase = 0f
         )
         schedulePersistState(immediate = true)
         scheduleBroadcastToOverlay(immediate = true)
+        if (s.isEnabled && s.imamAutoPlayEnabled) {
+            syncImamAutoPlayForCurrentAyah()
+        }
     }
 
     @Synchronized
     fun resetProgress() {
+        hasCompletedAnyAyahInSession = false
         jumpToSurah(1, 1)
         _state.value = _state.value.copy(
             totalLettersWrittenSession = 0L,
-            totalAyahsCompletedSession = 0
+            totalAyahsCompletedSession = 0,
+            scrollTransitionPhase = 0f
         )
         schedulePersistState(immediate = true)
         scheduleBroadcastToOverlay(immediate = true)
@@ -1306,18 +1595,19 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
     // =========================================================================
     // COALESCED OVERLAY SYNCHRONIZATION (ANTI-SPAM BROADCAST)
     // =========================================================================
-    private fun scheduleBroadcastToOverlay(immediate: Boolean = false) {
+    private fun scheduleBroadcastToOverlay(immediate: Boolean = false, fastAnim: Boolean = false) {
         if (!_state.value.isEnabled) return
         val now = System.currentTimeMillis()
         val elapsed = now - lastBroadcastTimeMs
+        val throttleMs = if (fastAnim) FAST_ANIM_THROTTLE_MS else BROADCAST_THROTTLE_MS
 
-        if (immediate || elapsed >= BROADCAST_THROTTLE_MS) {
+        if (immediate || elapsed >= throttleMs) {
             pendingBroadcastJob?.cancel()
             pendingBroadcastJob = null
             lastBroadcastTimeMs = now
             broadcastToOverlayNow()
         } else if (pendingBroadcastJob?.isActive != true) {
-            val waitMs = (BROADCAST_THROTTLE_MS - elapsed).coerceIn(16L, BROADCAST_THROTTLE_MS)
+            val waitMs = (throttleMs - elapsed).coerceIn(16L, throttleMs)
             pendingBroadcastJob = scope.launch {
                 delay(waitMs)
                 lastBroadcastTimeMs = System.currentTimeMillis()
@@ -1327,6 +1617,10 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
     }
 
     private fun buildConsistentMultiLineUnrevealedText(s: QuranKhatamState): String {
+        if (s.perAyahThreeZoneMode) {
+            // Pada Mode 3-Zona Aman Per-Ayat, Zona Tengah HANYA menampilkan 1 ayat fokus aktif
+            return (s.unrevealedArabicText + " ﴿" + QuranTextCatalog.toArabicDigits(s.currentAyahNumber) + "﴾").trim()
+        }
         val targetLines = s.maxArabicLines
         if (targetLines <= 0) {
             return s.unrevealedArabicText
@@ -1359,8 +1653,44 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
         val prayerText = if (isPrayerFresh) s.lastPrayerText else ""
         val displayUnrevealed = buildConsistentMultiLineUnrevealedText(s)
         val remStats = buildRemainingStatsPayload()
-        val fullRevealedArabic = if (retainedArabicText.isNotBlank()) (retainedArabicText + s.revealedArabicText) else s.revealedArabicText
-        val payloadContent = buildString(512) {
+        val fullRevealedArabic = if (!s.perAyahThreeZoneMode && retainedArabicText.isNotBlank()) {
+            retainedArabicText + s.revealedArabicText
+        } else {
+            s.revealedArabicText
+        }
+
+        // Data 3-Zona Aman (Atas: Ayat N-1 redup, Tengah: Ayat N fokus aman, Bawah: Ayat N+1 antre)
+        val isInitialFirstAyah = (s.currentSurahNumber == 1 && s.currentAyahNumber == 1 && !hasCompletedAnyAyahInSession && s.totalAyahsCompletedSession == 0)
+        val (prevS, prevA) = QuranTextCatalog.getPrevCuratedCoord(s.currentSurahNumber, s.currentAyahNumber)
+        val prevVerse = QuranTextCatalog.getVerse(prevS, prevA)
+        val prevVerseLabel = if (isInitialFirstAyah) "🕌 Pembuka Tilawah" else "QS. ${prevVerse.surahNameLatin} [$prevS:$prevA]"
+        val prevVerseArabic = if (isInitialFirstAyah) {
+            "أَعُوذُ بِاللَّهِ مِنَ الشَّيْطَانِ الرَّجِيمِ"
+        } else {
+            "${prevVerse.arabicText} ﴿${QuranTextCatalog.toArabicDigits(prevA)}﴾"
+        }
+
+        val (prevPrevS, prevPrevA) = QuranTextCatalog.getPrevCuratedCoord(prevS, prevA)
+        val prevPrevVerse = QuranTextCatalog.getVerse(prevPrevS, prevPrevA)
+        val prevPrevVerseArabic = if (s.currentSurahNumber == 1 && s.currentAyahNumber <= 2 && s.totalAyahsCompletedSession <= 1) {
+            "أَعُوذُ بِاللَّهِ مِنَ الشَّيْطَانِ الرَّجِيمِ"
+        } else {
+            "${prevPrevVerse.arabicText} ﴿${QuranTextCatalog.toArabicDigits(prevPrevA)}﴾"
+        }
+
+        val (nextS, nextA) = QuranTextCatalog.getNextCuratedCoord(s.currentSurahNumber, s.currentAyahNumber)
+        val nextVerse = QuranTextCatalog.getVerse(nextS, nextA)
+        val nextVerseLabel = "QS. ${nextVerse.surahNameLatin} [$nextS:$nextA]"
+        val nextVerseArabic = "${nextVerse.arabicText} ﴿${QuranTextCatalog.toArabicDigits(nextA)}﴾"
+
+        val imam = QuranCatalog.findImamById(s.selectedImamId)
+        val imamBadge = if (s.imamAutoPlayEnabled) {
+            "🎙️ ${imam.displayName}"
+        } else {
+            "🕌 3-Zona Aman"
+        }
+
+        val payloadContent = buildString(768) {
             append(headerText)
             append("|||")
             append(fullRevealedArabic)
@@ -1382,6 +1712,18 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
             append(prayerText)
             append("|||")
             append(remStats)
+            append("|||")
+            append(prevVerseLabel)
+            append("|||")
+            append(prevVerseArabic)
+            append("|||")
+            append(nextVerseLabel)
+            append("|||")
+            append(nextVerseArabic)
+            append("|||")
+            append(prevPrevVerseArabic)
+            append("|||")
+            append(imamBadge)
         }
         return Pair(headerText, payloadContent)
     }
@@ -1402,6 +1744,11 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
         if (!s.isEnabled) return
 
         val (headerText, payloadContent) = buildOverlayPayload()
+        val formatModeStr = if (s.perAyahThreeZoneMode) {
+            String.format(java.util.Locale.US, "THREE_ZONE_%.3f_%d", s.scrollTransitionPhase.coerceIn(0f, 1f), s.maxArabicLines)
+        } else {
+            "MAX_LINES_${s.maxArabicLines}"
+        }
 
         OverlayBannerBroadcaster.broadcastShow(
             context = context,
@@ -1411,7 +1758,7 @@ class InteractiveQuranKhatamEngine private constructor(private val context: Cont
             bannerType = "QURAN_KHATAM",
             iconMode = "PRAYER",
             customPrefix = "${if (s.showTranslation) "SHOW_TRANS" else "HIDE_TRANS"}:::${s.latinFontSizeSp}:::${if (s.showNotifUnderAyah) "SHOW_NOTIF" else "HIDE_NOTIF"}",
-            formatMode = "MAX_LINES_${s.maxArabicLines}",
+            formatMode = formatModeStr,
             durationMs = 86400000L, // Tetap tampil selama live aktif
             posXpct = s.posXpct,
             posYpct = s.posYpct,

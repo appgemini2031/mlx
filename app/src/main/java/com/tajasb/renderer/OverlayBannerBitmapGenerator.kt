@@ -949,9 +949,15 @@ object OverlayBannerBitmapGenerator {
             color = Color.parseColor("#94A3B8")
         }
 
-        val maxArabicLines = if (banner.formatMode.startsWith("MAX_LINES_")) {
-            banner.formatMode.removePrefix("MAX_LINES_").toIntOrNull() ?: 0
-        } else 0
+        val isThreeZoneMode = banner.formatMode.startsWith("THREE_ZONE_")
+        val scrollTransitionPhase = if (isThreeZoneMode) {
+            banner.formatMode.removePrefix("THREE_ZONE_").split("_").getOrNull(0)?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0f
+        } else 0f
+        val maxArabicLines = when {
+            isThreeZoneMode -> banner.formatMode.removePrefix("THREE_ZONE_").split("_").getOrNull(1)?.toIntOrNull() ?: 0
+            banner.formatMode.startsWith("MAX_LINES_") -> banner.formatMode.removePrefix("MAX_LINES_").toIntOrNull() ?: 0
+            else -> 0
+        }
 
         val arabicFontSize = (banner.fontSizeSp * effDensity).coerceAtLeast(4f)
         val arabicPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -962,32 +968,39 @@ object OverlayBannerBitmapGenerator {
             setShadowLayer(4f, 0f, 2f, Color.BLACK)
         }
 
-        // Jika maxArabicLines <= 0 (Mode Auto / Fleksibel Alami), render ayat alami tanpa dipaksa ayat lain.
-        // Hanya jika pengguna secara sengaja memilih target baris tetap (misal 2, 3, 4, dst.) dan ayat terlalu pendek,
-        // barulah ayat sambungan dimuat agar sesuai target baris pengguna.
+        // Jika maxArabicLines <= 0 (Mode Auto / Fleksibel Alami) atau Mode 3-Zona Aman Per-Ayat aktif,
+        // render 1 ayat fokus secara murni tanpa digabung dengan ayat berikutnya.
         var workingFullArabic = (revealedArabic + unrevealedArabic).ifBlank { "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ" }
         val revCount = revealedArabic.length.coerceIn(0, workingFullArabic.length)
 
-        fun buildArabicStaticLayout(text: String): android.text.StaticLayout {
-            val safeRev = revCount.coerceIn(0, text.length)
-            val spannable = android.text.SpannableString(text).apply {
+        fun buildArabicStaticLayout(
+            text: String,
+            paint: TextPaint = arabicPaint,
+            width: Int = contentW,
+            revealedChars: Int = revCount,
+            unrevealedColor: Int = Color.parseColor("#44E2E8F0"),
+            revealedColor: Int = Color.parseColor("#FFD700")
+        ): android.text.StaticLayout {
+            val safeText = text.ifBlank { " " }
+            val safeRev = revealedChars.coerceIn(0, safeText.length)
+            val spannable = android.text.SpannableString(safeText).apply {
                 if (safeRev > 0) {
-                    setSpan(android.text.style.ForegroundColorSpan(Color.parseColor("#FFD700")), 0, safeRev, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    setSpan(android.text.style.ForegroundColorSpan(revealedColor), 0, safeRev, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 }
-                if (safeRev < text.length) {
-                    setSpan(android.text.style.ForegroundColorSpan(Color.parseColor("#44E2E8F0")), safeRev, text.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                if (safeRev < safeText.length) {
+                    setSpan(android.text.style.ForegroundColorSpan(unrevealedColor), safeRev, safeText.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 }
             }
             return android.text.StaticLayout.Builder.obtain(
-                spannable, 0, spannable.length, arabicPaint, contentW
+                spannable, 0, spannable.length, paint, width
             ).setAlignment(android.text.Layout.Alignment.ALIGN_CENTER)
                 .setTextDirection(android.text.TextDirectionHeuristics.RTL)
-                .setLineSpacing(arabicFontSize * 0.18f, 1f)
+                .setLineSpacing(paint.textSize * 0.18f, 1f)
                 .build()
         }
 
         var arabicLayout = buildArabicStaticLayout(workingFullArabic)
-        if (maxArabicLines > 1 && arabicLayout.lineCount < maxArabicLines) {
+        if (!isThreeZoneMode && maxArabicLines > 1 && arabicLayout.lineCount < maxArabicLines) {
             val coordMatch = Regex("""\[(\d+):(\d+)]""").find(headerText)
             var curS = coordMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
             var curA = coordMatch?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 1
@@ -1020,24 +1033,23 @@ object OverlayBannerBitmapGenerator {
 
         val totalArabicLines = arabicLayout.lineCount.coerceAtLeast(1)
         val isAuto = maxArabicLines <= 0
-        val effectiveMaxLines = if (isAuto) totalArabicLines else maxArabicLines
+        val effectiveMaxLines = if (isThreeZoneMode) {
+            if (maxArabicLines in 1..4) maxArabicLines else 2
+        } else {
+            if (isAuto) totalArabicLines else maxArabicLines
+        }
         val activeCursorOffset = if (revCount > 0) (revCount - 1).coerceIn(0, workingFullArabic.length) else 0
         val activeLineIdx = arabicLayout.getLineForOffset(activeCursorOffset).coerceIn(0, totalArabicLines - 1)
 
         val fontMetrics = arabicPaint.fontMetrics
         val fixedSingleLineH = (fontMetrics.descent - fontMetrics.ascent + arabicFontSize * 0.18f).coerceAtLeast(arabicFontSize * 1.25f)
-        val arabicH = if (isAuto) {
-            (totalArabicLines * fixedSingleLineH)
-        } else {
-            (effectiveMaxLines * fixedSingleLineH)
-        }
 
         // =====================================================================
         // SMOOTH SUB-LINE SCROLLING: SEBELUM BARIS TERBAWAH HABIS
         // Menggeser ayat secara kontinu dan halus (sub-line pixel) sebelum baris
         // terbawah tuntas, bebas patah-patah / lompatan kasar.
         // =====================================================================
-        val scrollOffsetY = if (isAuto || totalArabicLines <= effectiveMaxLines) {
+        val scrollOffsetY = if ((!isThreeZoneMode && isAuto) || totalArabicLines <= effectiveMaxLines) {
             0f
         } else {
             if (activeLineIdx < effectiveMaxLines - 1) {
@@ -1069,19 +1081,32 @@ object OverlayBannerBitmapGenerator {
             color = Color.parseColor("#E2E8F0")
             setShadowLayer(2f, 0f, 1f, Color.BLACK)
         }
-        val maxTransLines = if (maxArabicLines in 1..3) 2 else 3
+        val maxTransLines = if (isThreeZoneMode) 2 else if (maxArabicLines in 1..3) 2 else 3
         val indoFontMetrics = indoPaint.fontMetrics
         val fixedIndoSingleLineH = (indoFontMetrics.descent - indoFontMetrics.ascent + 2f * effDensity).coerceAtLeast(latinFontSizeSp * effDensity * 1.25f)
         val fixedIndoH = if (showTranslation) (fixedIndoSingleLineH * maxTransLines) else 0f
 
         val indoLayout = if (showTranslation && indoText.isNotBlank()) {
             val ib = android.text.StaticLayout.Builder.obtain(
-                indoText, 0, indoText.length, indoPaint, contentW
+                indoText, 0, indoText.length, indoPaint, (contentW - (if (isThreeZoneMode) 16f * effDensity else 0f).toInt()).coerceAtLeast(32)
             ).setAlignment(android.text.Layout.Alignment.ALIGN_CENTER)
             ib.setMaxLines(maxTransLines)
             ib.setEllipsize(TextUtils.TruncateAt.END)
             ib.build()
         } else null
+
+        val singleFocusArabicH = (effectiveMaxLines * fixedSingleLineH)
+        val singleZoneH = if (isThreeZoneMode) {
+            singleFocusArabicH + (if (showTranslation) (fixedIndoH + 5f * effDensity) else 0f) + 12f * effDensity
+        } else 0f
+        val arabicH = if (isThreeZoneMode) {
+            // Frame ayat dibagi 3 zona vertikal sama tinggi (Zona Atas Redup, Zona Tengah Fokus Aman, Zona Bawah Antre)
+            singleZoneH * 3f
+        } else if (isAuto) {
+            (totalArabicLines * fixedSingleLineH)
+        } else {
+            (effectiveMaxLines * fixedSingleLineH)
+        }
 
         // =====================================================================
         // NOTIF EVENT DI BAWAH AYAT BERBENTUK KOLOM TETAP (DIAM & TIDAK NAIK TURUN)
@@ -1125,10 +1150,11 @@ object OverlayBannerBitmapGenerator {
 
         val headerH = 26f * effDensity
         val spacing1 = 8f * effDensity
-        val spacing2 = if (showNotifUnderAyah) (if (showTranslation) 10f * effDensity else 4f * effDensity) else 0f
+        val spacing2 = if (showNotifUnderAyah) (if (showTranslation && !isThreeZoneMode) 10f * effDensity else 4f * effDensity) else 0f
+        val effectiveBottomTransH = if (isThreeZoneMode) 0f else fixedIndoH
 
         // Tinggi kartu Khatam SELALU TETAP (DIAM & TANPA ANIMASI / RESIZE)
-        val khatamCardH = (padV * 2 + headerH + arabicH + spacing1 + fixedIndoH + spacing2 + fixedDeckH + deckGap + footerH).toInt().coerceAtLeast((44f * effDensity).toInt().coerceAtLeast(36))
+        val khatamCardH = (padV * 2 + headerH + arabicH + spacing1 + effectiveBottomTransH + spacing2 + fixedDeckH + deckGap + footerH).toInt().coerceAtLeast((44f * effDensity).toInt().coerceAtLeast(36))
         val totalH = topDashboardH + topDashboardGap + khatamCardH
 
         val bmp = Bitmap.createBitmap(targetWidth, totalH, Bitmap.Config.ARGB_8888)
@@ -1157,8 +1183,17 @@ object OverlayBannerBitmapGenerator {
         canvas.drawRoundRect(cardRect, cardCorner, cardCorner, strokePaint)
 
         var curY = khatamTopY + padV
-        val leftHeaderLabel = "🕌 KHATAM 30 JUZ"
-        val progText = "Huruf: $progressStr • ${effectiveMaxLines} Baris"
+        val imamBadgeFromPayload = parts.getOrNull(20)?.trim().orEmpty()
+        val leftHeaderLabel = if (isThreeZoneMode && imamBadgeFromPayload.isNotBlank()) {
+            imamBadgeFromPayload
+        } else {
+            "🕌 KHATAM 30 JUZ"
+        }
+        val progText = if (isThreeZoneMode) {
+            "Huruf: $progressStr • 3-Zona"
+        } else {
+            "Huruf: $progressStr • ${effectiveMaxLines} Baris"
+        }
         var headerTotalW = headerPaint.measureText(leftHeaderLabel) + surahBadgePaint.measureText(headerText) + progressPaint.measureText(progText) + 24f * effDensity
         while (headerTotalW > contentW && surahBadgePaint.textSize > 8.5f) {
             headerPaint.textSize *= 0.92f
@@ -1181,24 +1216,230 @@ object OverlayBannerBitmapGenerator {
         canvas.drawLine(padH, curY, targetWidth - padH, curY, sepPaint)
         curY += 6f * effDensity
 
-        // Render teks ayat Arab dengan smooth scrolling sub-line
-        canvas.save()
-        canvas.clipRect(padH, curY, targetWidth - padH, curY + arabicH)
-        canvas.translate(padH, curY - scrollOffsetY)
-        arabicLayout.draw(canvas)
-        canvas.restore()
-        curY += arabicH + spacing1
+        if (isThreeZoneMode) {
+            // =================================================================
+            // RENDER 3-ZONA AMAN PER-AYAT (ATAS REDUP, TENGAH FOKUS, BAWAH ANTRE)
+            // DENGAN TRANSISI NAIK KE ATAS YANG HALUS (BEBAS PATAH-PATAH)
+            // =================================================================
+            val coordMatch = Regex("""\[(\d+):(\d+)]""").find(headerText)
+            val curS = coordMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+            val curA = coordMatch?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 1
 
-        if (showTranslation) {
-            if (indoLayout != null) {
+            val (fallbackPrevS, fallbackPrevA) = com.tajasb.quran.QuranTextCatalog.getPrevCuratedCoord(curS, curA)
+            val fallbackPrevVerse = com.tajasb.quran.QuranTextCatalog.getVerse(fallbackPrevS, fallbackPrevA)
+            val (fallbackNextS, fallbackNextA) = com.tajasb.quran.QuranTextCatalog.getNextCuratedCoord(curS, curA)
+            val fallbackNextVerse = com.tajasb.quran.QuranTextCatalog.getVerse(fallbackNextS, fallbackNextA)
+
+            val prevLabel = parts.getOrNull(15)?.takeIf { it.isNotBlank() }
+                ?: "QS. ${fallbackPrevVerse.surahNameLatin} [$fallbackPrevS:$fallbackPrevA]"
+            val prevArabic = parts.getOrNull(16)?.takeIf { it.isNotBlank() }
+                ?: "${fallbackPrevVerse.arabicText} ﴿${com.tajasb.quran.QuranTextCatalog.toArabicDigits(fallbackPrevA)}﴾"
+            val nextLabel = parts.getOrNull(17)?.takeIf { it.isNotBlank() }
+                ?: "QS. ${fallbackNextVerse.surahNameLatin} [$fallbackNextS:$fallbackNextA]"
+            val nextArabic = parts.getOrNull(18)?.takeIf { it.isNotBlank() }
+                ?: "${fallbackNextVerse.arabicText} ﴿${com.tajasb.quran.QuranTextCatalog.toArabicDigits(fallbackNextA)}﴾"
+            val prevPrevArabic = parts.getOrNull(19)?.takeIf { it.isNotBlank() } ?: prevArabic
+
+            val zoneTopY = curY
+            val middleZoneTopY = zoneTopY + singleZoneH
+            val bottomZoneTopY = zoneTopY + singleZoneH * 2f
+            val innerW = (contentW - (14f * effDensity).toInt()).coerceAtLeast(36)
+
+            // 1. Gambar Bingkai Zona Aman Tengah (Middle Safe Zone) yang statis & elegan
+            val safeZoneRect = RectF(padH, middleZoneTopY + 1f * effDensity, targetWidth - padH, bottomZoneTopY - 1f * effDensity)
+            val safeZoneCorner = 10f * effDensity
+            val safeZoneBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.FILL
+                color = Color.parseColor("#1EFACC15")
+            }
+            val safeZoneBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = 1.4f * effDensity
+                color = Color.parseColor("#88FACC15")
+            }
+            canvas.drawRoundRect(safeZoneRect, safeZoneCorner, safeZoneCorner, safeZoneBgPaint)
+            canvas.drawRoundRect(safeZoneRect, safeZoneCorner, safeZoneCorner, safeZoneBorderPaint)
+
+            // Aksen pilar emas di sisi kiri & kanan Zona Aman Tengah
+            val accentBarW = (3.5f * effDensity).coerceAtLeast(2f)
+            val accentPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.FILL
+                color = Color.parseColor("#FFD700")
+            }
+            canvas.drawRoundRect(
+                RectF(safeZoneRect.left + 2f * effDensity, safeZoneRect.top + 6f * effDensity, safeZoneRect.left + 2f * effDensity + accentBarW, safeZoneRect.bottom - 6f * effDensity),
+                accentBarW, accentBarW, accentPaint
+            )
+            canvas.drawRoundRect(
+                RectF(safeZoneRect.right - 2f * effDensity - accentBarW, safeZoneRect.top + 6f * effDensity, safeZoneRect.right - 2f * effDensity, safeZoneRect.bottom - 6f * effDensity),
+                accentBarW, accentBarW, accentPaint
+            )
+
+            // Helper untuk merender ayat redup pada Zona Atas & Zona Bawah
+            fun drawDimmedZoneVerse(verseText: String, badgeLabel: String, zoneY: Float, alphaFraction: Float) {
+                val effAlpha = (alphaFraction.coerceIn(0f, 1f) * 255).toInt().coerceIn(0, 255)
+                if (effAlpha <= 8) return
+                val dimFontSize = (arabicFontSize * 0.78f).coerceAtLeast(4f)
+                val dimPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                    textSize = dimFontSize
+                    typeface = Typeface.create(Typeface.SERIF, Typeface.NORMAL)
+                    textLocale = java.util.Locale("ar")
+                    color = Color.argb(effAlpha, 203, 213, 225)
+                }
+                val dimLayout = android.text.StaticLayout.Builder.obtain(
+                    verseText, 0, verseText.length, dimPaint, innerW
+                ).setAlignment(android.text.Layout.Alignment.ALIGN_CENTER)
+                    .setTextDirection(android.text.TextDirectionHeuristics.RTL)
+                    .setLineSpacing(dimFontSize * 0.12f, 1f)
+                    .setMaxLines(2)
+                    .setEllipsize(TextUtils.TruncateAt.END)
+                    .build()
+
+                val badgePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                    textSize = (8.5f * effDensity * latinRatio).coerceIn(4.5f, 18f)
+                    typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+                    color = Color.argb((effAlpha * 0.85f).toInt().coerceIn(0, 255), 148, 163, 184)
+                }
+
                 canvas.save()
-                canvas.clipRect(padH, curY, targetWidth - padH, curY + fixedIndoH)
-                val vOffset = ((fixedIndoH - indoLayout.height) / 2f).coerceAtLeast(0f)
-                canvas.translate(padH, curY + vOffset)
-                indoLayout.draw(canvas)
+                canvas.clipRect(padH + 6f * effDensity, zoneY, targetWidth - padH - 6f * effDensity, zoneY + singleZoneH)
+                val badgeW = badgePaint.measureText(badgeLabel)
+                val badgeY = zoneY + badgePaint.textSize + 2f * effDensity
+                canvas.drawText(badgeLabel, (targetWidth - badgeW) / 2f, badgeY, badgePaint)
+
+                val availH = (singleZoneH - (badgePaint.textSize + 4f * effDensity)).coerceAtLeast(10f)
+                val vOffset = badgePaint.textSize + 4f * effDensity + ((availH - dimLayout.height) / 2f).coerceAtLeast(0f)
+                canvas.translate(padH + 7f * effDensity, zoneY + vOffset)
+                dimLayout.draw(canvas)
                 canvas.restore()
             }
-            curY += fixedIndoH + spacing2
+
+            // Helper untuk merender Ayat Fokus di Zona Aman Tengah (dengan highlight huruf emas + arti)
+            fun drawFocusZoneVerse(
+                arabicLayoutToDraw: android.text.StaticLayout,
+                subScrollY: Float,
+                transLayout: android.text.StaticLayout?,
+                zoneY: Float,
+                alphaFraction: Float
+            ) {
+                val effAlpha = (alphaFraction.coerceIn(0f, 1f) * 255).toInt().coerceIn(0, 255)
+                if (effAlpha <= 8) return
+                canvas.save()
+                canvas.clipRect(padH + 7f * effDensity, zoneY + 3f * effDensity, targetWidth - padH - 7f * effDensity, zoneY + singleZoneH - 3f * effDensity)
+                val arabicBoxTop = zoneY + 5f * effDensity
+                val actualVisibleArabicH = minOf(arabicLayoutToDraw.height.toFloat(), singleFocusArabicH)
+                val centerArabicOffset = if (arabicLayoutToDraw.height < singleFocusArabicH) {
+                    (singleFocusArabicH - arabicLayoutToDraw.height) / 2f
+                } else 0f
+
+                canvas.save()
+                canvas.clipRect(padH + 7f * effDensity, arabicBoxTop, targetWidth - padH - 7f * effDensity, arabicBoxTop + singleFocusArabicH)
+                canvas.translate(padH + 7f * effDensity, arabicBoxTop + centerArabicOffset - subScrollY)
+                arabicLayoutToDraw.draw(canvas)
+                canvas.restore()
+
+                if (showTranslation && transLayout != null) {
+                    val transTop = arabicBoxTop + maxOf(actualVisibleArabicH, singleFocusArabicH * 0.75f) + 3f * effDensity
+                    canvas.save()
+                    canvas.clipRect(padH + 8f * effDensity, transTop, targetWidth - padH - 8f * effDensity, zoneY + singleZoneH - 3f * effDensity)
+                    val vOffset = ((fixedIndoH - transLayout.height) / 2f).coerceAtLeast(0f)
+                    canvas.translate(padH + 8f * effDensity, transTop + vOffset)
+                    transLayout.draw(canvas)
+                    canvas.restore()
+                }
+                canvas.restore()
+            }
+
+            // Clip seluruh 3-Zona Viewport agar transisi gulir naik antar-zona rapi
+            canvas.save()
+            canvas.clipRect(padH, zoneTopY, targetWidth - padH, zoneTopY + arabicH)
+
+            val shiftY = scrollTransitionPhase * singleZoneH
+            val focusInnerLayout = buildArabicStaticLayout(
+                text = workingFullArabic,
+                paint = arabicPaint,
+                width = innerW,
+                revealedChars = revCount
+            )
+
+            if (scrollTransitionPhase > 0.005f) {
+                // Selama transisi naik ke atas (scrollTransitionPhase: 1.0f -> 0.0f):
+                // - Ayat N-2 (prevPrev) naik keluar dari Zona Atas
+                // - Ayat N-1 (prev) naik dari Zona Tengah ke Zona Atas sambil meredup
+                // - Ayat N (current) naik dari Zona Bawah ke Zona Tengah sambil menyala fokus
+                // - Ayat N+1 (next) naik masuk ke Zona Bawah
+                drawDimmedZoneVerse(
+                    verseText = prevPrevArabic,
+                    badgeLabel = "⬆️ Ayat Sebelumnya",
+                    zoneY = zoneTopY - singleZoneH + shiftY,
+                    alphaFraction = 0.30f * scrollTransitionPhase
+                )
+                drawDimmedZoneVerse(
+                    verseText = prevArabic,
+                    badgeLabel = "⬆️ $prevLabel",
+                    zoneY = zoneTopY + shiftY,
+                    alphaFraction = 0.32f + 0.60f * scrollTransitionPhase
+                )
+                drawFocusZoneVerse(
+                    arabicLayoutToDraw = focusInnerLayout,
+                    subScrollY = scrollOffsetY,
+                    transLayout = indoLayout,
+                    zoneY = middleZoneTopY + shiftY,
+                    alphaFraction = (1f - 0.55f * scrollTransitionPhase).coerceIn(0.35f, 1f)
+                )
+                drawDimmedZoneVerse(
+                    verseText = nextArabic,
+                    badgeLabel = "⬇️ Antre: $nextLabel",
+                    zoneY = bottomZoneTopY + shiftY,
+                    alphaFraction = 0.32f * (1f - scrollTransitionPhase)
+                )
+            } else {
+                // Posisi Stabil 3-Zona:
+                // Zona 1 (Atas): Ayat N-1 redup (~32% opacity)
+                drawDimmedZoneVerse(
+                    verseText = prevArabic,
+                    badgeLabel = "⬆️ Sebelumnya • $prevLabel",
+                    zoneY = zoneTopY,
+                    alphaFraction = 0.32f
+                )
+                // Zona 2 (Tengah / Zona Aman): 1 Ayat Fokus Aktif (Huruf Emas + Terjemahan)
+                drawFocusZoneVerse(
+                    arabicLayoutToDraw = focusInnerLayout,
+                    subScrollY = scrollOffsetY,
+                    transLayout = indoLayout,
+                    zoneY = middleZoneTopY,
+                    alphaFraction = 1.0f
+                )
+                // Zona 3 (Bawah): Ayat N+1 antre redup (~32% opacity)
+                drawDimmedZoneVerse(
+                    verseText = nextArabic,
+                    badgeLabel = "⬇️ Berikutnya • $nextLabel",
+                    zoneY = bottomZoneTopY,
+                    alphaFraction = 0.32f
+                )
+            }
+            canvas.restore()
+            curY += arabicH + spacing1
+        } else {
+            // Render teks ayat Arab standar dengan smooth scrolling sub-line
+            canvas.save()
+            canvas.clipRect(padH, curY, targetWidth - padH, curY + arabicH)
+            canvas.translate(padH, curY - scrollOffsetY)
+            arabicLayout.draw(canvas)
+            canvas.restore()
+            curY += arabicH + spacing1
+
+            if (showTranslation) {
+                if (indoLayout != null) {
+                    canvas.save()
+                    canvas.clipRect(padH, curY, targetWidth - padH, curY + fixedIndoH)
+                    val vOffset = ((fixedIndoH - indoLayout.height) / 2f).coerceAtLeast(0f)
+                    canvas.translate(padH, curY + vOffset)
+                    indoLayout.draw(canvas)
+                    canvas.restore()
+                }
+                curY += fixedIndoH + spacing2
+            }
         }
 
         if (showNotifUnderAyah) {

@@ -17,6 +17,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.tajasb.FloatingControlService
 import com.tajasb.quran.InteractiveQuranKhatamEngine
+import com.tajasb.quran.QuranCatalog
 import com.tajasb.quran.QuranTextCatalog
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -309,6 +310,117 @@ object QuranKhatamTabBuilder {
         }
         giftRuleRow.addView(btnStartJuz1)
         progressCard.addView(giftRuleRow)
+
+        // Baris Mode 3-Zona Aman Per-Ayat & Auto-Play Suara Imam Per-Ayat
+        val threeZoneAndImamRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, 0)
+        }
+        val btnThreeZoneMode = TextView(this).apply {
+            val isThreeZone = quranEngine.state.value.perAyahThreeZoneMode
+            text = if (isThreeZone) "🕌 3-Zona Aman: ON" else "📜 1-Kartu Klasik"
+            textSize = 7.8f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(4).toFloat()
+                setColor(if (isThreeZone) Color.parseColor("#0D9488") else Color.parseColor("#374151"))
+                setStroke(dp(1), if (isThreeZone) Color.parseColor("#5EEAD4") else Color.parseColor("#6B7280"))
+            }
+            setPadding(dp(5), dp(5), dp(5), dp(5))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(3)
+            }
+            setOnClickListener {
+                val nextMode = quranEngine.togglePerAyahThreeZoneMode()
+                val msg = if (nextMode) "Mode 3-Zona Aman (Atas Redup • Tengah Fokus • Bawah Antre) AKTIF" else "Mode 1-Kartu Klasik AKTIF"
+                Toast.makeText(this@with, msg, Toast.LENGTH_SHORT).show()
+            }
+        }
+        threeZoneAndImamRow.addView(btnThreeZoneMode)
+
+        val btnImamAutoPlay = TextView(this).apply {
+            val isAuto = quranEngine.state.value.imamAutoPlayEnabled
+            text = if (isAuto) "🎙️ Auto Imam: ON" else "🎙️ Auto Imam: OFF"
+            textSize = 7.8f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(4).toFloat()
+                setColor(if (isAuto) Color.parseColor("#B45309") else Color.parseColor("#1E293B"))
+                setStroke(dp(1), if (isAuto) Color.parseColor("#FDE047") else Color.parseColor("#475569"))
+            }
+            setPadding(dp(5), dp(5), dp(5), dp(5))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(3)
+            }
+            setOnClickListener {
+                val nextAuto = quranEngine.toggleImamAutoPlay()
+                val imam = QuranCatalog.getImamById(quranEngine.state.value.selectedImamId)
+                val msg = if (nextAuto) {
+                    "Auto-Play Suara Imam (${imam.name}) AKTIF — huruf emas & ayat naik otomatis"
+                } else {
+                    "Auto-Play Suara Imam NONAKTIF"
+                }
+                Toast.makeText(this@with, msg, Toast.LENGTH_SHORT).show()
+            }
+        }
+        threeZoneAndImamRow.addView(btnImamAutoPlay)
+        progressCard.addView(threeZoneAndImamRow)
+
+        // Baris Pilih Qari / Imam (20 Imam Internasional)
+        val imamSelectRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, 0)
+        }
+        val btnSelectImam = TextView(this).apply {
+            val curImam = QuranCatalog.getImamById(quranEngine.state.value.selectedImamId)
+            text = "🎙️ Qari/Imam: ${curImam.name} (${curImam.style}) ▾"
+            textSize = 7.8f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#FDE68A"))
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(4).toFloat()
+                setColor(Color.parseColor("#172554"))
+                setStroke(dp(1), Color.parseColor("#38BDF8"))
+            }
+            setPadding(dp(6), dp(5), dp(6), dp(5))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener {
+                val imams = QuranCatalog.IMAMS
+                val labels = imams.map { "${it.displayName} (${it.styleBadge})" }.toTypedArray()
+                val curIdx = imams.indexOfFirst { it.id == quranEngine.state.value.selectedImamId }.coerceAtLeast(0)
+                val dialog = AlertDialog.Builder(this@with, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle("Pilih Suara Imam Per-Ayat (20 Qari)")
+                    .setSingleChoiceItems(labels, curIdx) { d, which ->
+                        val picked = imams.getOrElse(which) { imams.first() }
+                        quranEngine.selectImamForPerAyah(picked.id)
+                        Toast.makeText(this@with, "Imam dipilih: ${picked.name}", Toast.LENGTH_SHORT).show()
+                        d.dismiss()
+                    }
+                    .setNegativeButton("Tutup", null)
+                    .create()
+                dialog.window?.setType(
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                    else
+                        @Suppress("DEPRECATION")
+                        WindowManager.LayoutParams.TYPE_PHONE
+                )
+                dialog.show()
+            }
+        }
+        imamSelectRow.addView(btnSelectImam)
+        progressCard.addView(imamSelectRow)
+
         quranContainer.addView(progressCard)
 
         // 2b. Card Pengaturan Rasio Event -> Huruf (Like, Chat, Follow, Share, Gift)
@@ -1736,6 +1848,25 @@ object QuranKhatamTabBuilder {
                 (btnGiftMode.background as? GradientDrawable)?.setColor(
                     if (s.giftCompletesAyah) Color.parseColor("#92400E") else Color.parseColor("#065F46")
                 )
+
+                btnThreeZoneMode.text = if (s.perAyahThreeZoneMode) "🕌 3-Zona Aman: ON" else "📜 1-Kartu Klasik"
+                btnThreeZoneMode.background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(4).toFloat()
+                    setColor(if (s.perAyahThreeZoneMode) Color.parseColor("#0D9488") else Color.parseColor("#374151"))
+                    setStroke(dp(1), if (s.perAyahThreeZoneMode) Color.parseColor("#5EEAD4") else Color.parseColor("#6B7280"))
+                }
+
+                btnImamAutoPlay.text = if (s.imamAutoPlayEnabled) "🎙️ Auto Imam: ON" else "🎙️ Auto Imam: OFF"
+                btnImamAutoPlay.background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(4).toFloat()
+                    setColor(if (s.imamAutoPlayEnabled) Color.parseColor("#B45309") else Color.parseColor("#1E293B"))
+                    setStroke(dp(1), if (s.imamAutoPlayEnabled) Color.parseColor("#FDE047") else Color.parseColor("#475569"))
+                }
+
+                val activeImam = QuranCatalog.getImamById(s.selectedImamId)
+                btnSelectImam.text = "🎙️ Qari/Imam: ${activeImam.name} (${activeImam.style}) ▾"
 
                 // Event to Letters ratio labels
                 val tier = if (s.giftTieringEnabled) "Tiering ON" else "Tiering OFF"

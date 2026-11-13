@@ -1,0 +1,6 @@
+{
+  "summary":  "Rencana komprehensif restrukturisasi fundamental UX Menu Game CuanCame:\n1. Pusat Kendali Game Terpadu (Unified Game Hub): Mengganti menu acak-acakan menjadi satu dashboard seragam untuk ke-4 game (Tarik Tambang, Raja Singgasana, BeyBattle, Mini Trooper).\n2. Standarisasi Tombol & Ukuran Kompak: Menghapus tombol raksasa dan teks panjang, menggantinya dengan tombol ukuran seragam (34dp) berlabel 1 kata dan ikon simbolik (MULAI, RESET, +BOT, GIFT TES, ATUR).\n3. Modul Cara Join Penonton Seragam: Menampilkan panduan cara main dalam bentuk 3 pill chip rapi (LIKE, CHAT, GIFT) tanpa dinding teks instruksi yang membingungkan.\n4. Kontrol Terpusat Fullscreen & VCam: Tombol aksi utama (Buka Layar Penuh Arena 60 FPS dan Saklar Kamera Virtual) diletakkan di posisi yang persis sama di setiap game.\n5. Panel Pengaturan Quick-Settings Seragam: Pengaturan posisi X/Y, zoom skala, dan customisasi game dikelompokkan ke dialog modal terpadu agar layar utama tetap bersih dan ringkas.",
+  "updatedAt":  "2026-11-10T15:48:55.026678304Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementasi Game Interaktif Sederhana 'Tarik Tambang / Duel Kubu' telah selesai dan berhasil dikompilasi 100%:\n1. Al-Qur'an Khatam dinonaktifkan sementara secara aman tanpa merusak riwayat juz.\n2. Penonton gratisan bermain aktif via Tap Like (+1) dan Chat kata kunci tim (+10).\n3. Penonton sawer memicu tarikan raksasa via Gift koin TikTok (1 Koin = +10 poin tarikan).\n4. Overlay visual modern dirender langsung ke kamera virtual dengan tracking tali realtime, persentase kekuatan, dan perayaan kemenangan ronde.\n5. Menu kontrol penuh hadir di Floating Window (Tab Notif -> Tambang) lengkap dengan simulator tes mandiri, preset nama kubu, dan pengatur posisi/zoom.",
+  "updatedAt":  "2026-11-09T17:01:44.502307774Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

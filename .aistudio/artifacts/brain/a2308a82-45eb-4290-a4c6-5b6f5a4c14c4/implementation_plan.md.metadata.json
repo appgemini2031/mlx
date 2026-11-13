@@ -1,0 +1,6 @@
+{
+  "summary":  "Revisi Rencana Redesain Pintasan Aksen Pin & Unpin Aplikasi:\n1. Sistem Pin/Unpin Manual: Mengganti pelacak frekuensi otomatis (penanda \"x\") dengan tombol Pin (📌 Sematkan) & Unpin (📍 Lepas Pin) manual pada setiap aplikasi.\n2. Seksi Pinned Apps: Aplikasi yang disematkan akan selalu berada di seksi teratas (📌 Disematkan).\n3. Pencarian & Manajemen: Pengguna dapat mencari aplikasi apa saja via kolom cari \"🔍 Cari aplikasi...\" lalu menekan tombol Pin untuk menambahkannya ke seksi teratas, atau Unpin untuk melepasnya.\n4. Perubahan UI: Menghilangkan lencana angka \"x\" lama agar tampilan lebih bersih dan berfokus penuh pada kontrol pin/unpin pengguna.",
+  "updatedAt":  "2026-11-11T16:22:33.419307750Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

@@ -23,7 +23,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.tajasb.pro.tqnzya"
+        applicationId = "com.acopy.pro.ufajnb"
         minSdk = 26
         targetSdk = 35
         versionCode = vCode
@@ -86,8 +86,8 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
-    implementation(libs.coil.compose)
-    compileOnly("de.robv.android.xposed:api:82")
+    implementation("com.google.zxing:core:3.5.3")
+    // implementation(libs.coil.compose)
 
     testImplementation(libs.junit)
     testImplementation("org.json:json:20240303")

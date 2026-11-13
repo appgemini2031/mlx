@@ -1,0 +1,6 @@
+{
+  "summary":  "Rencana komprehensif implementasi Sistem Kendali Jarak Jauh (Remote Control) & Dashboard Monitoring Realtime Terintegrasi via Bot Telegram dan Firebase Firestore:\n1. Arsitektur Dua Arah (Two-Way Telemetry & Command): APK mengirim heartbeat, status online, sisa masa sewa, info jam/tanggal, dan log bug/crash; Telegram Bot menerima data dan mengirim instruksi kendali.\n2. Keamanan Tingkat Tinggi (Anti-Hack & Anti-Spoofing): Setiap instruksi remote diverifikasi dengan tanda tangan digital HMAC-SHA256 agar tidak dapat dimanipulasi atau dipalsukan oleh pengguna client.\n3. Dashboard Interaktif di Telegram: Menu inline keyboard modern untuk memantau daftar perangkat aktif, detail spesifikasi & baterai, kirim pesan darurat ke layar APK, aktivasi Decoy Mode seketika, dan Kill-Switch (Kunci APK).\n4. Bug & Crash Logger Otomatis: Deteksi dini crash RAM 2600MB atau error codec langsung dikirimkan ke Telegram admin secara realtime.",
+  "updatedAt":  "2026-10-22T04:19:30.150783140Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

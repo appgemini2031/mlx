@@ -1,0 +1,6 @@
+{
+  "summary":  "Revisi Rencana Implementasi:\n1. Penghapusan Sub-Tab Doa & Komentar serta Inspeksi Scan: Menghapus total tombol tab dan kontainer Sub-Tab Doa & Komentar serta Inspeksi Scan dari Menu Notifikasi Floating Control karena sudah tidak berguna dan digantikan oleh Live Event Broker.\n2. Penataan 6 Sub-Tab Aktif Menu Notifikasi (Jualan, Stiker, Watermark, Waktu, Khatam, Event): Seluruh pengaturan di 6 sub-tab ini dikelompokkan ke dalam dropdown accordion mandiri.\n3. Bahasa Singkat-Padat & Anti-Pengulangan Kata: Mereduksi teks menjadi istilah fungsional ringkas dan menghilangkan kata berulang di tombol.\n4. Pemisahan Mutlak Ikon vs Kata: Tombol arah/stepper memakai ikon murni tanpa teks (⬅️, ⬆️, ⬇️, ➡️, ➖, ➕, 🔍, ⌨️, ↺, ▶); tombol aksi/status memakai teks murni tanpa emoji (ON, OFF, MULAI, SAMBUNG, Kiri, Kanan, Bawah, dsb).",
+  "updatedAt":  "2026-11-08T16:22:59.148427042Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

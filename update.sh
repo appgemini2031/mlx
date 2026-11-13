@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # =======================================================
-# 🚀 TAJASB PIPELINE MANAGER v5.4 (ZERO-APK-FOOTPRINT)
+# 🚀 ACOPY PIPELINE MANAGER v5.4 (ZERO-APK-FOOTPRINT)
 # =======================================================
 set +e
 export GIT_TERMINAL_PROMPT=0
@@ -55,6 +55,13 @@ is_cancel_input() {
   esac
 }
 
+purge_obsolete_tools() {
+  if [ -d "tools" ]; then
+    find tools/ -type f ! -name "apk_downloader.py" ! -name "release_manager.py" -delete 2>/dev/null || true
+    rm -rf tools/__pycache__ 2>/dev/null || true
+  fi
+}
+
 # =======================================================
 # 0B. PRE-EXECUTION SELF-UPDATE (AMAN & TIDAK MENJEBAK)
 # =======================================================
@@ -77,10 +84,10 @@ if [ "$1" = "--from-self-update" ]; then
     shift
   fi
 else
-  # Hanya cek self-update jika tidak sedang memanggil sub-menu utilitas (3/4/5/6/7/0)
+  # Hanya cek self-update jika tidak sedang memanggil sub-menu utilitas (2/3/4/5/0)
   FIRST_ARG="${1:-}"
   case "$FIRST_ARG" in
-    3|4|5|6|7|0|--download|-dl|--release|-rel|--build|-b|--repo|-r|--bot|q|exit)
+    2|3|4|5|0|--download|-dl|--release|-rel|--clean|-c|--repo|-r|q|exit)
       ;;
     *)
       LATEST_ZIP=""
@@ -102,11 +109,11 @@ else
       # Hanya self-update jika arsip ZIP benar-benar lebih baru dari update.sh saat ini
       if [ -n "$LATEST_ZIP" ] && [ -f "$LATEST_ZIP" ] && [ "$LATEST_ZIP" -nt "$0" ]; then
         if unzip -l "$LATEST_ZIP" 2>/dev/null | grep -q "update\.sh"; then
-          BASE_TMP="$HOME/.tajasb_tmp"
+          BASE_TMP="$HOME/.acopy_tmp"
           if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ] && [ -w "$TMPDIR" ] && [ "$TMPDIR" != "/tmp" ]; then
             BASE_TMP="$TMPDIR"
           fi
-          mkdir -p "$BASE_TMP" 2>/dev/null || BASE_TMP="./.tajasb_tmp"
+          mkdir -p "$BASE_TMP" 2>/dev/null || BASE_TMP="./.acopy_tmp"
           mkdir -p "$BASE_TMP" 2>/dev/null || true
           TMP_PRE="$BASE_TMP/pre_$$"
           mkdir -p "$TMP_PRE" 2>/dev/null || TMP_PRE="./.tmp_pre_$$"
@@ -126,7 +133,7 @@ else
               if [ -d "$NEW_TOOLS_DIR" ]; then
                 mkdir -p tools 2>/dev/null || true
                 cp -rf "$NEW_TOOLS_DIR"/* tools/ 2>/dev/null || true
-                rm -f tools/local_builder.sh 2>/dev/null || true
+                purge_obsolete_tools
                 chmod +x tools/*.sh tools/*.py 2>/dev/null || true
               fi
 
@@ -163,10 +170,6 @@ check_termux_tools() {
   PYTHON_CMD="python3"
   if ! command -v python3 &>/dev/null && command -v python &>/dev/null; then
     PYTHON_CMD="python"
-  fi
-  # Pastikan yt-dlp tersedia jika ada pip di Termux untuk resolusi YouTube Live
-  if ! command -v yt-dlp &>/dev/null && command -v pip &>/dev/null; then
-    pip install -q yt-dlp >/dev/null 2>&1 || true
   fi
 }
 
@@ -215,7 +218,7 @@ extract_auth_token() {
   cur_slug=$(extract_repo_slug "$remote_url")
 
   local fallback_tok=""
-  for cfg in ".git/tajasb_repo.cfg" "$HOME/.tajasb_repo.cfg"; do
+  for cfg in ".git/acopy_repo.cfg" "$HOME/.acopy_repo.cfg"; do
     if [ -f "$cfg" ]; then
       local cfg_tok cfg_url cfg_slug
       cfg_tok=$(grep -E "^GITHUB_TOKEN=" "$cfg" 2>/dev/null | head -n 1 | cut -d'"' -f2 | tr -d '\r\n ')
@@ -257,7 +260,7 @@ sync_tools_dir() {
   if [ -d "$src_dir" ]; then
     mkdir -p tools 2>/dev/null || true
     cp -rf "$src_dir"/* tools/ 2>/dev/null || true
-    rm -f tools/local_builder.sh 2>/dev/null || true
+    purge_obsolete_tools
     chmod +x tools/*.sh tools/*.py 2>/dev/null || true
   fi
 }
@@ -284,7 +287,7 @@ save_repo_config() {
   local now_str
   now_str="$(date)"
   mkdir -p "$HOME" .git 2>/dev/null || true
-  for cfg_dest in "$HOME/.tajasb_repo.cfg" ".git/tajasb_repo.cfg"; do
+  for cfg_dest in "$HOME/.acopy_repo.cfg" ".git/acopy_repo.cfg"; do
     cat <<EOF > "$cfg_dest" 2>/dev/null || true
 REPO_URL="$authed_url"
 CLEAN_REPO_URL="$clean_url"
@@ -330,78 +333,6 @@ ensure_tools_available() {
   return 1
 }
 
-run_telegram_bot() {
-  check_termux_tools
-  ensure_tools_available "tools/telegram_bot.py" || true
-  if [ -f "tools/telegram_bot.py" ]; then
-    $PYTHON_CMD tools/telegram_bot.py "$@"
-  else
-    log_err "Modul asisten bot belum tersedia di direktori tools/."
-    return 1
-  fi
-}
-
-run_live_stream_relay() {
-  check_termux_tools
-  ensure_tools_available "tools/live_stream_relay.py" || true
-  if [ -f "tools/live_stream_relay.py" ]; then
-    $PYTHON_CMD tools/live_stream_relay.py "$@"
-  else
-    log_err "Modul Live Stream Relay belum tersedia di direktori tools/."
-    return 1
-  fi
-}
-
-run_tiktok_event_broker() {
-  check_termux_tools
-  ensure_tools_available "tools/tiktok_event_server.py" || true
-  ensure_tools_available "tools/tiktok_event_node.js" || true
-  ensure_tools_available "tools/tiktok_bridge.js" || true
-  chmod +x tools/tiktok_*.py tools/tiktok_*.js 2>/dev/null || true
-
-  # 1. Otomatis cek Node.js (Solusi resmi Termux tanpa compiler Rust/pydantic)
-  if ! command -v node >/dev/null 2>&1; then
-    log_info "Memasang Node.js untuk TikTok Live Webcast Engine..."
-    pkg install -y nodejs 2>/dev/null || apt-get install -y nodejs 2>/dev/null || true
-  fi
-
-  # 2. Otomatis cek dan pasang pustaka tiktok-live-connector
-  if command -v node >/dev/null 2>&1; then
-    NPM_G_ROOT=$(npm root -g 2>/dev/null || true)
-    export NODE_PATH="$NPM_G_ROOT:./node_modules:tools/node_modules:$NODE_PATH"
-
-    if ! node -e "require('tiktok-live-connector')" >/dev/null 2>&1; then
-      log_info "Memasang pustaka tiktok-live-connector via npm (cepat & bebas compile)..."
-      npm install -g tiktok-live-connector --no-audit --no-fund 2>/dev/null || npm install tiktok-live-connector --no-audit --no-fund 2>/dev/null || true
-      NPM_G_ROOT=$(npm root -g 2>/dev/null || true)
-      export NODE_PATH="$NPM_G_ROOT:./node_modules:tools/node_modules:$NODE_PATH"
-    fi
-  fi
-
-  if [ -f "tools/tiktok_event_server.py" ]; then
-    $PYTHON_CMD tools/tiktok_event_server.py "$@"
-  elif [ -f "tools/tiktok_event_node.js" ] && command -v node >/dev/null 2>&1; then
-    node tools/tiktok_event_node.js "$@"
-  else
-    log_err "Modul TikTok Live Event Broker belum tersedia di direktori tools/."
-    return 1
-  fi
-}
-
-run_bigo_event_broker() {
-  check_termux_tools
-  ensure_tools_available "tools/bigo_event_server.py" || true
-  ensure_tools_available "tools/bigo_bridge.js" || true
-  chmod +x tools/bigo_*.py tools/bigo_*.js 2>/dev/null || true
-
-  if [ -f "tools/bigo_event_server.py" ]; then
-    $PYTHON_CMD tools/bigo_event_server.py "$@"
-  else
-    log_err "Modul Bigo Live Event Broker belum tersedia di direktori tools/."
-    return 1
-  fi
-}
-
 manage_github_releases() {
   check_termux_tools
   ensure_tools_available "tools/release_manager.py" || true
@@ -437,28 +368,28 @@ decode_b64_to_keystore() {
 ensure_canonical_keystore() {
   printf "%s" "$CANONICAL_KEYSTORE_B64" > "debug.keystore.base64"
   mkdir -p .git 2>/dev/null || true
-  cp -f "debug.keystore.base64" ".git/tajasb_keystore.b64" 2>/dev/null || true
-  cp -f "debug.keystore.base64" "$HOME/.tajasb_keystore.b64" 2>/dev/null || true
+  cp -f "debug.keystore.base64" ".git/acopy_keystore.b64" 2>/dev/null || true
+  cp -f "debug.keystore.base64" "$HOME/.acopy_keystore.b64" 2>/dev/null || true
   decode_b64_to_keystore "debug.keystore.base64" "debug.keystore"
 }
 
 backup_version_and_keystore() {
   mkdir -p .git 2>/dev/null || true
   if [ -s "app/version.properties" ]; then
-    cp -f "app/version.properties" ".git/tajasb_version.cfg" 2>/dev/null || true
-    cp -f "app/version.properties" "$HOME/.tajasb_version.cfg" 2>/dev/null || true
+    cp -f "app/version.properties" ".git/acopy_version.cfg" 2>/dev/null || true
+    cp -f "app/version.properties" "$HOME/.acopy_version.cfg" 2>/dev/null || true
   fi
   ensure_canonical_keystore
 }
 
 restore_version_and_keystore() {
   if [ ! -s "app/version.properties" ]; then
-    if [ -s ".git/tajasb_version.cfg" ]; then
+    if [ -s ".git/acopy_version.cfg" ]; then
       mkdir -p app 2>/dev/null || true
-      cp -f ".git/tajasb_version.cfg" "app/version.properties" 2>/dev/null || true
-    elif [ -s "$HOME/.tajasb_version.cfg" ]; then
+      cp -f ".git/acopy_version.cfg" "app/version.properties" 2>/dev/null || true
+    elif [ -s "$HOME/.acopy_version.cfg" ]; then
       mkdir -p app 2>/dev/null || true
-      cp -f "$HOME/.tajasb_version.cfg" "app/version.properties" 2>/dev/null || true
+      cp -f "$HOME/.acopy_version.cfg" "app/version.properties" 2>/dev/null || true
     fi
   fi
   ensure_canonical_keystore
@@ -499,9 +430,9 @@ purge_local_apk_footprint() {
     *.idsig \
     *.iml 2>/dev/null || true
 
-  rm -f tools/local_builder.sh 2>/dev/null || true
+  purge_obsolete_tools
 
-  log_ok "Zero-APK-Footprint aktif: Kode APK lokal dihapus (Bot Telegram, Firebase & Tools aman)."
+  log_ok "Zero-APK-Footprint aktif: Kode APK lokal dihapus (Pipeline GitHub & Tools aman)."
 }
 
 run_clean_apk_workspace() {
@@ -511,7 +442,7 @@ run_clean_apk_workspace() {
   echo "======================================================="
   echo "  🛡️  DIREKTORI TERMUX BERSIH DARI KODE SUMBER APK"
   echo "======================================================="
-  echo "  ✅ Dipertahankan : update.sh, tools/ (Telegram/Firebase), Kredensial & Versi"
+  echo "  ✅ Dipertahankan : update.sh, tools/ (Downloader/Release), Kredensial & Versi"
   echo "  🗑️  Dihapus       : app/, gradle/, build.gradle.kts, *.apk, dan logika APK"
   echo "======================================================="
 }
@@ -649,10 +580,12 @@ switch_github_repository() {
   fi
   echo "======================================================="
   if [ -f "app/build.gradle.kts" ]; then
+    purge_obsolete_tools
+    git rm -r --cached -q tools/ >/dev/null 2>&1 || true
     [ -f ".env.example" ] || touch .env.example
-    git add -f .env.example 2>/dev/null || true
-    git add -A 2>/dev/null || true
-    git reset HEAD tools/ *.pem *.key *.cfg *.conf .*_token debug.keystore 2>/dev/null || true
+    git add -f .env.example >/dev/null 2>&1 || true
+    git add -A >/dev/null 2>&1 || true
+    git reset -q HEAD tools/ *.pem *.key *.cfg *.conf .*_token debug.keystore >/dev/null 2>&1 || true
     if ! git rev-parse --verify HEAD &>/dev/null; then
       git commit --allow-empty -m "chore: initialize repository" --quiet 2>/dev/null || true
     elif ! git diff --cached --quiet; then
@@ -707,10 +640,10 @@ git rebase --abort 2>/dev/null || true
 git merge --abort 2>/dev/null || true
 rm -f .git/index.lock .git/MERGE_HEAD .git/rebase-apply .git/rebase-merge 2>/dev/null || true
 
-if [ -f ".git/tajasb_repo.cfg" ]; then
-  . ".git/tajasb_repo.cfg" 2>/dev/null || true
-elif [ -f "$HOME/.tajasb_repo.cfg" ]; then
-  . "$HOME/.tajasb_repo.cfg" 2>/dev/null || true
+if [ -f ".git/acopy_repo.cfg" ]; then
+  . ".git/acopy_repo.cfg" 2>/dev/null || true
+elif [ -f "$HOME/.acopy_repo.cfg" ]; then
+  . "$HOME/.acopy_repo.cfg" 2>/dev/null || true
 fi
 
 if [ -n "$REPO_URL" ]; then
@@ -731,8 +664,8 @@ if [ "$PUSH_TO_GITHUB" = true ]; then
   if [ -z "$REMOTE_ORIGIN" ]; then
     log_warn "Endpoint remote belum dikonfigurasi."
     if ! switch_github_repository; then
-      log_info "Beralih ke Mode Ekstraksi Script Bot & Tools Saja karena konfigurasi remote dibatalkan."
-      PUSH_TO_GITHUB=false
+      log_err "Konfigurasi remote GitHub dibatalkan."
+      return 1
     fi
   fi
 fi
@@ -815,34 +748,27 @@ if [ -n "$NESTED_SETTINGS" ]; then
   fi
 fi
 
-APP_NAME=$(grep '"name":' temp_update/metadata.json 2>/dev/null | head -n 1 | cut -d '"' -f 4 || echo "Tajasb")
+APP_NAME=$(grep '"name":' temp_update/metadata.json 2>/dev/null | head -n 1 | cut -d '"' -f 4 || echo "asisten copy")
 log_info "Identitas Proyek : $APP_NAME"
 
-# Jika Mode 2 (Ekstraksi Khusus Script Bot, Firebase & Tools Saja Tanpa Kode APK)
+# Jika Mode Lokal (Ekstraksi update.sh & GitHub Tools Saja Tanpa Kode APK)
 if [ "$PUSH_TO_GITHUB" = false ]; then
-  log_step "TAHAP 3/5 : EKSTRAKSI KHUSUS SCRIPT BOT, FIREBASE & TOOLS (TANPA KODE APK)"
+  log_step "TAHAP 3/5 : EKSTRAKSI UPDATE.SH & GITHUB TOOLS SAJA"
   if [ -f "temp_update/update.sh" ]; then
     cp -f "temp_update/update.sh" "./update.sh" 2>/dev/null || true
     chmod +x "./update.sh" 2>/dev/null || true
   fi
   sync_tools_dir "temp_update/tools"
-  # Salin berkas terkait Firebase/konfigurasi non-APK bila ada di root ZIP
-  for fb_file in temp_update/firebase* temp_update/*firebase*.json temp_update/.env.example; do
-    if [ -f "$fb_file" ]; then
-      cp -f "$fb_file" ./ 2>/dev/null || true
-    fi
-  done
 
-  # Cadangkan versi & keystore dari ZIP jika belum ada di cache tersembunyi
-  if [ ! -s ".git/tajasb_version.cfg" ] && [ -s "temp_update/app/version.properties" ]; then
+  if [ ! -s ".git/acopy_version.cfg" ] && [ -s "temp_update/app/version.properties" ]; then
     mkdir -p .git 2>/dev/null || true
-    cp -f "temp_update/app/version.properties" ".git/tajasb_version.cfg" 2>/dev/null || true
-    cp -f "temp_update/app/version.properties" "$HOME/.tajasb_version.cfg" 2>/dev/null || true
+    cp -f "temp_update/app/version.properties" ".git/acopy_version.cfg" 2>/dev/null || true
+    cp -f "temp_update/app/version.properties" "$HOME/.acopy_version.cfg" 2>/dev/null || true
   fi
-  if [ ! -s ".git/tajasb_keystore.b64" ] && [ -s "temp_update/debug.keystore.base64" ]; then
+  if [ ! -s ".git/acopy_keystore.b64" ] && [ -s "temp_update/debug.keystore.base64" ]; then
     mkdir -p .git 2>/dev/null || true
-    cp -f "temp_update/debug.keystore.base64" ".git/tajasb_keystore.b64" 2>/dev/null || true
-    cp -f "temp_update/debug.keystore.base64" "$HOME/.tajasb_keystore.b64" 2>/dev/null || true
+    cp -f "temp_update/debug.keystore.base64" ".git/acopy_keystore.b64" 2>/dev/null || true
+    cp -f "temp_update/debug.keystore.base64" "$HOME/.acopy_keystore.b64" 2>/dev/null || true
   fi
 
   if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then
@@ -855,9 +781,9 @@ if [ "$PUSH_TO_GITHUB" = false ]; then
 
   echo ""
   echo "======================================================="
-  echo "  🎉 EKSTRAKSI SCRIPT BOT, FIREBASE & TOOLS SELESAI!"
+  echo "  🎉 EKSTRAKSI UPDATE.SH & GITHUB TOOLS SELESAI!"
   echo "======================================================="
-  echo "  ✅ Tersimpan : update.sh, tools/ (Telegram Bot, Release, Downloader), Firebase"
+  echo "  ✅ Tersimpan : update.sh, tools/ (apk_downloader, release_manager)"
   echo "  🗑️  Dibersihkan: Seluruh kode sumber APK (app/, gradle/) & file ZIP"
   echo "======================================================="
   return 0
@@ -979,15 +905,15 @@ MAX_PAT=50
 read -r MAX_MAJ MAX_MIN MAX_PAT <<< "$(pick_higher_semver "$MAX_MAJ" "$MAX_MIN" "$MAX_PAT" "$C_MAJ" "$C_MIN" "$C_PAT")"
 read -r MAX_MAJ MAX_MIN MAX_PAT <<< "$(pick_higher_semver "$MAX_MAJ" "$MAX_MIN" "$MAX_PAT" "$ZIP_MAJ" "$ZIP_MIN" "$ZIP_PAT")"
 
-H_MAJ=$(read_version_prop "$HOME/.tajasb_version.cfg" "VERSION_MAJOR" "0")
-H_MIN=$(read_version_prop "$HOME/.tajasb_version.cfg" "VERSION_MINOR" "0")
-H_PAT=$(read_version_prop "$HOME/.tajasb_version.cfg" "VERSION_PATCH" "0")
-H_COD=$(read_version_prop "$HOME/.tajasb_version.cfg" "VERSION_CODE" "0")
+H_MAJ=$(read_version_prop "$HOME/.acopy_version.cfg" "VERSION_MAJOR" "0")
+H_MIN=$(read_version_prop "$HOME/.acopy_version.cfg" "VERSION_MINOR" "0")
+H_PAT=$(read_version_prop "$HOME/.acopy_version.cfg" "VERSION_PATCH" "0")
+H_COD=$(read_version_prop "$HOME/.acopy_version.cfg" "VERSION_CODE" "0")
 
-G_MAJ=$(read_version_prop ".git/tajasb_version.cfg" "VERSION_MAJOR" "0")
-G_MIN=$(read_version_prop ".git/tajasb_version.cfg" "VERSION_MINOR" "0")
-G_PAT=$(read_version_prop ".git/tajasb_version.cfg" "VERSION_PATCH" "0")
-G_COD=$(read_version_prop ".git/tajasb_version.cfg" "VERSION_CODE" "0")
+G_MAJ=$(read_version_prop ".git/acopy_version.cfg" "VERSION_MAJOR" "0")
+G_MIN=$(read_version_prop ".git/acopy_version.cfg" "VERSION_MINOR" "0")
+G_PAT=$(read_version_prop ".git/acopy_version.cfg" "VERSION_PATCH" "0")
+G_COD=$(read_version_prop ".git/acopy_version.cfg" "VERSION_CODE" "0")
 
 read -r MAX_MAJ MAX_MIN MAX_PAT <<< "$(pick_higher_semver "$MAX_MAJ" "$MAX_MIN" "$MAX_PAT" "$H_MAJ" "$H_MIN" "$H_PAT")"
 read -r MAX_MAJ MAX_MIN MAX_PAT <<< "$(pick_higher_semver "$MAX_MAJ" "$MAX_MIN" "$MAX_PAT" "$G_MAJ" "$G_MIN" "$G_PAT")"
@@ -1005,7 +931,7 @@ import urllib.request, json, re, subprocess
 slug = '$CUR_SLUG_VER'
 tok = '$CUR_TOK_VER'
 best = (0, 0, 0)
-headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'Tajasb-Updater'}
+headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'Acopy-Updater'}
 if tok:
     headers['Authorization'] = f'Bearer {tok}'
 for ep in [f'https://api.github.com/repos/{slug}/releases?per_page=30', f'https://api.github.com/repos/{slug}/tags?per_page=30']:
@@ -1110,8 +1036,8 @@ local.properties
 !.env.example
 *.keystore
 !debug.keystore.base64
-.tajasb/
-.tajasb*
+.acopy/
+.acopy*
 tools/
 *.pem
 *.key
@@ -1133,14 +1059,15 @@ Thumbs.db
 EOF
 
 log_step "TAHAP 5/5 : KOMIT, PUSH CLOUD & HAPUS KODE APK LOKAL"
+purge_obsolete_tools
 [ -f ".env.example" ] || touch .env.example
-git rm -r --cached tools/ 2>/dev/null || true
-git add -f .env.example 2>/dev/null || true
-git add -f debug.keystore.base64 2>/dev/null || true
-git add -f app/version.properties 2>/dev/null || true
-git add -f .github/workflows/build-apk.yml 2>/dev/null || true
-git add -A
-git reset HEAD tools/ *.pem *.key *.cfg *.conf .*_token debug.keystore 2>/dev/null || true
+git rm -r --cached -q tools/ >/dev/null 2>&1 || true
+git add -f .env.example >/dev/null 2>&1 || true
+git add -f debug.keystore.base64 >/dev/null 2>&1 || true
+git add -f app/version.properties >/dev/null 2>&1 || true
+git add -f .github/workflows/build-apk.yml >/dev/null 2>&1 || true
+git add -A >/dev/null 2>&1 || true
+git reset -q HEAD tools/ *.pem *.key *.cfg *.conf .*_token debug.keystore >/dev/null 2>&1 || true
 
 CHANGED_FILES_COUNT=$(git diff --cached --numstat 2>/dev/null | wc -l | tr -d ' ')
 if git diff --cached --quiet; then
@@ -1214,7 +1141,7 @@ fi
     echo "  🏷️  Versi Target : v${V_MAJOR}.${V_MINOR}.${V_PATCH} (Code: ${V_CODE})"
     echo "  📌 Commit SHA   : ${TARGET_COMMIT_SHA:0:7}"
     echo "  🛡️  Status Push  : Terkirim & Sedang Dikompilasi di Cloud"
-    echo "  🧹 Lokal Termux : Kode APK Dihapus (Bot Telegram/Firebase Aman)"
+    echo "  🧹 Lokal Termux : Kode APK Dihapus (GitHub Pipeline Aman)"
     echo "======================================================="
 
     AUTO_DL_REPLY="n"
@@ -1229,7 +1156,7 @@ fi
       MAIN_TOKEN=$(extract_auth_token)
       download_github_apk "$TARGET_COMMIT_SHA" "$TARGET_VERSION" "$REPO_SLUG" "$MAIN_TOKEN"
     else
-      log_info "Unduh APK kapan saja saat kompilasi selesai dari Menu Utama (Opsi 3)."
+      log_info "Unduh APK kapan saja saat kompilasi selesai dari Menu Utama (Opsi 2)."
     fi
 
     echo "======================================================="
@@ -1246,7 +1173,7 @@ fi
       log_ok "🛡️  PROTEKSI BERKAS: Arsip '$ZIP_BASENAME' AMAN & TIDAK DIHAPUS!"
       log_info "Lokasi arsip : $ZIP"
       log_info "Arsip tetap utuh sehingga Anda tidak perlu mengunduh ulang ZIP."
-      log_info "Silakan periksa koneksi atau perbarui token via Opsi 6 di Menu Utama,"
+      log_info "Silakan periksa koneksi atau perbarui token via Opsi 5 di Menu Utama,"
       log_info "kemudian jalankan kembali Opsi 1."
     fi
     echo "======================================================="
@@ -1282,25 +1209,20 @@ interactive_main_menu() {
 
     echo ""
     echo "======================================================="
-    echo "   🚀 TAJASB PIPELINE MANAGER v5.5 (ZERO-APK-FOOTPRINT)"
+    echo "   🚀 ASISTEN COPY — GITHUB PIPELINE MANAGER"
     echo "======================================================="
     echo "  ☁️  Status Remote : $REMOTE_DISP"
     echo "  🔒 Status Akses  : $AUTH_DISP"
     echo "  🛡️  Mode Lokal    : Zero-APK-Footprint (Kode APK Dihapus Pasca-Push)"
     echo "───────────────────────────────────────────────────────"
     echo "  1) ☁️  Push ke GitHub & Hapus Kode APK Lokal (CI Build)"
-    echo "  2) 🤖 Ekstrak Script Bot, Firebase & Tools Saja dari ZIP"
-    echo "  3) 📥 Unduh Paket APK (/sdcard/Download)"
-    echo "  4) 📦 Manajemen Rilis APK (Release Manager)"
-    echo "  5) 🧹 Bersihkan Sisa File/Logika APK Lokal (Purge)"
-    echo "  6) 🔄 Konfigurasi Endpoint & Kredensial Git"
-    echo "  7) 🤖 Layanan Asisten Bot Telegram"
-    echo "  8) 🕋 Live Stream Web Relay (Device 1 Extractor -> Device 2 VCAM)"
-    echo "  9) ⚡ TikTok Live Event Broker (Device 1 Webcast -> Device 2 CuanCame)"
-    echo " 10) 🫘 Bigo Live Event Broker (Device 1 LAN WebSocket -> Device 2 CuanCame)"
+    echo "  2) 📥 Unduh Paket APK (/sdcard/Download)"
+    echo "  3) 📦 Manajemen Rilis APK (Release Manager)"
+    echo "  4) 🧹 Bersihkan Sisa File/Logika APK Lokal (Purge)"
+    echo "  5) 🔄 Konfigurasi Endpoint & Kredensial Git"
     echo "  0) 🚪 Keluar (Exit)"
     echo "======================================================="
-    printf "👉 Pilihan Anda [0-10, Ketik '0' untuk Keluar]: "
+    printf "👉 Pilihan Anda [0-5, Ketik '0' untuk Keluar]: "
     read -r MODE_CHOICE 2>/dev/null || MODE_CHOICE=""
     MODE_CHOICE=$(echo "$MODE_CHOICE" | tr -d '\r\n ')
 
@@ -1312,38 +1234,22 @@ interactive_main_menu() {
       run_pipeline_update true "$PRE_DETECTED_ZIP"
       pause_and_return
     elif [ "$MODE_CHOICE" = "2" ]; then
-      log_info "Menjalankan Mode Ekstraksi Script Bot, Firebase & Tools Saja..."
-      run_pipeline_update false "$PRE_DETECTED_ZIP"
-      pause_and_return
-    elif [ "$MODE_CHOICE" = "3" ]; then
       download_github_apk
       pause_and_return
-    elif [ "$MODE_CHOICE" = "4" ]; then
+    elif [ "$MODE_CHOICE" = "3" ]; then
       manage_github_releases
       pause_and_return
-    elif [ "$MODE_CHOICE" = "5" ]; then
+    elif [ "$MODE_CHOICE" = "4" ]; then
       run_clean_apk_workspace
       pause_and_return
-    elif [ "$MODE_CHOICE" = "6" ]; then
+    elif [ "$MODE_CHOICE" = "5" ]; then
       switch_github_repository
       pause_and_return
-    elif [ "$MODE_CHOICE" = "7" ]; then
-      run_telegram_bot
-      pause_and_return
-    elif [ "$MODE_CHOICE" = "8" ]; then
-      run_live_stream_relay
-      pause_and_return
-    elif [ "$MODE_CHOICE" = "9" ]; then
-      run_tiktok_event_broker
-      pause_and_return
-    elif [ "$MODE_CHOICE" = "10" ] || [ "$MODE_CHOICE" = "b" ] || [ "$MODE_CHOICE" = "bigo" ]; then
-      run_bigo_event_broker
-      pause_and_return
     elif [ -z "$MODE_CHOICE" ]; then
-      log_warn "Pilihan kosong. Silakan masukkan angka [1-10] atau ketik '0' untuk keluar."
+      log_warn "Pilihan kosong. Silakan masukkan angka [1-5] atau ketik '0' untuk keluar."
       sleep 1.2
     else
-      log_warn "Pilihan '$MODE_CHOICE' tidak dikenal. Masukkan angka [1-10] atau ketik '0' untuk keluar."
+      log_warn "Pilihan '$MODE_CHOICE' tidak dikenal. Masukkan angka [1-5] atau ketik '0' untuk keluar."
       sleep 1.2
     fi
   done
@@ -1362,49 +1268,29 @@ if [ "$#" -gt 0 ]; then
       CLI_RUN_MODE="update"
       shift 2>/dev/null || true
       ;;
-    2|--local|--offline|-l|--tools)
+    --tools-only)
       CLI_PUSH_GITHUB=false
       CLI_RUN_MODE="update"
       shift 2>/dev/null || true
       ;;
-    3|--download|--unduh|-dl|download)
+    2|--download|--unduh|-dl|download)
       shift 2>/dev/null || true
       download_github_apk "$@"
       exit $?
       ;;
-    4|--release|-rel)
+    3|--release|-rel)
       shift 2>/dev/null || true
       manage_github_releases "$@"
       exit $?
       ;;
-    5|--clean|--purge|-c|--build|-b)
+    4|--clean|--purge|-c|--build|-b)
       shift 2>/dev/null || true
       run_clean_apk_workspace "$@"
       exit $?
       ;;
-    6|--repo|-r)
+    5|--repo|-r)
       shift 2>/dev/null || true
       switch_github_repository "$@"
-      exit $?
-      ;;
-    7|--bot)
-      shift 2>/dev/null || true
-      run_telegram_bot "$@"
-      exit $?
-      ;;
-    8|--relay|--stream)
-      shift 2>/dev/null || true
-      run_live_stream_relay "$@"
-      exit $?
-      ;;
-    9|--broker|--events|--event)
-      shift 2>/dev/null || true
-      run_tiktok_event_broker "$@"
-      exit $?
-      ;;
-    10|--bigo|-bigo|bigo)
-      shift 2>/dev/null || true
-      run_bigo_event_broker "$@"
       exit $?
       ;;
     0|q|quit|exit|batal)

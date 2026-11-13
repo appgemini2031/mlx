@@ -1,0 +1,6 @@
+{
+  "summary":  "Rencana implementasi penutupan kolom analitik dari overlay siaran kamera dan pemindahannya ke Floating Window khusus host:\n1. Penutupan Analitik di Kamera Siaran: Menghilangkan kolom analitik (viewer, likes, gifts, etc.) dari atas kartu Al-Qur'an karena data tersebut merupakan metrik internal konsumsi host siaran, bukan penonton.\n2. Banner Progres Al-Qur'an Penuh (Full-Width): Menata ulang banner atas kartu Al-Qur'an menjadi tampilan progres & sisa juz 30 juz yang lebar, simetris, dan anggun (Surat/Juz, Sisa Huruf, Ayat, Surat, Juz).\n3. Pemindahan Dashboard Analitik ke Floating Control Host: Menghadirkan kartu metrik analitik real-time khusus host di Floating Window (Tab Event) dengan counter live (Viewer, Like, Chat, Gift, Diamond, Join, Follow, Share) yang hanya terlihat di layar host dan tidak bocor ke video stream.\n4. Setelan Default Aman: Menjadikan saklar overlay analitik kamera bernilai default OFF tanpa menghilangkan keleluasaan host untuk mengaktifkannya jika diperlukan.",
+  "updatedAt":  "2026-11-08T23:32:37.510780388Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

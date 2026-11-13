@@ -1,5 +1,6 @@
 <resources>
-    <string name="app_name">Tajasb</string>
-    <string name="floating_service_started">Tajasb Floating Control Aktif</string>
-    <string name="floating_service_desc">Kontrol virtual kamera dan overlay melayang</string>
+    <string name="app_name">Pintasan</string>
+    <string name="floating_service_started">Pintasan Floating Aktif</string>
+    <string name="floating_service_desc">Jendela melayang pintasan aplikasi &amp; multitasking siap digunakan</string>
+    <string name="accessibility_service_desc">Membantu fitur Belah Layar (Split Screen) HP dan pintasan aplikasi multitasking otomatis.</string>
 </resources>

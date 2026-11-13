@@ -1,0 +1,6 @@
+{
+  "summary": "Revisi Rencana Implementasi:\n1. Rentang Zoom Terasa (Noticeable Zoom 1.05x - 1.40x, step 0.02x - 0.05x) per sesi DNA untuk memastikan perbedaan visual yang nyata dan lolos audit TikTok.\n2. Batasan Frame Anti-Hitam (Safe Framing Envelope Guard): Algoritma clamping matematis |panX| <= (Zoom - 1.0) * 0.85 agar pergeseran frame tidak pernah menimbulkan tepi/sudut hitam (hitam overlap) sedikit pun.\n3. Kalkulator Sesi Framing Unik Bebas Hitam: Menghitung secara eksak berapa kombinasi frame yang valid dan aman dari tepi hitam berdasarkan rentang zoom dan pergeseran yang dipilih.\n4. Deteksi Duplikat & Peringatan Zoom Pernah Dipakai dengan tombol 1-klik Buat Zoom Baru.\n5. Kontrol Agresifitas Video & Audio Stepper (+/- 0.1%) serta Opsi Sinkronisasi Audio Tipe 2 ke Tipe 1.\n6. Perbaikan Menyeluruh Backup & Restore (Zero Loss) mencakup 100% field VcamConfig dan SharedPreferences.",
+  "updatedAt": "2026-11-05T19:18:11.186117072Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

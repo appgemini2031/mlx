@@ -1,0 +1,6 @@
+{
+  "summary": "Rencana implementasi 'Decoy / Ghost Mode' (Sabotase Halus) pada Generator Kunci Termux (update.sh) dan Engine Hook CuanCame:\n1. Penambahan opsi rahasia di generator lisensi update.sh: Mode Normal vs Mode Decoy (HP Berat, Peringatan Akun, Auto-Exit, dan Combo).\n2. Format token kriptografi ECDSA terintegrasi dengan penanda flag Decoy Mode pada payload lisensi tanpa merusak verifikasi tanda tangan digital.\n3. Module Decoy Engine di APK (MainHook & GlVideoRenderer): simulasi micro-lag (frame drop ke 8-12 FPS), stutter audio halus, dan simulasi crash/disconnect berkala yang terlihat alami seperti kelemahan hardware perangkat peminjam.\n4. Tampilan aktivasi di HP peminjam tetap melaporkan 'PRO Berhasil Diaktivasi' sehingga tidak menimbulkan kecurigaan.",
+  "updatedAt": "2026-10-18T10:03:39.731690784Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

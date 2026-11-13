@@ -1,0 +1,6 @@
+{
+  "summary":  "Rencana pembersihan total berkas lama yang tidak digunakan (admin_totp, telegram_bot, license_manager, remote_kill, dll) dari lokal Termux dan perbaikan logika update.sh agar berkas tools hanya menyisakan downloader & release manager yang benar-benar dipakai.",
+  "updatedAt":  "2026-11-11T18:25:11.633328944Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

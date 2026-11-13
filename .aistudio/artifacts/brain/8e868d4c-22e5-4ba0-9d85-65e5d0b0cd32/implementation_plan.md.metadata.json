@@ -1,0 +1,6 @@
+{
+  "summary":  "Revisi Rencana: Menghapus total integrasi Bigo Live (Fokus 100% Murni TikTok Live Tanpa Ribet).\n1. Arsitektur Murni TikTok Live: Event Join, Tap-Tap Like, Komentar Chat, dan Saweran Gift koin TikTok langsung masuk instan melalui relay event lokal TikTok.\n2. Semua Penonton Otomatis Jadi Pemain: Begitu penonton masuk siaran TikTok Live atau tap like/chat, gangsing miliknya langsung spawn ke dalam arena piringan.\n3. Mekanisme Gratisan Anti-Bosan: Tap-tap like menambah RPM/HP putaran dan daya tahan di tengah; komentar chat memicu serangan tubrukan (Turbo Dash) ke gangsing terdekat.\n4. Pemicu Saweran Koin TikTok: Gift berjenjang (1 koin Mawar s/d 500+ koin Singa/Paus) membesarkan ukuran gangsing, memicu ledakan Shockwave, petir, hingga badai hisapan kosmik.\n5. Mode Layar Penuh Device 2 & Overlay Kamera Virtual VCam + Simulator Offline Mandiri.",
+  "updatedAt":  "2026-11-10T11:07:44.388467882Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

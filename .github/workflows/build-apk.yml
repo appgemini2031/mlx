@@ -74,7 +74,7 @@ jobs:
           tok = os.environ.get("GH_TOKEN", "")
           best_rel = (0, 0, 0)
           if repo:
-              headers = {"Accept": "application/vnd.github+json", "User-Agent": "Tajasb-CI"}
+              headers = {"Accept": "application/vnd.github+json", "User-Agent": "Acopy-CI"}
               if tok:
                   headers["Authorization"] = f"Bearer {tok}"
               for ep in [f"https://api.github.com/repos/{repo}/releases?per_page=30", f"https://api.github.com/repos/{repo}/tags?per_page=30"]:
@@ -119,11 +119,11 @@ jobs:
             [ -z "$PATCH" ] && PATCH="50"
             echo "APP_VER=${MAJOR}.${MINOR}.${PATCH}" >> $GITHUB_OUTPUT
             echo "TAG_NAME=v${MAJOR}.${MINOR}.${PATCH}-b${{ github.run_number }}" >> $GITHUB_OUTPUT
-            echo "RELEASE_TITLE=Tajasb v${MAJOR}.${MINOR}.${PATCH} (Build ${{ github.run_number }})" >> $GITHUB_OUTPUT
+            echo "RELEASE_TITLE=asisten copy v${MAJOR}.${MINOR}.${PATCH} (Build ${{ github.run_number }})" >> $GITHUB_OUTPUT
           else
             echo "APP_VER=1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
             echo "TAG_NAME=v1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
-            echo "RELEASE_TITLE=Tajasb v1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "RELEASE_TITLE=asisten copy v1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Prepare Release APK Name
@@ -144,7 +144,7 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tajasb-apk-${{ steps.get_version.outputs.TAG_NAME }}
+          name: acopy-apk-${{ steps.get_version.outputs.TAG_NAME }}
           path: release_assets/v${{ steps.get_version.outputs.APP_VER }}.apk
           retention-days: 14
 

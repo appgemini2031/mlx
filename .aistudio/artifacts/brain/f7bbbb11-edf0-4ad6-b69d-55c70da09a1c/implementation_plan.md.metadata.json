@@ -1,0 +1,6 @@
+{
+  "summary":  "Rencana pembersihan menyeluruh proyek 'asisten copy' dengan menghapus seluruh fitur lama (VCam, Xposed, Game, Al-Qur'an, Photo Studio, Audio/Video, Auto-Tap, RTMP, AdBlocker/VPN, Lisensi, Firebase, Telegram Bot, & Live Event Broker) dan hanya mempertahankan fondasi inti:\n1. Aplikasi Android Minimalis (asisten copy): Layar utama bersih untuk izin overlay & kontrol layanan, jendela Floating Window/Bubble yang kosong bersih siap isi, serta modul pembaruan APK via GitHub Releases/Actions.\n2. Pipeline Termux & GitHub Murni: Merampingkan skrip update.sh menjadi fokus 100% pada alur GitHub CI/CD (push & auto-purge, pengunduh APK, manajemen rilis, dan pengaturan endpoint/token GitHub) dengan hanya mempertahankan apk_downloader dan release_manager.\n3. Kebersihan Izin, Manifest & Ketergantungan: Menghapus izin kamera, VPN, aksesibilitas, Xposed metadata, dan aset statis berat yang tidak lagi digunakan sehingga build cepat dan ringan.",
+  "updatedAt":  "2026-11-11T11:28:58.517526527Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

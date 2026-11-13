@@ -64,6 +64,7 @@ object ShopeeHookRouter {
     private val loggedActivities = ConcurrentHashMap.newKeySet<String>()
     private val loggedBypassActivities = ConcurrentHashMap.newKeySet<String>()
     private val hookedCallbackClasses = ConcurrentHashMap.newKeySet<String>()
+    private val hookedStateCallbackClasses = ConcurrentHashMap.newKeySet<String>()
     private val hookedPlaneClasses = ConcurrentHashMap.newKeySet<String>()
 
     private val swappedCamera2Surfaces = ConcurrentHashMap<Surface, Surface>()
@@ -230,6 +231,14 @@ object ShopeeHookRouter {
 
     fun isAnyCameraActive(): Boolean = activeCameraTokens.isNotEmpty()
 
+    fun activeCameraCount(): Int = activeCameraTokens.size
+
+    fun shouldDestroyOnActivityDestroyed(destroyedActivityName: String?, currentForegroundActivity: String?): Boolean {
+        if (destroyedActivityName.isNullOrBlank()) return false
+        if (currentForegroundActivity.isNullOrBlank()) return true
+        return destroyedActivityName == currentForegroundActivity
+    }
+
     fun isDummySurface(surface: Surface?): Boolean {
         if (surface == null) return false
         return dummyCamera2SurfaceSet.contains(surface)
@@ -360,6 +369,40 @@ object ShopeeHookRouter {
         hookImageReader(classLoader, packageName)
     }
 
+    private fun hookStateCallback(callback: Any?) {
+        if (callback == null) return
+        val cls = callback.javaClass
+        if (!hookedStateCallbackClasses.add(cls.name)) return
+
+        try {
+            XposedBridge.hookAllMethods(cls, "onOpened", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val cam = param.args?.firstOrNull()
+                    if (cam != null) {
+                        registerCameraOpened(cam)
+                    }
+                }
+            })
+        } catch (_: Throwable) {}
+
+        listOf("onClosed", "onDisconnected", "onError").forEach { methodName ->
+            try {
+                XposedBridge.hookAllMethods(cls, methodName, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val cam = param.args?.firstOrNull()
+                        if (cam != null) {
+                            registerCameraClosed(cam)
+                        }
+                        if (methodName != "onClosed") {
+                            ShopeeMainHook.logWarn("CameraDevice.StateCallback.$methodName dipanggil di Shopee (activeCam=${activeCameraTokens.size})")
+                        }
+                        ShopeeMainHook.scheduleSessionCloseCheck("StateCallback.$methodName", ShopeeMainHook.appContext?.packageName ?: "com.shopee.id")
+                    }
+                })
+            } catch (_: Throwable) {}
+        }
+    }
+
     private fun hookCameraManager() {
         try {
             XposedHelpers.findAndHookMethod(
@@ -370,7 +413,8 @@ object ShopeeHookRouter {
                 Handler::class.java,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        val camId = param.args[0] as? String ?: "0"
+                        val camId = param.args[0] as? String
+                        hookStateCallback(param.args[1])
                         notifyCameraSwitched(camId)
                     }
                 }
@@ -389,7 +433,8 @@ object ShopeeHookRouter {
                     CameraDevice.StateCallback::class.java,
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
-                            val camId = param.args[0] as? String ?: "0"
+                            val camId = param.args[0] as? String
+                            hookStateCallback(param.args[2])
                             notifyCameraSwitched(camId)
                         }
                     }

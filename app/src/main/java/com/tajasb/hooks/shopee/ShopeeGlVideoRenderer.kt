@@ -48,6 +48,17 @@ class ShopeeGlVideoRenderer(
         private set
 
     @Volatile
+    var onSurfaceInvalidated: ((Surface) -> Unit)? = null
+
+    fun isHealthy(): Boolean {
+        return isRunning &&
+            !released.get() &&
+            targetSurface.isValid &&
+            eglDisplay != EGL14.EGL_NO_DISPLAY &&
+            eglSurface != EGL14.EGL_NO_SURFACE
+    }
+
+    @Volatile
     private var currentConfig: ShopeeVcamConfig = initialConfig
 
     @Volatile
@@ -367,10 +378,23 @@ class ShopeeGlVideoRenderer(
         }
     }
 
+    private fun handleDeadSurface(reason: String) {
+        val dead = targetSurface
+        ShopeeMainHook.logWarn("Surface Shopee terputus ($reason), melepas renderer agar siap dipulihkan")
+        release()
+        try {
+            onSurfaceInvalidated?.invoke(dead)
+        } catch (_: Throwable) {}
+    }
+
     private fun drawFrame(forceRedraw: Boolean = false) {
         val st = videoSurfaceTexture ?: return
         if (!isRunning || released.get()) return
-        if (!targetSurface.isValid || eglDisplay == EGL14.EGL_NO_DISPLAY || eglSurface == EGL14.EGL_NO_SURFACE) return
+        if (!targetSurface.isValid) {
+            handleDeadSurface("targetSurface.isValid=false")
+            return
+        }
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglSurface == EGL14.EGL_NO_SURFACE) return
 
         val hasNew = frameAvailable
         if (!hasNew && (!forceRedraw || !hasFirstFrame)) {
@@ -485,7 +509,14 @@ class ShopeeGlVideoRenderer(
             uLightDirLoc = uLightDirLoc
         )
 
-        EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+        val swapped = EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+        if (!swapped) {
+            val err = EGL14.eglGetError()
+            if (!targetSurface.isValid || err == EGL14.EGL_BAD_SURFACE || err == EGL14.EGL_BAD_NATIVE_WINDOW) {
+                handleDeadSurface("eglSwapBuffers=0x${Integer.toHexString(err)}")
+                return
+            }
+        }
         lastDrawTimeMs = now
     }
 

@@ -327,9 +327,14 @@ object ShopeeMainHook {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val act = param.thisObject as? Activity
                         if (act?.isFinishing == true) {
+                            val destroyedName = act.javaClass.name
                             mainHandler.postDelayed({
-                                if (!ShopeeHookRouter.isAnyCameraActive()) {
-                                    stopVideoPlayback("Activity.onDestroy", force = true)
+                                val shouldStop = ShopeeHookRouter.shouldDestroyOnActivityDestroyed(
+                                    destroyedActivityName = destroyedName,
+                                    currentForegroundActivity = ShopeeHookRouter.currentActivityName
+                                )
+                                if (shouldStop && !ShopeeHookRouter.isAnyCameraActive()) {
+                                    stopVideoPlayback("Activity.onDestroy ($destroyedName)", force = true)
                                 }
                             }, 350L)
                         }
@@ -621,16 +626,26 @@ object ShopeeMainHook {
 
     fun onActivityResumedRecovery(activityName: String) {
         val existing = currentRenderer
-        if (existing != null && existing.isRunning) {
-            existing.ensurePlayingIfActive()
-            return
+        if (existing != null) {
+            if (existing.isHealthy()) {
+                existing.ensurePlayingIfActive()
+                if (ShopeeHookRouter.isLiveOrVideoActivity(activityName)) {
+                    logDebug("Resume $activityName: renderer aktif & sehat (activeCam=${ShopeeHookRouter.activeCameraCount()})")
+                }
+                return
+            } else {
+                stopVideoPlayback("Surface tidak sehat saat resume ($activityName)", force = true)
+            }
         }
         if (ShopeeHookRouter.isLiveOrVideoActivity(activityName)) {
             val candidate = activeSurface?.takeIf { it.isValid }
                 ?: lastValidSurface?.takeIf { it.isValid }
+                ?: lastTexture?.let { Surface(it) }?.takeIf { it.isValid }
             if (candidate != null) {
                 logInfo("Memulihkan VCam Shopee saat kembali ke $activityName")
                 playVideoOnSurface(candidate, activePackageName)
+            } else {
+                logInfo("Kembali ke $activityName: menunggu Surface baru dari kamera Shopee (activeCam=${ShopeeHookRouter.activeCameraCount()})")
             }
         }
     }
@@ -658,7 +673,7 @@ object ShopeeMainHook {
         lastValidSurface = surface
 
         val existing = currentRenderer
-        if (existing != null && existing.isRunning) {
+        if (existing != null && existing.isHealthy()) {
             if (existing.targetSurface != surface) {
                 activeSurface = surface
                 existing.updateTargetSurface(surface)
@@ -666,6 +681,9 @@ object ShopeeMainHook {
                 existing.applyConfig(liveConfig)
             }
             return
+        } else if (existing != null) {
+            try { existing.release() } catch (_: Throwable) {}
+            currentRenderer = null
         }
 
         val videoFile = getVirtualVideoFile(forceRefresh = false, pkg = pkg)
@@ -689,6 +707,19 @@ object ShopeeMainHook {
             initialConfig = liveConfig,
             initialFrontFacing = ShopeeHookRouter.isFrontFacing
         )
+        renderer.onSurfaceInvalidated = { deadSurface ->
+            synchronized(this@ShopeeMainHook) {
+                if (currentRenderer === renderer) {
+                    currentRenderer = null
+                }
+                if (activeSurface === deadSurface) {
+                    activeSurface = null
+                }
+                if (lastValidSurface === deadSurface) {
+                    lastValidSurface = null
+                }
+            }
+        }
         currentRenderer = renderer
         renderer.start(waitForEglMs = 250L)
         logInfo("ShopeeGlVideoRenderer dimulai untuk $pkg (${videoFile.name}, ${videoFile.length()} bytes)")

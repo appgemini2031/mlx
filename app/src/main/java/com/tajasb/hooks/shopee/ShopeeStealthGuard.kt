@@ -30,10 +30,6 @@ object ShopeeStealthGuard {
         "com.tajasb",
         "com.aistudio.tajasb",
         "com.aistudio.cuancame",
-        "com.jy.x.separation",
-        "com.mochi",
-        "id.mochi",
-        "mochicloner",
         "de.robv.android.xposed",
         "org.lsposed",
         "io.github.lsposed",
@@ -93,7 +89,7 @@ object ShopeeStealthGuard {
         hookPackageManager(classLoader)
         hookAccessibilityManager()
         hookSettingsSecure()
-        hookDebugFlags(classLoader)
+        hookDebugFlags()
         ShopeeMainHook.logInfo("ShopeeStealthGuard aktif (PackageManager + Accessibility + Debug guard)")
     }
 
@@ -243,7 +239,7 @@ object ShopeeStealthGuard {
         } catch (_: Throwable) {}
     }
 
-    private fun hookDebugFlags(classLoader: ClassLoader) {
+    private fun hookDebugFlags() {
         try {
             XposedHelpers.findAndHookMethod(
                 Debug::class.java,
@@ -254,19 +250,6 @@ object ShopeeStealthGuard {
                     }
                 }
             )
-        } catch (_: Throwable) {}
-
-        try {
-            val sysPropsClass = XposedHelpers.findClass("android.os.SystemProperties", classLoader)
-            XposedBridge.hookAllMethods(sysPropsClass, "get", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val key = param.args?.firstOrNull() as? String ?: return
-                    when (key) {
-                        "ro.debuggable" -> param.result = "0"
-                        "ro.secure" -> param.result = "1"
-                    }
-                }
-            })
         } catch (_: Throwable) {}
     }
 }

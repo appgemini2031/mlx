@@ -300,8 +300,15 @@ object ShopeeMainHook {
                 "onCreate",
                 Bundle::class.java,
                 object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val act = param.thisObject as? Activity ?: return
+                        ShopeeHookRouter.onActivityCreatedOrStarted(act.javaClass.name)
+                    }
+
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        (param.thisObject as? Context)?.let { onContextReady(it, "Activity.onCreate") }
+                        val act = param.thisObject as? Activity ?: return
+                        onContextReady(act, "Activity.onCreate")
+                        ShopeeHookRouter.onActivityCreatedOrStarted(act.javaClass.name)
                     }
                 }
             )
@@ -742,15 +749,16 @@ object ShopeeMainHook {
     }
 
     fun scheduleSessionCloseCheck(reason: String, packageName: String) {
-        if (ShopeeHookRouter.isAnyCameraActive()) {
-            logDebug("$reason diabaikan karena kamera Shopee lain masih aktif (transisi Preview/Live)")
-            return
-        }
+        val closeSeq = ShopeeHookRouter.cameraSessionSeq
         mainHandler.postDelayed({
+            if (ShopeeHookRouter.cameraSessionSeq != closeSeq) {
+                return@postDelayed
+            }
+            val rendererHealthy = currentRenderer?.isHealthy() == true
             val anyActive = ShopeeHookRouter.isAnyCameraActive()
-            val surf = activeSurface
-            if (!anyActive && (surf == null || !surf.isValid)) {
-                stopVideoPlayback("$reason (Timeout 1500ms)", force = false)
+            if (!anyActive || !rendererHealthy) {
+                ShopeeHookRouter.registerCameraClosed(null)
+                stopVideoPlayback("$reason (Timeout 1500ms)", force = true)
             }
         }, 1500L)
     }
@@ -764,17 +772,22 @@ object ShopeeMainHook {
         if (!force && surf != null && surf.isValid && currentRenderer?.isRunning == true) {
             return
         }
+        val hadRenderer = currentRenderer != null || activeSurface != null
         try {
             currentRenderer?.release()
         } catch (_: Throwable) {}
         currentRenderer = null
         activeSurface = null
-        lastValidSurface = null
-        lastTexture = null
-        lastSurfaceActivityName = null
+        if (lastValidSurface?.isValid != true) {
+            lastValidSurface = null
+            lastTexture = null
+            lastSurfaceActivityName = null
+        }
         if (!ShopeeHookRouter.isAnyCameraActive()) {
             ShopeeHookRouter.releaseAllDummyCamera2Surfaces()
         }
-        logInfo("Playback Shopee dihentikan (alasan=$reason, force=$force)")
+        if (hadRenderer) {
+            logInfo("Playback Shopee dihentikan (alasan=$reason, force=$force)")
+        }
     }
 }

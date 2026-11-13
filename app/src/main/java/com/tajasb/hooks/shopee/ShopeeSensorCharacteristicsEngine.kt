@@ -67,17 +67,8 @@ object ShopeeSensorCharacteristicsEngine {
                             }
                         }
                         keyName.contains("info.supportedHardwareLevel", ignoreCase = true) -> {
-                            val existing = param.result as? Int
-                            val isLowTier = existing == null ||
-                                existing == CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY ||
-                                existing == CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_LIMITED
-                            if (isLowTier) {
-                                val camId = try { getActiveCameraId() } catch (_: Throwable) { "0" }
-                                param.result = if (camId == "1") {
-                                    CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_3
-                                } else {
-                                    CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_FULL
-                                }
+                            if (param.result == null) {
+                                param.result = CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LIMITED
                             }
                         }
                     }

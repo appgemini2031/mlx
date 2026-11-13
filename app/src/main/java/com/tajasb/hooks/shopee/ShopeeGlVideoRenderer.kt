@@ -184,10 +184,8 @@ class ShopeeGlVideoRenderer(
                 latch?.countDown()
                 handler.postDelayed(keepaliveRunnable, 500L)
             } catch (t: Throwable) {
-                ShopeeMainHook.logWarn("EGL init gagal untuk Surface Shopee ($targetSurface), fallback MediaPlayer: ${t.message}")
-                releaseGlOnly()
-                startFallbackMediaPlayer(targetSurface, videoFile)
                 latch?.countDown()
+                handleDeadSurface("EGL init gagal (${t.message})")
             }
         }
         if (latch != null) {
@@ -372,9 +370,11 @@ class ShopeeGlVideoRenderer(
                 ShopeeMainHook.logInfo("Surface Shopee dimigrasikan seamless (${surfaceWidth}x${surfaceHeight})")
             } else {
                 eglSurface = EGL14.EGL_NO_SURFACE
+                handleDeadSurface("migrasi eglCreateWindowSurface gagal")
             }
         } catch (t: Throwable) {
             Log.w(TAG, "Gagal migrasi surface Shopee: ${t.message}")
+            handleDeadSurface("migrasi exception: ${t.message}")
         }
     }
 

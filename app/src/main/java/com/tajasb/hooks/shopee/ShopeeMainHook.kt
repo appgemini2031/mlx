@@ -488,8 +488,8 @@ object ShopeeMainHook {
         if (ctx == null) {
             return resolveLocalFallbackVideoFile(pkg)
         }
-        val cfg = queryConfigFromProvider(ctx) ?: liveConfig
-        liveConfig = cfg
+        ensureConfigSynced(force = forceRefresh)
+        val cfg = liveConfig
         if (!cfg.enabled) return null
 
         val activeName = currentRenderer?.videoFile?.name ?: ""

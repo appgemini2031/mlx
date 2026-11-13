@@ -36,6 +36,8 @@ object ShopeeAuto3AEngine {
                     }
                     if (keyName.isBlank()) return
 
+                    if (param.result != null) return
+
                     when {
                         keyName.equals("android.control.afState", ignoreCase = true) ||
                             keyName.contains("control.afState", ignoreCase = true) -> {

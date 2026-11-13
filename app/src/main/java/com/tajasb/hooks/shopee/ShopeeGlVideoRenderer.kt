@@ -180,9 +180,11 @@ class ShopeeGlVideoRenderer(
         val latch = if (waitForEglMs > 0L) java.util.concurrent.CountDownLatch(1) else null
         handler.post {
             try {
-                initGlAndMedia()
+                initGlAndMedia(latch)
                 latch?.countDown()
-                handler.postDelayed(keepaliveRunnable, 500L)
+                if (isRunning && !released.get()) {
+                    handler.postDelayed(keepaliveRunnable, 500L)
+                }
             } catch (t: Throwable) {
                 latch?.countDown()
                 handleDeadSurface("EGL init gagal (${t.message})")
@@ -195,7 +197,7 @@ class ShopeeGlVideoRenderer(
         }
     }
 
-    private fun initGlAndMedia() {
+    private fun initGlAndMedia(eglReadyLatch: java.util.concurrent.CountDownLatch? = null) {
         GlMatrix.setIdentityM(texMatrix, 0)
         GlMatrix.setIdentityM(mvpMatrix, 0)
         hasFirstFrame = false
@@ -207,6 +209,12 @@ class ShopeeGlVideoRenderer(
         eglSurface = egl.eglSurface
         surfaceWidth = egl.surfaceWidth
         surfaceHeight = egl.surfaceHeight
+        if (eglSurface == android.opengl.EGL14.EGL_NO_SURFACE) {
+            eglReadyLatch?.countDown()
+            handleDeadSurface("EGLSurface gagal dibuat pada targetSurface Shopee")
+            return
+        }
+        eglReadyLatch?.countDown()
 
         programId = GlShaderProgram.createProgram(
             GlShaderProgram.VERTEX_SHADER,

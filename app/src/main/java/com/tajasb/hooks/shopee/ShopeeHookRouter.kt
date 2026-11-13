@@ -235,10 +235,12 @@ object ShopeeHookRouter {
         cameraSessionSeq++
     }
 
-    fun registerCameraClosed(token: Any?) {
+    fun registerCameraClosed(token: Any?): Boolean {
         if (token == null || activeCameraToken == null || activeCameraToken === token) {
             activeCameraToken = null
+            return true
         }
+        return false
     }
 
     fun isAnyCameraActive(): Boolean = activeCameraToken != null
@@ -1211,9 +1213,13 @@ object ShopeeHookRouter {
                         "close",
                         object : XC_MethodHook() {
                             override fun afterHookedMethod(param: MethodHookParam) {
-                                registerCameraClosed(param.thisObject)
-                                ShopeeMainHook.logDebug("CameraDeviceImpl.close dipanggil (activeCam=${activeCameraCount()})")
-                                ShopeeMainHook.scheduleSessionCloseCheck("CameraDeviceImpl.close", packageName)
+                                val closedActive = registerCameraClosed(param.thisObject)
+                                if (closedActive) {
+                                    ShopeeMainHook.logDebug("CameraDeviceImpl.close dipanggil (activeCam=${activeCameraCount()})")
+                                    ShopeeMainHook.scheduleSessionCloseCheck("CameraDeviceImpl.close", packageName)
+                                } else {
+                                    ShopeeMainHook.logDebug("CameraDeviceImpl.close (instansi kamera lama) diabaikan (activeCam=${activeCameraCount()})")
+                                }
                             }
                         }
                     )

@@ -62,7 +62,7 @@ class MainActivity : ComponentActivity() {
                         val text = BackupRestoreManager.readBackupFromUri(this, uri)
                         if (!text.isNullOrBlank()) {
                             val parsed = BackupRestoreManager.parseBackup(text, allowPlainTextFallback = false)
-                            if (parsed.isSuccess && (parsed.notes.isNotEmpty() || parsed.pinnedApps.isNotEmpty())) {
+                            if (parsed.isSuccess) {
                                 pendingRestoreData = parsed
                             } else {
                                 Toast.makeText(
@@ -174,7 +174,7 @@ class MainActivity : ComponentActivity() {
                                 Toast.makeText(this, "Clipboard masih kosong.", Toast.LENGTH_SHORT).show()
                             } else {
                                 val parsed = BackupRestoreManager.parseBackup(clip, allowPlainTextFallback = true)
-                                if (parsed.isSuccess && (parsed.notes.isNotEmpty() || parsed.pinnedApps.isNotEmpty())) {
+                                if (parsed.isSuccess) {
                                     pendingRestoreData = parsed
                                 } else {
                                     Toast.makeText(this, "Teks di clipboard bukan format cadangan yang valid.", Toast.LENGTH_SHORT).show()

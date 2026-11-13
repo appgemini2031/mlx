@@ -35,9 +35,11 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
 import android.text.TextWatcher
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
@@ -70,6 +72,7 @@ class FloatingControlService : Service() {
     private var panelParams: WindowManager.LayoutParams? = null
     private var panelBackgroundCard: LinearLayout? = null
     private var alphaToggleButton: TextView? = null
+    private var bubblePinnedScrollView: View? = null
 
     private var isPanelExpanded = true
     private var isStoppingOrDestroyed = false
@@ -219,6 +222,7 @@ class FloatingControlService : Service() {
         removeOverlaySafely(expandedPanelView)
         floatingBubbleView = null
         expandedPanelView = null
+        bubblePinnedScrollView = null
         panelBackgroundCard = null
         tabPintasanButton = null
         tabCatatanButton = null
@@ -553,8 +557,8 @@ class FloatingControlService : Service() {
     private fun buildBubbleView() {
         val screenW = resources.displayMetrics.widthPixels
         val screenH = resources.displayMetrics.heightPixels
-        val savedX = prefs.getInt(KEY_BUBBLE_X, dp(16)).coerceIn(0, (screenW - dp(80)).coerceAtLeast(0))
-        val savedY = prefs.getInt(KEY_BUBBLE_Y, dp(120)).coerceIn(0, (screenH - dp(80)).coerceAtLeast(0))
+        val savedX = prefs.getInt(KEY_BUBBLE_X, dp(16)).coerceIn(0, (screenW - dp(44)).coerceAtLeast(0))
+        val savedY = prefs.getInt(KEY_BUBBLE_Y, dp(120)).coerceIn(0, (screenH - dp(44)).coerceAtLeast(0))
 
         val params = WindowManager.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -569,13 +573,14 @@ class FloatingControlService : Service() {
         }
         bubbleParams = params
 
-        val touchSlop = dp(6)
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop.coerceAtLeast(dp(10))
         val container = object : LinearLayout(this) {
             private var initialX = 0
             private var initialY = 0
             private var initialTouchX = 0f
             private var initialTouchY = 0f
             private var isDragging = false
+            private var touchStartedInPinnedScroll = false
 
             override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
                 when (ev.actionMasked) {
@@ -585,11 +590,20 @@ class FloatingControlService : Service() {
                         initialTouchX = ev.rawX
                         initialTouchY = ev.rawY
                         isDragging = false
+                        touchStartedInPinnedScroll = isPointInsideView(bubblePinnedScrollView, ev.rawX, ev.rawY)
                         return false
                     }
                     MotionEvent.ACTION_MOVE -> {
                         val dx = (ev.rawX - initialTouchX).toInt()
                         val dy = (ev.rawY - initialTouchY).toInt()
+                        if (touchStartedInPinnedScroll) {
+                            val scroller = bubblePinnedScrollView
+                            if (!isBubbleVertical && scroller != null && abs(dx) >= abs(dy) && abs(dx) > touchSlop) {
+                                if (scroller.canScrollHorizontally(-dx)) return false
+                            } else if (isBubbleVertical && scroller != null && abs(dy) >= abs(dx) && abs(dy) > touchSlop) {
+                                if (scroller.canScrollVertically(-dy)) return false
+                            }
+                        }
                         if (abs(dx) > touchSlop || abs(dy) > touchSlop) {
                             isDragging = true
                             return true
@@ -597,6 +611,7 @@ class FloatingControlService : Service() {
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         isDragging = false
+                        touchStartedInPinnedScroll = false
                     }
                 }
                 return super.onInterceptTouchEvent(ev)
@@ -617,8 +632,10 @@ class FloatingControlService : Service() {
                         val dy = (event.rawY - initialTouchY).toInt()
                         if (isDragging || abs(dx) > touchSlop || abs(dy) > touchSlop) {
                             isDragging = true
-                            val maxX = (resources.displayMetrics.widthPixels - width).coerceAtLeast(0)
-                            val maxY = (resources.displayMetrics.heightPixels - height).coerceAtLeast(0)
+                            val curW = width.takeIf { it > 0 } ?: measuredWidth.coerceAtLeast(dp(40))
+                            val curH = height.takeIf { it > 0 } ?: measuredHeight.coerceAtLeast(dp(40))
+                            val maxX = (resources.displayMetrics.widthPixels - curW).coerceAtLeast(0)
+                            val maxY = (resources.displayMetrics.heightPixels - curH).coerceAtLeast(0)
                             params.x = (initialX + dx).coerceIn(0, maxX)
                             params.y = (initialY + dy).coerceIn(0, maxY)
                             if (windowToken != null) {
@@ -637,6 +654,7 @@ class FloatingControlService : Service() {
                                 .apply()
                         }
                         isDragging = false
+                        touchStartedInPinnedScroll = false
                         return true
                     }
                 }
@@ -646,44 +664,129 @@ class FloatingControlService : Service() {
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(14).toFloat()
+                cornerRadius = dp(12).toFloat()
                 setColor(Color.parseColor("#EE0B1120"))
                 setStroke(dp(1), Color.parseColor("#38BDF8"))
             }
-            setPadding(dp(6), dp(5), dp(6), dp(5))
+            setPadding(dp(5), dp(5), dp(5), dp(5))
             elevation = dp(10).toFloat()
         }
 
         floatingBubbleView = container
         populateBubbleContent(container)
+        measureAndPositionBubble(container, params, preserveAnchorFromPrev = false)
+    }
+
+    private fun isPointInsideView(view: View?, rawX: Float, rawY: Float): Boolean {
+        if (view == null || view.visibility != View.VISIBLE || view.windowToken == null) return false
+        val loc = IntArray(2)
+        view.getLocationOnScreen(loc)
+        val x = rawX.toInt()
+        val y = rawY.toInt()
+        return x >= loc[0] && x <= loc[0] + view.width && y >= loc[1] && y <= loc[1] + view.height
+    }
+
+    private fun measureBubbleSize(container: View): Pair<Int, Int> {
+        val screenW = resources.displayMetrics.widthPixels
+        val screenH = resources.displayMetrics.heightPixels
+        val maxW = (screenW - dp(16)).coerceAtLeast(dp(40))
+        val maxH = (screenH - dp(32)).coerceAtLeast(dp(40))
+        container.measure(
+            View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.AT_MOST),
+            View.MeasureSpec.makeMeasureSpec(maxH, View.MeasureSpec.AT_MOST)
+        )
+        val w = container.measuredWidth.coerceAtLeast(dp(36))
+        val h = container.measuredHeight.coerceAtLeast(dp(36))
+        return Pair(w, h)
+    }
+
+    private fun measureAndPositionBubble(
+        container: View,
+        params: WindowManager.LayoutParams,
+        preserveAnchorFromPrev: Boolean,
+        prevX: Int = params.x,
+        prevY: Int = params.y,
+        prevW: Int = 0,
+        prevH: Int = 0
+    ) {
+        val screenW = resources.displayMetrics.widthPixels
+        val screenH = resources.displayMetrics.heightPixels
+        val (newW, newH) = measureBubbleSize(container)
+
+        if (preserveAnchorFromPrev && prevW > 0 && prevH > 0) {
+            val prevCenterX = prevX + prevW / 2
+            val prevRight = prevX + prevW
+            val wasRightAligned = prevCenterX > screenW / 2
+            val targetX = if (wasRightAligned) prevRight - newW else prevX
+
+            val prevBottom = prevY + prevH
+            val wasBottomAligned = prevBottom >= screenH - dp(64)
+            val targetY = if (wasBottomAligned) prevBottom - newH else prevY
+
+            params.x = targetX.coerceIn(0, (screenW - newW).coerceAtLeast(0))
+            params.y = targetY.coerceIn(0, (screenH - newH).coerceAtLeast(0))
+        } else {
+            params.x = params.x.coerceIn(0, (screenW - newW).coerceAtLeast(0))
+            params.y = params.y.coerceIn(0, (screenH - newH).coerceAtLeast(0))
+        }
+
+        prefs.edit()
+            .putInt(KEY_BUBBLE_X, params.x)
+            .putInt(KEY_BUBBLE_Y, params.y)
+            .apply()
     }
 
     private fun toggleBubbleOrientation() {
         isBubbleVertical = !isBubbleVertical
         prefs.edit().putBoolean(KEY_BUBBLE_IS_VERTICAL, isBubbleVertical).apply()
-        refreshBubbleContent()
+        refreshBubbleContent(preserveAnchor = true)
     }
 
-    private fun refreshBubbleContent() {
+    private fun refreshBubbleContent(preserveAnchor: Boolean = true) {
         val container = floatingBubbleView as? LinearLayout ?: return
-        populateBubbleContent(container)
         val params = bubbleParams ?: return
+        val prevX = params.x
+        val prevY = params.y
+        val prevW = container.width.takeIf { it > 0 } ?: container.measuredWidth
+        val prevH = container.height.takeIf { it > 0 } ?: container.measuredHeight
+
+        populateBubbleContent(container)
+        measureAndPositionBubble(
+            container = container,
+            params = params,
+            preserveAnchorFromPrev = preserveAnchor,
+            prevX = prevX,
+            prevY = prevY,
+            prevW = prevW,
+            prevH = prevH
+        )
+
         if (container.windowToken != null) {
             try {
                 windowManager.updateViewLayout(container, params)
             } catch (_: Throwable) {}
-            container.post { clampOverlaysToScreen() }
         }
     }
 
     private fun getPinnedAppItems(): List<AppItem> {
-        if (pinnedPackageNames.isEmpty() || installedAppsList.isEmpty()) return emptyList()
+        if (pinnedPackageNames.isEmpty()) return emptyList()
         val appByPkg = installedAppsList.associateBy { it.packageName }
-        return pinnedPackageNames.mapNotNull { appByPkg[it] }
+        val pm = packageManager
+        return pinnedPackageNames.mapNotNull { pkg ->
+            appByPkg[pkg] ?: try {
+                val ai = pm.getApplicationInfo(pkg, 0)
+                val label = pm.getApplicationLabel(ai).toString()
+                val icon = pm.getApplicationIcon(ai)
+                AppItem(label, pkg, icon)
+            } catch (_: Exception) {
+                null
+            }
+        }
     }
 
     private fun populateBubbleContent(container: LinearLayout) {
         container.removeAllViews()
+        bubblePinnedScrollView = null
         container.orientation = LinearLayout.VERTICAL
         container.gravity = if (isBubbleVertical) Gravity.END else Gravity.START
 
@@ -693,7 +796,8 @@ class FloatingControlService : Service() {
 
         if (!isBubbleVertical) {
             // HORIZONTAL MODE:
-            // Baris 1 (Floating utama): [ ⋮⋮ | ↕ | 🚀 | 📝 | ✕ ] (Hanya icon tanpa teks)
+            // Baris 1 (Floating utama, ikon saja): [ ⋮⋮ | ↕ | 🚀 | (spacer) | 📝 | ✕ ]
+            // Baris 2 (Di bawah floating): Icon Pin Pintasan
             val topRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -701,11 +805,12 @@ class FloatingControlService : Service() {
 
             val dragGrip = TextView(this).apply {
                 text = "⋮⋮"
-                textSize = 11f
+                setTextSize(TypedValue.COMPLEX_UNIT_DIP, 11f)
+                includeFontPadding = false
                 setTextColor(Color.parseColor("#64748B"))
                 setTypeface(null, Typeface.BOLD)
                 gravity = Gravity.CENTER
-                setPadding(dp(1), 0, dp(4), 0)
+                setPadding(dp(2), 0, dp(4), 0)
             }
             topRow.addView(dragGrip)
 
@@ -734,7 +839,12 @@ class FloatingControlService : Service() {
                 showExpandedPanel()
             }
             topRow.addView(btnPintasan)
-            topRow.addView(createHorizontalSpacer(4))
+
+            // Flexible spacer pushes Catatan & Tutup cleanly to the right if pinned row is wider
+            val flexSpacer = View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(4), 1, 1f)
+            }
+            topRow.addView(flexSpacer)
 
             val btnCatatan = createBubbleIconButton(
                 icon = "📝",
@@ -753,12 +863,21 @@ class FloatingControlService : Service() {
             val btnCloseBubble = createBubbleCloseIconButton(btnSize)
             topRow.addView(btnCloseBubble)
 
-            container.addView(topRow)
-
-            // Baris 2 (Di bawah floating): Icon Pin Pintasan
             if (pinnedApps.isNotEmpty()) {
+                val maxPinnedWidth = (resources.displayMetrics.widthPixels - dp(36)).coerceAtLeast(dp(156))
+                val approxPinsWidth = pinnedApps.size * btnSize + (pinnedApps.size - 1).coerceAtLeast(0) * gap
+
+                topRow.measure(
+                    View.MeasureSpec.makeMeasureSpec(maxPinnedWidth, View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(btnSize + dp(4), View.MeasureSpec.AT_MOST)
+                )
+                val topRowNaturalW = topRow.measuredWidth
+                val targetRowWidth = maxOf(topRowNaturalW, minOf(approxPinsWidth, maxPinnedWidth))
+
+                topRow.layoutParams = LinearLayout.LayoutParams(targetRowWidth, ViewGroup.LayoutParams.WRAP_CONTENT)
+                container.addView(topRow)
                 container.addView(createVerticalSpacer(4))
-                val maxPinnedWidth = (resources.displayMetrics.widthPixels - dp(40)).coerceAtLeast(dp(140))
+
                 val pinsRow = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
@@ -768,23 +887,28 @@ class FloatingControlService : Service() {
                     pinsRow.addView(createBubblePinnedAppButton(app, btnSize))
                 }
 
-                val approxRowWidth = pinnedApps.size * btnSize + (pinnedApps.size - 1).coerceAtLeast(0) * gap
-                if (approxRowWidth > maxPinnedWidth) {
+                if (approxPinsWidth > maxPinnedWidth) {
                     val hScroll = HorizontalScrollView(this).apply {
                         isHorizontalScrollBarEnabled = false
+                        overScrollMode = View.OVER_SCROLL_NEVER
                         layoutParams = LinearLayout.LayoutParams(maxPinnedWidth, ViewGroup.LayoutParams.WRAP_CONTENT)
                         addView(pinsRow)
                     }
+                    bubblePinnedScrollView = hScroll
                     container.addView(hScroll)
                 } else {
                     container.addView(pinsRow)
                 }
+            } else {
+                container.addView(topRow)
             }
         } else {
             // VERTICAL MODE (Sejajar ke bawah: tombol tutup di kanan bawah dan atasnya catatan)
             val dragGrip = TextView(this).apply {
                 text = "⋯"
-                textSize = 11f
+                setTextSize(TypedValue.COMPLEX_UNIT_DIP, 12f)
+                includeFontPadding = false
+                setPadding(0, 0, 0, 0)
                 setTextColor(Color.parseColor("#64748B"))
                 setTypeface(null, Typeface.BOLD)
                 gravity = Gravity.CENTER
@@ -821,7 +945,7 @@ class FloatingControlService : Service() {
 
             if (pinnedApps.isNotEmpty()) {
                 container.addView(createVerticalSpacer(4))
-                val maxPinnedHeight = (resources.displayMetrics.heightPixels / 3).coerceAtLeast(dp(120))
+                val maxPinnedHeight = (resources.displayMetrics.heightPixels * 2 / 5).coerceAtLeast(dp(110))
                 val pinsCol = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                     gravity = Gravity.END
@@ -835,9 +959,11 @@ class FloatingControlService : Service() {
                 if (approxColHeight > maxPinnedHeight) {
                     val vScroll = ScrollView(this).apply {
                         isVerticalScrollBarEnabled = false
+                        overScrollMode = View.OVER_SCROLL_NEVER
                         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, maxPinnedHeight)
                         addView(pinsCol)
                     }
+                    bubblePinnedScrollView = vScroll
                     container.addView(vScroll)
                 } else {
                     container.addView(pinsCol)
@@ -877,7 +1003,9 @@ class FloatingControlService : Service() {
     ): TextView {
         return TextView(this).apply {
             text = icon
-            textSize = 13.5f
+            setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13f)
+            includeFontPadding = false
+            setPadding(0, 0, 0, 0)
             setTextColor(Color.parseColor(textColor))
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(sizePx, sizePx)
@@ -946,7 +1074,9 @@ class FloatingControlService : Service() {
 
         return TextView(this).apply {
             text = "✕"
-            textSize = 13f
+            setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13f)
+            includeFontPadding = false
+            setPadding(0, 0, 0, 0)
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#E2E8F0"))
             gravity = Gravity.CENTER
@@ -3648,8 +3778,10 @@ class FloatingControlService : Service() {
             val pm = packageManager
             val intent = pm.getLaunchIntentForPackage(packageName) ?: return
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (isPanelExpanded) {
+                showBubbleOnly()
+            }
             startActivity(intent)
-            showBubbleOnly()
         } catch (e: Exception) {
             Toast.makeText(applicationContext, "Gagal membuka aplikasi", Toast.LENGTH_SHORT).show()
         }
@@ -3780,14 +3912,15 @@ class FloatingControlService : Service() {
 
         bubbleParams?.let { bp ->
             val bubble = floatingBubbleView
-            val bw = bubble?.width?.takeIf { it > 0 } ?: dp(180)
-            val bh = bubble?.height?.takeIf { it > 0 } ?: dp(56)
-            bp.x = bp.x.coerceIn(0, (screenW - bw).coerceAtLeast(0))
-            bp.y = bp.y.coerceIn(0, (screenH - bh).coerceAtLeast(0))
-            if (bubble != null && bubble.windowToken != null) {
-                try {
-                    windowManager.updateViewLayout(bubble, bp)
-                } catch (_: Throwable) {}
+            if (bubble != null) {
+                val (measuredW, measuredH) = measureBubbleSize(bubble)
+                bp.x = bp.x.coerceIn(0, (screenW - measuredW).coerceAtLeast(0))
+                bp.y = bp.y.coerceIn(0, (screenH - measuredH).coerceAtLeast(0))
+                if (bubble.windowToken != null) {
+                    try {
+                        windowManager.updateViewLayout(bubble, bp)
+                    } catch (_: Throwable) {}
+                }
             }
         }
     }
@@ -3907,6 +4040,8 @@ class FloatingControlService : Service() {
     private fun showBubbleOnly() {
         if (isStoppingOrDestroyed) return
         isPanelExpanded = false
+        pintasanSearchInput?.clearFocus()
+        notesSearchInput?.clearFocus()
         closeNoteEditor()
         closeColumnPickerOverlay()
         closePickerOverlay()
@@ -3915,9 +4050,9 @@ class FloatingControlService : Service() {
         removeOverlaySafely(expandedPanelView)
         val bubble = floatingBubbleView ?: return
         val params = bubbleParams ?: return
+        measureAndPositionBubble(bubble, params, preserveAnchorFromPrev = false)
         applyOpacityToOverlays()
         addOverlaySafely(bubble, params)
-        bubble.post { clampOverlaysToScreen() }
     }
 
     private fun addOverlaySafely(view: View, params: WindowManager.LayoutParams) {

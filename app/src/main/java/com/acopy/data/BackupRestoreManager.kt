@@ -512,6 +512,7 @@ object BackupRestoreManager {
     }
 
     fun notifyFloatingServiceToReload(context: Context) {
+        if (!com.acopy.FloatingControlService.isRunning) return
         try {
             val intent = Intent(context, com.acopy.FloatingControlService::class.java).apply {
                 action = ACTION_RELOAD_DATA

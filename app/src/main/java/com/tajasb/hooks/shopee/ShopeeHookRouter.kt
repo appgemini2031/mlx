@@ -65,6 +65,7 @@ object ShopeeHookRouter {
     private val loggedBypassActivities = ConcurrentHashMap.newKeySet<String>()
     private val hookedCallbackClasses = ConcurrentHashMap.newKeySet<String>()
     private val hookedStateCallbackClasses = ConcurrentHashMap.newKeySet<String>()
+    private val hookedDeviceClasses = ConcurrentHashMap.newKeySet<String>()
     private val hookedPlaneClasses = ConcurrentHashMap.newKeySet<String>()
 
     private val swappedCamera2Surfaces = ConcurrentHashMap<Surface, Surface>()
@@ -363,13 +364,13 @@ object ShopeeHookRouter {
     }
 
     fun installHooks(classLoader: ClassLoader, packageName: String) {
-        hookCameraManager()
+        hookCameraManager(packageName)
         hookCamera1(classLoader, packageName)
         hookCamera2(classLoader, packageName)
         hookImageReader(classLoader, packageName)
     }
 
-    private fun hookStateCallback(callback: Any?) {
+    private fun hookStateCallback(callback: Any?, packageName: String) {
         if (callback == null) return
         val cls = callback.javaClass
         if (!hookedStateCallbackClasses.add(cls.name)) return
@@ -380,6 +381,8 @@ object ShopeeHookRouter {
                     val cam = param.args?.firstOrNull()
                     if (cam != null) {
                         registerCameraOpened(cam)
+                        hookCameraDeviceClass(cam.javaClass, packageName)
+                        ShopeeMainHook.logDebug("CameraDevice.StateCallback.onOpened (activeCam=${activeCameraTokens.size})")
                     }
                 }
             })
@@ -395,15 +398,17 @@ object ShopeeHookRouter {
                         }
                         if (methodName != "onClosed") {
                             ShopeeMainHook.logWarn("CameraDevice.StateCallback.$methodName dipanggil di Shopee (activeCam=${activeCameraTokens.size})")
+                        } else {
+                            ShopeeMainHook.logDebug("CameraDevice.StateCallback.onClosed dipanggil di Shopee (activeCam=${activeCameraTokens.size})")
                         }
-                        ShopeeMainHook.scheduleSessionCloseCheck("StateCallback.$methodName", ShopeeMainHook.appContext?.packageName ?: "com.shopee.id")
+                        ShopeeMainHook.scheduleSessionCloseCheck("StateCallback.$methodName", packageName)
                     }
                 })
             } catch (_: Throwable) {}
         }
     }
 
-    private fun hookCameraManager() {
+    private fun hookCameraManager(packageName: String) {
         try {
             XposedHelpers.findAndHookMethod(
                 CameraManager::class.java,
@@ -414,8 +419,14 @@ object ShopeeHookRouter {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val camId = param.args[0] as? String
-                        hookStateCallback(param.args[1])
+                        hookStateCallback(param.args[1], packageName)
                         notifyCameraSwitched(camId)
+                    }
+
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        param.throwable?.let { err ->
+                            ShopeeMainHook.logWarn("CameraManager.openCamera(Handler) gagal: ${err.javaClass.simpleName}: ${err.message}")
+                        }
                     }
                 }
             )
@@ -434,8 +445,14 @@ object ShopeeHookRouter {
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             val camId = param.args[0] as? String
-                            hookStateCallback(param.args[2])
+                            hookStateCallback(param.args[2], packageName)
                             notifyCameraSwitched(camId)
+                        }
+
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            param.throwable?.let { err ->
+                                ShopeeMainHook.logWarn("CameraManager.openCamera(Executor) gagal: ${err.javaClass.simpleName}: ${err.message}")
+                            }
                         }
                     }
                 )
@@ -454,6 +471,12 @@ object ShopeeHookRouter {
                         val camId = (param.args[0] as? Int)?.toString() ?: "0"
                         notifyCameraSwitched(camId)
                     }
+
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        param.throwable?.let { err ->
+                            ShopeeMainHook.logWarn("Camera.open(int) gagal: ${err.javaClass.simpleName}: ${err.message}")
+                        }
+                    }
                 }
             )
         } catch (t: Throwable) {
@@ -467,6 +490,12 @@ object ShopeeHookRouter {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         notifyCameraSwitched("0")
+                    }
+
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        param.throwable?.let { err ->
+                            ShopeeMainHook.logWarn("Camera.open() gagal: ${err.javaClass.simpleName}: ${err.message}")
+                        }
                     }
                 }
             )
@@ -741,19 +770,17 @@ object ShopeeHookRouter {
     private fun hookImageReader(classLoader: ClassLoader, packageName: String) {
         try {
             val irClass = XposedHelpers.findClass("android.media.ImageReader", classLoader)
-            XposedHelpers.findAndHookMethod(
+            XposedBridge.hookAllMethods(
                 irClass,
                 "newInstance",
-                Int::class.javaPrimitiveType,
-                Int::class.javaPrimitiveType,
-                Int::class.javaPrimitiveType,
-                Int::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         if (isCreatingDummyImageReader.get() == true) return
-                        val w = param.args[0] as? Int ?: 0
-                        val h = param.args[1] as? Int ?: 0
-                        val fmt = param.args[2] as? Int ?: 0
+                        val args = param.args ?: return
+                        if (args.size < 3) return
+                        val w = args[0] as? Int ?: 0
+                        val h = args[1] as? Int ?: 0
+                        val fmt = args[2] as? Int ?: 0
                         val fmtName = when (fmt) {
                             ImageFormat.YUV_420_888 -> "YUV_420_888"
                             ImageFormat.PRIVATE -> "PRIVATE"
@@ -761,13 +788,33 @@ object ShopeeHookRouter {
                             ImageFormat.NV21 -> "NV21"
                             else -> "0x${Integer.toHexString(fmt)}"
                         }
-                        val key = "ir_new:${w}x${h}:$fmtName"
+                        val key = "ir_new:${w}x${h}:$fmtName:${args.size}"
                         if (loggedSurfaceTypes.add(key)) {
-                            ShopeeMainHook.logInfo("Audit ImageReader.newInstance(${w}x${h}, format=$fmtName) di $packageName")
+                            ShopeeMainHook.logInfo("Audit ImageReader.newInstance(${w}x${h}, format=$fmtName, argc=${args.size}) di $packageName")
                         }
                     }
                 }
             )
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                try {
+                    val irBuilderClass = XposedHelpers.findClass("android.media.ImageReader\$Builder", classLoader)
+                    XposedHelpers.findAndHookMethod(
+                        irBuilderClass,
+                        "build",
+                        object : XC_MethodHook() {
+                            override fun afterHookedMethod(param: MethodHookParam) {
+                                val reader = param.result as? ImageReader ?: return
+                                if (dummyImageReaderSet.contains(reader)) return
+                                val key = "ir_builder:${reader.width}x${reader.height}:${reader.imageFormat}"
+                                if (loggedSurfaceTypes.add(key)) {
+                                    ShopeeMainHook.logInfo("Audit ImageReader.Builder.build(${reader.width}x${reader.height}, fmt=${reader.imageFormat}) di $packageName")
+                                }
+                            }
+                        }
+                    )
+                } catch (_: Throwable) {}
+            }
 
             listOf("acquireLatestImage", "acquireNextImage").forEach { methodName ->
                 try {
@@ -939,6 +986,182 @@ object ShopeeHookRouter {
         } catch (_: Throwable) {}
     }
 
+    private fun hookCameraDeviceClass(deviceClass: Class<*>, packageName: String) {
+        if (!hookedDeviceClasses.add(deviceClass.name)) return
+
+        val sessionMethodNames = listOf(
+            "createCaptureSession",
+            "createCustomCaptureSession",
+            "createCaptureSessionByOutputConfigurations",
+            "createConstrainedHighSpeedCaptureSession",
+            "createReprocessableCaptureSession",
+            "createReprocessableCaptureSessionByConfigurations",
+            "createExtensionSession"
+        )
+
+        for (methodName in sessionMethodNames) {
+            try {
+                XposedBridge.hookAllMethods(
+                    deviceClass,
+                    methodName,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            registerCameraOpened(param.thisObject)
+                            val args = param.args ?: return
+                            val canSwap = !isCurrentlyBypassed() && ShopeeMainHook.hasVirtualVideoAvailable(packageName)
+
+                            for (idx in args.indices) {
+                                val arg = args[idx] ?: continue
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && arg is SessionConfiguration) {
+                                    val origOutputs = arg.outputConfigurations
+                                    val newOutputs = ArrayList<OutputConfiguration>(origOutputs.size)
+                                    var didSwap = false
+                                    for (oc in origOutputs) {
+                                        val surf = oc.surface
+                                        if (surf != null && surf.isValid && !isDummySurface(surf)) {
+                                            auditSurface(surf, "CameraDevice.$methodName(SessionConfig)")
+                                            if (!isImageReaderSurface(surf) && canSwap) {
+                                                ShopeeMainHook.playVideoOnSurface(surf, packageName)
+                                                val dummy = getOrCreateDummyCamera2Surface(surf)
+                                                val newOc = try {
+                                                    isCreatingDummyOutputConfig.set(true)
+                                                    OutputConfiguration(dummy)
+                                                } catch (_: Throwable) {
+                                                    oc
+                                                } finally {
+                                                    isCreatingDummyOutputConfig.set(false)
+                                                }
+                                                newOutputs.add(newOc)
+                                                if (newOc !== oc) didSwap = true
+                                                continue
+                                            }
+                                        }
+                                        newOutputs.add(oc)
+                                    }
+                                    if (didSwap) {
+                                        try {
+                                            val rebuilt = SessionConfiguration(
+                                                arg.sessionType,
+                                                newOutputs,
+                                                arg.executor,
+                                                arg.stateCallback
+                                            ).apply {
+                                                arg.inputConfiguration?.let { inputConfiguration = it }
+                                                arg.sessionParameters?.let { sessionParameters = it }
+                                            }
+                                            args[idx] = rebuilt
+                                            if (loggedSurfaceTypes.add("camera2_dummy_swap_session_cfg")) {
+                                                ShopeeMainHook.logInfo("Camera2 $methodName(SessionConfig) Surface dialihkan ke dummy")
+                                            }
+                                        } catch (_: Throwable) {}
+                                    }
+                                    break
+                                } else if (arg is List<*>) {
+                                    val hasSurface = arg.any { it is Surface }
+                                    val hasOutputCfg = !hasSurface && arg.any { it is OutputConfiguration }
+                                    if (hasSurface) {
+                                        val newList = ArrayList<Any?>(arg.size)
+                                        var didSwap = false
+                                        for (item in arg) {
+                                            if (item is Surface && item.isValid && !isDummySurface(item)) {
+                                                auditSurface(item, "CameraDevice.$methodName")
+                                                if (!isImageReaderSurface(item) && canSwap) {
+                                                    ShopeeMainHook.playVideoOnSurface(item, packageName)
+                                                    newList.add(getOrCreateDummyCamera2Surface(item))
+                                                    didSwap = true
+                                                    continue
+                                                }
+                                            }
+                                            newList.add(item)
+                                        }
+                                        if (didSwap) {
+                                            args[idx] = newList
+                                            if (loggedSurfaceTypes.add("camera2_dummy_swap_list")) {
+                                                ShopeeMainHook.logInfo("Camera2 $methodName Surface dialihkan ke dummy agar VCam Shopee & HAL tidak bentrok")
+                                            }
+                                        }
+                                        break
+                                    } else if (hasOutputCfg) {
+                                        val replaced = ArrayList<Any?>(arg.size)
+                                        var didSwap = false
+                                        for (oc in arg) {
+                                            val surf = (oc as? OutputConfiguration)?.surface
+                                            if (surf != null && surf.isValid && !isDummySurface(surf)) {
+                                                auditSurface(surf, "CameraDevice.$methodName")
+                                                if (!isImageReaderSurface(surf) && canSwap) {
+                                                    ShopeeMainHook.playVideoOnSurface(surf, packageName)
+                                                    val dummy = getOrCreateDummyCamera2Surface(surf)
+                                                    val newOc = try {
+                                                        isCreatingDummyOutputConfig.set(true)
+                                                        OutputConfiguration(dummy)
+                                                    } catch (_: Throwable) {
+                                                        oc
+                                                    } finally {
+                                                        isCreatingDummyOutputConfig.set(false)
+                                                    }
+                                                    replaced.add(newOc)
+                                                    if (newOc !== oc) didSwap = true
+                                                    continue
+                                                }
+                                            }
+                                            replaced.add(oc)
+                                        }
+                                        if (didSwap) {
+                                            args[idx] = replaced
+                                        }
+                                        break
+                                    }
+                                } else if (methodName == "createExtensionSession") {
+                                    try {
+                                        val outputs = XposedHelpers.callMethod(arg, "getOutputConfigurations") as? List<*>
+                                        outputs?.forEach { oc ->
+                                            val surf = (oc as? OutputConfiguration)?.surface
+                                            if (surf != null && surf.isValid && !isDummySurface(surf)) {
+                                                auditSurface(surf, "CameraDevice.createExtensionSession")
+                                                if (!isImageReaderSurface(surf) && canSwap) {
+                                                    ShopeeMainHook.playVideoOnSurface(surf, packageName)
+                                                }
+                                            }
+                                        }
+                                    } catch (_: Throwable) {}
+                                }
+                            }
+                        }
+                    }
+                )
+            } catch (_: Throwable) {}
+        }
+
+        try {
+            XposedBridge.hookAllMethods(
+                deviceClass,
+                "createCaptureRequest",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val template = param.args?.firstOrNull()
+                        if (loggedSurfaceTypes.add("cam2_req:$template")) {
+                            ShopeeMainHook.logDebug("CameraDevice.createCaptureRequest(template=$template) dipanggil")
+                        }
+                    }
+                }
+            )
+        } catch (_: Throwable) {}
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                deviceClass,
+                "close",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        registerCameraClosed(param.thisObject)
+                        ShopeeMainHook.logDebug("CameraDevice.close dipanggil (activeCam=${activeCameraTokens.size})")
+                        ShopeeMainHook.scheduleSessionCloseCheck("CameraDevice.close", packageName)
+                    }
+                }
+            )
+        } catch (_: Throwable) {}
+    }
+
     private fun hookCamera2(classLoader: ClassLoader, packageName: String) {
         try {
             val captureRequestBuilderClass = XposedHelpers.findClass(
@@ -1016,160 +1239,7 @@ object ShopeeHookRouter {
             candidateDeviceClasses.add(CameraDevice::class.java)
 
             for (deviceClass in candidateDeviceClasses.distinct()) {
-                try {
-                    XposedHelpers.findAndHookMethod(
-                        deviceClass,
-                        "createCaptureSession",
-                        List::class.java,
-                        CameraCaptureSession.StateCallback::class.java,
-                        Handler::class.java,
-                        object : XC_MethodHook() {
-                            override fun beforeHookedMethod(param: MethodHookParam) {
-                                registerCameraOpened(param.thisObject)
-                                val surfaces = param.args[0] as? List<*> ?: return
-                                val canSwap = !isCurrentlyBypassed() && ShopeeMainHook.hasVirtualVideoAvailable(packageName)
-                                val newList = ArrayList<Any?>(surfaces.size)
-                                var didSwap = false
-                                for (item in surfaces) {
-                                    if (item is Surface && item.isValid && !isDummySurface(item)) {
-                                        auditSurface(item, "CameraDevice.createCaptureSession")
-                                        if (!isImageReaderSurface(item) && canSwap) {
-                                            ShopeeMainHook.playVideoOnSurface(item, packageName)
-                                            newList.add(getOrCreateDummyCamera2Surface(item))
-                                            didSwap = true
-                                            continue
-                                        }
-                                    }
-                                    newList.add(item)
-                                }
-                                if (didSwap) {
-                                    param.args[0] = newList
-                                    if (loggedSurfaceTypes.add("camera2_dummy_swap_list")) {
-                                        ShopeeMainHook.logInfo("Camera2 createCaptureSession Surface dialihkan ke dummy agar VCam Shopee & HAL tidak bentrok")
-                                    }
-                                }
-                            }
-                        }
-                    )
-                } catch (_: Throwable) {}
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    listOf("createCaptureSession", "createCustomCaptureSession").forEach { methodName ->
-                        try {
-                            XposedHelpers.findAndHookMethod(
-                                deviceClass,
-                                methodName,
-                                SessionConfiguration::class.java,
-                                object : XC_MethodHook() {
-                                    override fun beforeHookedMethod(param: MethodHookParam) {
-                                        registerCameraOpened(param.thisObject)
-                                        val sessionConfig = param.args[0] as? SessionConfiguration ?: return
-                                        val canSwap = !isCurrentlyBypassed() && ShopeeMainHook.hasVirtualVideoAvailable(packageName)
-                                        val origOutputs = sessionConfig.outputConfigurations
-                                        val newOutputs = ArrayList<OutputConfiguration>(origOutputs.size)
-                                        var didSwap = false
-                                        for (oc in origOutputs) {
-                                            val surf = oc.surface
-                                            if (surf != null && surf.isValid && !isDummySurface(surf)) {
-                                                auditSurface(surf, "CameraDevice.$methodName(SessionConfig)")
-                                                if (!isImageReaderSurface(surf) && canSwap) {
-                                                    ShopeeMainHook.playVideoOnSurface(surf, packageName)
-                                                    val dummy = getOrCreateDummyCamera2Surface(surf)
-                                                    val newOc = try {
-                                                        isCreatingDummyOutputConfig.set(true)
-                                                        OutputConfiguration(dummy)
-                                                    } catch (_: Throwable) {
-                                                        oc
-                                                    } finally {
-                                                        isCreatingDummyOutputConfig.set(false)
-                                                    }
-                                                    newOutputs.add(newOc)
-                                                    if (newOc !== oc) didSwap = true
-                                                    continue
-                                                }
-                                            }
-                                            newOutputs.add(oc)
-                                        }
-                                        if (didSwap) {
-                                            try {
-                                                val rebuilt = SessionConfiguration(
-                                                    sessionConfig.sessionType,
-                                                    newOutputs,
-                                                    sessionConfig.executor,
-                                                    sessionConfig.stateCallback
-                                                ).apply {
-                                                    sessionConfig.inputConfiguration?.let { inputConfiguration = it }
-                                                    sessionConfig.sessionParameters?.let { sessionParameters = it }
-                                                }
-                                                param.args[0] = rebuilt
-                                                if (loggedSurfaceTypes.add("camera2_dummy_swap_session_cfg")) {
-                                                    ShopeeMainHook.logInfo("Camera2 $methodName(SessionConfig) Surface dialihkan ke dummy")
-                                                }
-                                            } catch (_: Throwable) {}
-                                        }
-                                    }
-                                }
-                            )
-                        } catch (_: Throwable) {}
-                    }
-                }
-
-                try {
-                    XposedHelpers.findAndHookMethod(
-                        deviceClass,
-                        "createCaptureSessionByOutputConfigurations",
-                        List::class.java,
-                        CameraCaptureSession.StateCallback::class.java,
-                        Handler::class.java,
-                        object : XC_MethodHook() {
-                            override fun beforeHookedMethod(param: MethodHookParam) {
-                                registerCameraOpened(param.thisObject)
-                                val configs = param.args[0] as? List<*> ?: return
-                                val canSwap = !isCurrentlyBypassed() && ShopeeMainHook.hasVirtualVideoAvailable(packageName)
-                                val replaced = ArrayList<Any?>(configs.size)
-                                var didSwap = false
-                                for (oc in configs) {
-                                    val surf = (oc as? OutputConfiguration)?.surface
-                                    if (surf != null && surf.isValid && !isDummySurface(surf)) {
-                                        auditSurface(surf, "CameraDevice.createCaptureSessionByOutputConfigurations")
-                                        if (!isImageReaderSurface(surf) && canSwap) {
-                                            ShopeeMainHook.playVideoOnSurface(surf, packageName)
-                                            val dummy = getOrCreateDummyCamera2Surface(surf)
-                                            val newOc = try {
-                                                isCreatingDummyOutputConfig.set(true)
-                                                OutputConfiguration(dummy)
-                                            } catch (_: Throwable) {
-                                                oc
-                                            } finally {
-                                                isCreatingDummyOutputConfig.set(false)
-                                            }
-                                            replaced.add(newOc)
-                                            if (newOc !== oc) didSwap = true
-                                            continue
-                                        }
-                                    }
-                                    replaced.add(oc)
-                                }
-                                if (didSwap) {
-                                    param.args[0] = replaced
-                                }
-                            }
-                        }
-                    )
-                } catch (_: Throwable) {}
-
-                try {
-                    XposedHelpers.findAndHookMethod(
-                        deviceClass,
-                        "close",
-                        object : XC_MethodHook() {
-                            override fun afterHookedMethod(param: MethodHookParam) {
-                                registerCameraClosed(param.thisObject)
-                                ShopeeMainHook.scheduleSessionCloseCheck("CameraDevice.close", packageName)
-                            }
-                        }
-                    )
-                } catch (_: Throwable) {}
+                hookCameraDeviceClass(deviceClass, packageName)
             }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

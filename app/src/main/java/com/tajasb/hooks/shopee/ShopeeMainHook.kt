@@ -70,6 +70,9 @@ object ShopeeMainHook {
     private var lastTexture: SurfaceTexture? = null
 
     @Volatile
+    private var lastSurfaceActivityName: String? = null
+
+    @Volatile
     private var watcherStarted = false
 
     @Volatile
@@ -608,8 +611,14 @@ object ShopeeMainHook {
         }
     }
 
+    fun canRecoverCachedSurfaceForActivity(surfaceActivityName: String?, resumedActivityName: String?): Boolean {
+        if (surfaceActivityName.isNullOrBlank() || resumedActivityName.isNullOrBlank()) return false
+        return surfaceActivityName == resumedActivityName
+    }
+
     fun onSurfaceTextureAvailable(texture: SurfaceTexture) {
         lastTexture = texture
+        lastSurfaceActivityName = ShopeeHookRouter.currentActivityName
     }
 
     fun onStartPreviewRequested(packageName: String) {
@@ -638,12 +647,16 @@ object ShopeeMainHook {
             }
         }
         if (ShopeeHookRouter.isLiveOrVideoActivity(activityName)) {
+            if (!canRecoverCachedSurfaceForActivity(lastSurfaceActivityName, activityName)) {
+                logDebug("Lewati pemulihan Surface dari activity berbeda ($lastSurfaceActivityName -> $activityName)")
+                return
+            }
             val candidate = activeSurface?.takeIf { it.isValid }
                 ?: lastValidSurface?.takeIf { it.isValid }
                 ?: lastTexture?.let { Surface(it) }?.takeIf { it.isValid }
             if (candidate != null) {
                 logInfo("Memulihkan VCam Shopee saat kembali ke $activityName")
-                playVideoOnSurface(candidate, activePackageName)
+                playVideoOnSurface(candidate, activePackageName, waitForEglMs = 0L)
             } else {
                 logInfo("Kembali ke $activityName: menunggu Surface baru dari kamera Shopee (activeCam=${ShopeeHookRouter.activeCameraCount()})")
             }
@@ -655,7 +668,7 @@ object ShopeeMainHook {
     }
 
     @Synchronized
-    fun playVideoOnSurface(surface: Surface, pkg: String?) {
+    fun playVideoOnSurface(surface: Surface, pkg: String?, waitForEglMs: Long = 250L) {
         if (!surface.isValid) return
 
         val ctx = resolveAppContext()
@@ -671,6 +684,7 @@ object ShopeeMainHook {
         }
 
         lastValidSurface = surface
+        lastSurfaceActivityName = ShopeeHookRouter.currentActivityName
 
         val existing = currentRenderer
         if (existing != null && existing.isHealthy()) {
@@ -717,11 +731,13 @@ object ShopeeMainHook {
                 }
                 if (lastValidSurface === deadSurface) {
                     lastValidSurface = null
+                    lastTexture = null
+                    lastSurfaceActivityName = null
                 }
             }
         }
         currentRenderer = renderer
-        renderer.start(waitForEglMs = 250L)
+        renderer.start(waitForEglMs = waitForEglMs)
         logInfo("ShopeeGlVideoRenderer dimulai untuk $pkg (${videoFile.name}, ${videoFile.length()} bytes)")
     }
 
@@ -753,6 +769,9 @@ object ShopeeMainHook {
         } catch (_: Throwable) {}
         currentRenderer = null
         activeSurface = null
+        lastValidSurface = null
+        lastTexture = null
+        lastSurfaceActivityName = null
         if (!ShopeeHookRouter.isAnyCameraActive()) {
             ShopeeHookRouter.releaseAllDummyCamera2Surfaces()
         }

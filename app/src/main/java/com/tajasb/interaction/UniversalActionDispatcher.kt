@@ -369,11 +369,19 @@ class UniversalActionDispatcher(
                             fallbackY = step.posY ?: rule.overlayPosY
                         )
                         val holdMs = resolvedSecondary.filter { it.isDigit() }.toLongOrNull()
-                            ?.coerceIn(35L, 2500L) ?: 55L
+                            ?.coerceIn(0L, 12_000L) ?: step.durationMs.coerceIn(0L, 12_000L)
+                        val modeLabel = when {
+                            step.holdAndDrag && holdMs > 0L ->
+                                "Tahan ${holdMs}ms → Geser ${step.dragDirection.uppercase()}"
+                            step.holdAndDrag ->
+                                "Geser ${step.dragDirection.uppercase()}"
+                            holdMs <= 0L -> "Klik Cepat"
+                            else -> "Tahan ${holdMs}ms"
+                        }
                         sink.onInteractionTestSimulated(
                             InteractionTestSimEvent(
                                 actionType = step.actionType,
-                                detail = "Tap (${(px * 100).toInt()}%, ${(py * 100).toInt()}%)",
+                                detail = "$modeLabel (${(px * 100).toInt()}%, ${(py * 100).toInt()}%)",
                                 posX = px,
                                 posY = py,
                                 colorHex = rule.accentColorHex
@@ -381,11 +389,18 @@ class UniversalActionDispatcher(
                         )
                         val svc = MlbbGestureAccessibilityService.peekInstance()
                         if (svc != null) {
-                            val ok = svc.dispatchTap(px, py, holdMs = holdMs, tapCount = 1)
+                            val ok = svc.dispatchHoldAndDrag(
+                                normX = px,
+                                normY = py,
+                                holdMs = holdMs,
+                                holdAndDrag = step.holdAndDrag,
+                                dragSpec = step.dragDirection,
+                                dragDurationMs = step.dragDurationMs
+                            )
                             summary = if (ok) {
-                                "Tap ML (${(px * 100).toInt()}%, ${(py * 100).toInt()}%)"
+                                "$modeLabel (${(px * 100).toInt()}%, ${(py * 100).toInt()}%)"
                             } else {
-                                "Tap ML gagal di (${(px * 100).toInt()}%, ${(py * 100).toInt()}%)"
+                                "$modeLabel gagal di (${(px * 100).toInt()}%, ${(py * 100).toInt()}%)"
                             }
                         } else {
                             sink.onRecordStepDetail(
@@ -413,7 +428,7 @@ class UniversalActionDispatcher(
                         val startY = (step.posY ?: rule.overlayPosY).coerceIn(0.02f, 0.98f)
                         val swipeSpec = resolvedParam.ifBlank { "RIGHT" }
                         val durMs = resolvedSecondary.filter { it.isDigit() }.toLongOrNull()
-                            ?.coerceIn(90L, 2000L) ?: 220L
+                            ?.coerceIn(60L, 5000L) ?: step.durationMs.coerceIn(60L, 5000L)
                         sink.onInteractionTestSimulated(
                             InteractionTestSimEvent(
                                 actionType = step.actionType,

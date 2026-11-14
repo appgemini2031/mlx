@@ -150,7 +150,10 @@ data class UniversalActionStep(
     val executionMode: ExecutionMode = ExecutionMode.SEQUENTIAL,
     val posX: Float? = null,
     val posY: Float? = null,
-    val overlayScale: Float = 1.0f
+    val overlayScale: Float = 1.0f,
+    val holdAndDrag: Boolean = false,
+    val dragDirection: String = "RIGHT",
+    val dragDurationMs: Long = 220L
 )
 
 object ChallengeColorPalette {
@@ -230,7 +233,14 @@ data class UniversalTriggerRule(
     val assignedPresetId: String? = null,
     val overlayPosX: Float = 0.5f,
     val overlayPosY: Float = 0.5f,
-    val overlayScale: Float = 1.0f
+    val overlayScale: Float = 1.0f,
+    // Baca Cooldown Skill ML secara Visual per Pin / Rule
+    val enableVisualCooldownWait: Boolean = false,
+    val cooldownAreaWidthRatio: Float = 0.085f,
+    val cooldownAreaHeightRatio: Float = 0.14f,
+    val cooldownAreaOffsetX: Float = 0f,
+    val cooldownAreaOffsetY: Float = 0f,
+    val cooldownMaxWaitMs: Long = 35000L
 )
 
 data class UniversalPreset(
@@ -338,6 +348,9 @@ data class FloatingWindowConfig(
 data class UniversalEngineUiState(
     val isEngineEnabled: Boolean = true,
     val isMlbbMatchActive: Boolean = false,
+    val blockTouchDuringChallenge: Boolean = false,
+    val isChallengeExecuting: Boolean = false,
+    val cooldownStatusHint: String = "",
     val isEmergencyStopped: Boolean = false,
     val isFloatingOverlayRunning: Boolean = false,
     val isFloatingHiddenForLive: Boolean = false,
@@ -492,6 +505,12 @@ object UniversalInteractionJsonCodec {
         put("overlayPosX", rule.overlayPosX.toDouble())
         put("overlayPosY", rule.overlayPosY.toDouble())
         put("overlayScale", rule.overlayScale.toDouble())
+        put("enableVisualCooldownWait", rule.enableVisualCooldownWait)
+        put("cooldownAreaWidthRatio", rule.cooldownAreaWidthRatio.toDouble())
+        put("cooldownAreaHeightRatio", rule.cooldownAreaHeightRatio.toDouble())
+        put("cooldownAreaOffsetX", rule.cooldownAreaOffsetX.toDouble())
+        put("cooldownAreaOffsetY", rule.cooldownAreaOffsetY.toDouble())
+        put("cooldownMaxWaitMs", rule.cooldownMaxWaitMs)
     }
 
     fun jsonToRule(obj: JSONObject, indexHint: Int = 0): UniversalTriggerRule {
@@ -551,7 +570,13 @@ object UniversalInteractionJsonCodec {
             assignedPresetId = obj.optString("assignedPresetId", "").ifBlank { null },
             overlayPosX = obj.optDouble("overlayPosX", 0.5).toFloat().coerceIn(0.02f, 0.98f),
             overlayPosY = obj.optDouble("overlayPosY", 0.5).toFloat().coerceIn(0.02f, 0.98f),
-            overlayScale = obj.optDouble("overlayScale", 1.0).toFloat().coerceIn(0.35f, 3.0f)
+            overlayScale = obj.optDouble("overlayScale", 1.0).toFloat().coerceIn(0.35f, 3.0f),
+            enableVisualCooldownWait = obj.optBoolean("enableVisualCooldownWait", false),
+            cooldownAreaWidthRatio = obj.optDouble("cooldownAreaWidthRatio", 0.085).toFloat().coerceIn(0.025f, 0.45f),
+            cooldownAreaHeightRatio = obj.optDouble("cooldownAreaHeightRatio", 0.14).toFloat().coerceIn(0.025f, 0.55f),
+            cooldownAreaOffsetX = obj.optDouble("cooldownAreaOffsetX", 0.0).toFloat().coerceIn(-0.25f, 0.25f),
+            cooldownAreaOffsetY = obj.optDouble("cooldownAreaOffsetY", 0.0).toFloat().coerceIn(-0.25f, 0.25f),
+            cooldownMaxWaitMs = obj.optLong("cooldownMaxWaitMs", 35000L).coerceIn(2000L, 120000L)
         )
     }
 
@@ -637,23 +662,39 @@ object UniversalInteractionJsonCodec {
         if (a.posX != null) put("posX", a.posX.toDouble())
         if (a.posY != null) put("posY", a.posY.toDouble())
         put("overlayScale", a.overlayScale.toDouble())
+        put("holdAndDrag", a.holdAndDrag)
+        put("dragDirection", a.dragDirection)
+        put("dragDurationMs", a.dragDurationMs)
     }
 
-    private fun jsonToAction(obj: JSONObject): UniversalActionStep = UniversalActionStep(
-        id = obj.optString("id", "").ifBlank { UUID.randomUUID().toString() },
-        enabled = obj.optBoolean("enabled", true),
-        stepName = obj.optString("stepName", ""),
-        actionType = enumOrDefault(obj.optString("actionType"), ActionType.TEXT_OVERLAY),
-        paramValue = obj.optString("paramValue", ""),
-        secondaryValue = obj.optString("secondaryValue", ""),
-        durationMs = obj.optLong("durationMs", 2500L).coerceAtLeast(100L),
-        delayMs = obj.optLong("delayMs", 0L).coerceAtLeast(0L),
-        repeatCount = obj.optInt("repeatCount", 1).coerceIn(1, 30),
-        executionMode = enumOrDefault(obj.optString("executionMode"), ExecutionMode.SEQUENTIAL),
-        posX = if (obj.has("posX")) obj.optDouble("posX", 0.5).toFloat().coerceIn(0.02f, 0.98f) else null,
-        posY = if (obj.has("posY")) obj.optDouble("posY", 0.5).toFloat().coerceIn(0.02f, 0.98f) else null,
-        overlayScale = obj.optDouble("overlayScale", 1.0).toFloat().coerceIn(0.35f, 3.0f)
-    )
+    private fun jsonToAction(obj: JSONObject): UniversalActionStep {
+        val type = enumOrDefault(obj.optString("actionType"), ActionType.TEXT_OVERLAY)
+        val defaultDur = if (type == ActionType.SIMULATED_CLICK) 0L else 2500L
+        val rawDur = obj.optLong("durationMs", defaultDur)
+        val safeDur = if (type == ActionType.SIMULATED_CLICK) {
+            rawDur.coerceIn(0L, 15000L)
+        } else {
+            rawDur.coerceAtLeast(0L)
+        }
+        return UniversalActionStep(
+            id = obj.optString("id", "").ifBlank { UUID.randomUUID().toString() },
+            enabled = obj.optBoolean("enabled", true),
+            stepName = obj.optString("stepName", ""),
+            actionType = type,
+            paramValue = obj.optString("paramValue", ""),
+            secondaryValue = obj.optString("secondaryValue", ""),
+            durationMs = safeDur,
+            delayMs = obj.optLong("delayMs", 0L).coerceAtLeast(0L),
+            repeatCount = obj.optInt("repeatCount", 1).coerceIn(1, 30),
+            executionMode = enumOrDefault(obj.optString("executionMode"), ExecutionMode.SEQUENTIAL),
+            posX = if (obj.has("posX")) obj.optDouble("posX", 0.5).toFloat().coerceIn(0.02f, 0.98f) else null,
+            posY = if (obj.has("posY")) obj.optDouble("posY", 0.5).toFloat().coerceIn(0.02f, 0.98f) else null,
+            overlayScale = obj.optDouble("overlayScale", 1.0).toFloat().coerceIn(0.35f, 3.0f),
+            holdAndDrag = obj.optBoolean("holdAndDrag", false),
+            dragDirection = obj.optString("dragDirection", "RIGHT").ifBlank { "RIGHT" },
+            dragDurationMs = obj.optLong("dragDurationMs", 220L).coerceIn(60L, 5000L)
+        )
+    }
 
     fun encodeFloatingConfig(cfg: FloatingWindowConfig): String = JSONObject().apply {
         put("hudXRatio", cfg.hudXRatio.toDouble())

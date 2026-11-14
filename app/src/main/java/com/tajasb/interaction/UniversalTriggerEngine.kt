@@ -16,9 +16,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.LinkedHashMap
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 data class CounterEvaluationResult(
@@ -367,6 +370,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         private const val KEY_PRESETS = "universal_presets_json"
         private const val KEY_ENGINE_ENABLED = "engine_enabled"
         private const val KEY_MATCH_ACTIVE = "mlbb_match_active"
+        private const val KEY_BLOCK_TOUCH_DURING_CHALLENGE = "block_touch_during_challenge"
         private const val KEY_ACTIVE_SCENE = "active_scene"
         private const val KEY_FLOATING_CONFIG = "floating_window_config_json"
         private const val MAX_HISTORY = 60
@@ -391,10 +395,14 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
     private val _state = MutableStateFlow(loadInitialState())
     val state: StateFlow<UniversalEngineUiState> = _state.asStateFlow()
 
+    val uiState: StateFlow<UniversalEngineUiState>
+        get() = state
+
     private val queueLock = Any()
     private val pendingQueue = mutableListOf<QueuedDispatchTask>()
     private val queueSeq = AtomicLong(0L)
     private val isWorkerRunning = AtomicBoolean(false)
+    private val activeChallengeCount = AtomicInteger(0)
 
     private val recentEventIds = object : LinkedHashMap<String, Long>(128, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean = size > 180
@@ -416,6 +424,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         val savedPresets = UniversalInteractionJsonCodec.decodePresets(prefs.getString(KEY_PRESETS, null))
         val enabled = prefs.getBoolean(KEY_ENGINE_ENABLED, true)
         val matchActive = prefs.getBoolean(KEY_MATCH_ACTIVE, false)
+        val blockTouch = prefs.getBoolean(KEY_BLOCK_TOUCH_DURING_CHALLENGE, false)
         val scene = prefs.getString(KEY_ACTIVE_SCENE, "SCENE_UTAMA")?.ifBlank { "SCENE_UTAMA" } ?: "SCENE_UTAMA"
         val floatingCfg = UniversalInteractionJsonCodec.decodeFloatingConfig(prefs.getString(KEY_FLOATING_CONFIG, null))
         val initialRule = savedRules.firstOrNull { it.isPinVisible } ?: savedRules.firstOrNull()
@@ -425,6 +434,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         return UniversalEngineUiState(
             isEngineEnabled = enabled,
             isMlbbMatchActive = matchActive,
+            blockTouchDuringChallenge = blockTouch,
             isEmergencyStopped = false,
             activePinRuleId = initialRule?.id,
             activePinStepId = initialStep?.id,
@@ -761,15 +771,25 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             text = "Tes ${rule.triggerName}"
         )
         scope.launch {
+            enterChallengeExecution()
             val summary = try {
-                dispatcher.dispatchRuleActions(
-                    rule = rule.copy(enabled = true),
-                    event = event,
-                    counterCount = (_state.value.counters[rule.id]?.accumulatedCount ?: 0) + 1,
-                    isMlbbMatchActive = false
-                )
+                val cooldownNote = waitForSkillCooldownIfNeeded(rule)
+                if (_state.value.isEmergencyStopped) {
+                    "Dihentikan darurat saat tunggu cooldown"
+                } else {
+                    val execSummary = dispatcher.dispatchRuleActions(
+                        rule = rule.copy(enabled = true),
+                        event = event,
+                        counterCount = (_state.value.counters[rule.id]?.accumulatedCount ?: 0) + 1,
+                        isMlbbMatchActive = false
+                    )
+                    if (!cooldownNote.isNullOrBlank()) "$cooldownNote • $execSummary" else execSummary
+                }
             } catch (t: Throwable) {
                 "Error: ${t.message}"
+            } finally {
+                exitChallengeExecution()
+                _state.update { it.copy(cooldownStatusHint = "") }
             }
             val a11yOk = MlbbGestureAccessibilityService.peekInstance() != null
             val needsA11y = rule.actionSequence.any {
@@ -806,12 +826,125 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             text = "Preview ${rule.triggerName}"
         )
         scope.launch {
-            dispatcher.dispatchRuleActions(
-                rule = rule.copy(enabled = true),
-                event = sampleEvent,
-                counterCount = 1,
-                isMlbbMatchActive = false
-            )
+            enterChallengeExecution()
+            try {
+                dispatcher.dispatchRuleActions(
+                    rule = rule.copy(enabled = true),
+                    event = sampleEvent,
+                    counterCount = 1,
+                    isMlbbMatchActive = false
+                )
+            } finally {
+                exitChallengeExecution()
+            }
+        }
+    }
+
+    private fun enterChallengeExecution() {
+        val count = activeChallengeCount.incrementAndGet()
+        if (count > 0) {
+            _state.update { it.copy(isChallengeExecuting = true) }
+        }
+    }
+
+    private fun exitChallengeExecution() {
+        val count = activeChallengeCount.decrementAndGet().coerceAtLeast(0)
+        if (count <= 0) {
+            activeChallengeCount.set(0)
+            _state.update { it.copy(isChallengeExecuting = false) }
+        }
+    }
+
+    private suspend fun waitForSkillCooldownIfNeeded(rule: UniversalTriggerRule): String? {
+        if (!rule.enableVisualCooldownWait) return null
+        val targetStep = rule.actionSequence.firstOrNull {
+            it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+        }
+        val cx = (targetStep?.posX ?: rule.overlayPosX).coerceIn(0.02f, 0.98f)
+        val cy = (targetStep?.posY ?: rule.overlayPosY).coerceIn(0.02f, 0.98f)
+        val startedMs = System.currentTimeMillis()
+        val maxWait = rule.cooldownMaxWaitMs.coerceIn(2000L, 120_000L)
+        var waitedSecondsHint: Double? = null
+
+        while (!_state.value.isEmergencyStopped && (System.currentTimeMillis() - startedMs) < maxWait) {
+            val scanResult = try {
+                withContext(Dispatchers.Main) {
+                    MlbbGestureAccessibilityService.onPrepareScreenForTouch?.invoke(true)
+                }
+                delay(65L)
+                SkillCooldownDetector.inspectSkillArea(
+                    centerNormX = cx,
+                    centerNormY = cy,
+                    widthRatio = rule.cooldownAreaWidthRatio,
+                    heightRatio = rule.cooldownAreaHeightRatio,
+                    offsetX = rule.cooldownAreaOffsetX,
+                    offsetY = rule.cooldownAreaOffsetY
+                )
+            } finally {
+                withContext(Dispatchers.Main) {
+                    MlbbGestureAccessibilityService.onPrepareScreenForTouch?.invoke(false)
+                }
+            }
+
+            when (scanResult) {
+                is SkillCooldownScanResult.Ready -> {
+                    _state.update { it.copy(cooldownStatusHint = "") }
+                    return waitedSecondsHint?.let { "Tunggu CD (${String.format(Locale.US, "%.1f", it)}s) → Aktif" }
+                }
+                is SkillCooldownScanResult.OnCooldown -> {
+                    waitedSecondsHint = scanResult.secondsRemaining
+                    val secText = String.format(Locale.US, "%.1f", scanResult.secondsRemaining)
+                    _state.update {
+                        it.copy(cooldownStatusHint = "⏱️ ${rule.triggerName}: cooldown ${secText}d")
+                    }
+                    delay(if (scanResult.secondsRemaining > 1.5) 750L else 320L)
+                }
+                is SkillCooldownScanResult.Unavailable -> {
+                    _state.update { it.copy(cooldownStatusHint = "") }
+                    return scanResult.reason
+                }
+            }
+        }
+        _state.update { it.copy(cooldownStatusHint = "") }
+        return if (_state.value.isEmergencyStopped) null else "Timeout tunggu cooldown"
+    }
+
+    fun inspectRuleCooldownOnce(ruleId: String, onResult: (String) -> Unit) {
+        val rule = _state.value.rules.firstOrNull { it.id == ruleId } ?: run {
+            onResult("Pin/Rule tidak ditemukan")
+            return
+        }
+        val targetStep = rule.actionSequence.firstOrNull {
+            it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+        }
+        val cx = (targetStep?.posX ?: rule.overlayPosX).coerceIn(0.02f, 0.98f)
+        val cy = (targetStep?.posY ?: rule.overlayPosY).coerceIn(0.02f, 0.98f)
+        scope.launch {
+            val res = try {
+                withContext(Dispatchers.Main) {
+                    MlbbGestureAccessibilityService.onPrepareScreenForTouch?.invoke(true)
+                }
+                delay(70L)
+                SkillCooldownDetector.inspectSkillArea(
+                    centerNormX = cx,
+                    centerNormY = cy,
+                    widthRatio = rule.cooldownAreaWidthRatio,
+                    heightRatio = rule.cooldownAreaHeightRatio,
+                    offsetX = rule.cooldownAreaOffsetX,
+                    offsetY = rule.cooldownAreaOffsetY
+                )
+            } finally {
+                withContext(Dispatchers.Main) {
+                    MlbbGestureAccessibilityService.onPrepareScreenForTouch?.invoke(false)
+                }
+            }
+            val msg = when (res) {
+                is SkillCooldownScanResult.Ready -> "✅ Skill SIAP / Aktif (tidak ada angka cooldown)"
+                is SkillCooldownScanResult.OnCooldown ->
+                    "⏳ Sedang Cooldown: ${String.format(Locale.US, "%.1f", res.secondsRemaining)} detik"
+                is SkillCooldownScanResult.Unavailable -> "⚠️ ${res.reason}"
+            }
+            withContext(Dispatchers.Main) { onResult(msg) }
         }
     }
 
@@ -830,15 +963,25 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                         st.copy(queueSize = synchronized(queueLock) { pendingQueue.size })
                     }
 
+                    enterChallengeExecution()
                     val summary = try {
-                        dispatcher.dispatchRuleActions(
-                            rule = nextTask.rule,
-                            event = nextTask.event,
-                            counterCount = nextTask.counterSnapshot.accumulatedCount,
-                            isMlbbMatchActive = _state.value.isMlbbMatchActive
-                        )
+                        val cooldownNote = waitForSkillCooldownIfNeeded(nextTask.rule)
+                        if (_state.value.isEmergencyStopped) {
+                            "Dihentikan darurat saat tunggu cooldown"
+                        } else {
+                            val execSummary = dispatcher.dispatchRuleActions(
+                                rule = nextTask.rule,
+                                event = nextTask.event,
+                                counterCount = nextTask.counterSnapshot.accumulatedCount,
+                                isMlbbMatchActive = _state.value.isMlbbMatchActive
+                            )
+                            if (!cooldownNote.isNullOrBlank()) "$cooldownNote • $execSummary" else execSummary
+                        }
                     } catch (t: Throwable) {
                         "Error eksekusi: ${t.message}"
+                    } finally {
+                        exitChallengeExecution()
+                        _state.update { it.copy(cooldownStatusHint = "") }
                     }
 
                     val execStatus = if (_state.value.isEmergencyStopped) {
@@ -883,10 +1026,88 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         _state.update { it.copy(isMlbbMatchActive = active) }
     }
 
+    fun setBlockTouchDuringChallenge(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_BLOCK_TOUCH_DURING_CHALLENGE, enabled).apply()
+        _state.update { it.copy(blockTouchDuringChallenge = enabled) }
+    }
+
+    fun updateRuleVisualCooldown(
+        ruleId: String,
+        enabled: Boolean? = null,
+        widthRatio: Float? = null,
+        heightRatio: Float? = null,
+        offsetX: Float? = null,
+        offsetY: Float? = null,
+        maxWaitMs: Long? = null
+    ) {
+        val updated = _state.value.rules.map { rule ->
+            if (rule.id != ruleId) rule
+            else rule.copy(
+                enableVisualCooldownWait = enabled ?: rule.enableVisualCooldownWait,
+                cooldownAreaWidthRatio = (widthRatio ?: rule.cooldownAreaWidthRatio).coerceIn(0.025f, 0.45f),
+                cooldownAreaHeightRatio = (heightRatio ?: rule.cooldownAreaHeightRatio).coerceIn(0.025f, 0.55f),
+                cooldownAreaOffsetX = (offsetX ?: rule.cooldownAreaOffsetX).coerceIn(-0.25f, 0.25f),
+                cooldownAreaOffsetY = (offsetY ?: rule.cooldownAreaOffsetY).coerceIn(-0.25f, 0.25f),
+                cooldownMaxWaitMs = (maxWaitMs ?: rule.cooldownMaxWaitMs).coerceIn(2000L, 120_000L)
+            )
+        }
+        persistAndUpdateRules(updated)
+    }
+
+    fun restoreFullUniversalState(payload: FullAppBackupPayload) {
+        synchronized(queueLock) {
+            pendingQueue.clear()
+        }
+        activeChallengeCount.set(0)
+        val clampedFloating = payload.floatingConfig.copy(
+            hudXRatio = payload.floatingConfig.hudXRatio.coerceIn(0f, 1f),
+            hudYRatio = payload.floatingConfig.hudYRatio.coerceIn(0f, 1f),
+            hudScale = payload.floatingConfig.hudScale.coerceIn(0.65f, 1.35f),
+            hudOpacity = payload.floatingConfig.hudOpacity.coerceIn(0.30f, 1.0f),
+            panelXRatio = payload.floatingConfig.panelXRatio.coerceIn(0f, 1f),
+            panelYRatio = payload.floatingConfig.panelYRatio.coerceIn(0f, 1f),
+            panelWidthRatio = payload.floatingConfig.panelWidthRatio.coerceIn(0.38f, 0.98f),
+            panelHeightRatio = payload.floatingConfig.panelHeightRatio.coerceIn(0.35f, 0.96f),
+            panelOpacity = payload.floatingConfig.panelOpacity.coerceIn(0.45f, 1.0f)
+        )
+        prefs.edit()
+            .putString(KEY_RULES, UniversalInteractionJsonCodec.encodeRules(payload.rules))
+            .putString(KEY_PRESETS, UniversalInteractionJsonCodec.encodePresets(payload.presets))
+            .putString(KEY_FLOATING_CONFIG, UniversalInteractionJsonCodec.encodeFloatingConfig(clampedFloating))
+            .putBoolean(KEY_ENGINE_ENABLED, payload.isEngineEnabled)
+            .putBoolean(KEY_MATCH_ACTIVE, payload.isMlbbMatchActive)
+            .putBoolean(KEY_BLOCK_TOUCH_DURING_CHALLENGE, payload.blockTouchDuringChallenge)
+            .putString(KEY_ACTIVE_SCENE, payload.activeSceneName.ifBlank { "SCENE_UTAMA" })
+            .apply()
+
+        val initialRule = payload.rules.firstOrNull { it.isPinVisible } ?: payload.rules.firstOrNull()
+        val initialStep = initialRule?.actionSequence?.firstOrNull {
+            it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+        }
+        _state.update { st ->
+            st.copy(
+                isEngineEnabled = payload.isEngineEnabled,
+                isMlbbMatchActive = payload.isMlbbMatchActive,
+                blockTouchDuringChallenge = payload.blockTouchDuringChallenge,
+                isChallengeExecuting = false,
+                cooldownStatusHint = "",
+                isEmergencyStopped = false,
+                activeSceneName = payload.activeSceneName.ifBlank { "SCENE_UTAMA" },
+                floatingConfig = clampedFloating,
+                rules = payload.rules,
+                presets = payload.presets,
+                activePinRuleId = initialRule?.id,
+                activePinStepId = initialStep?.id,
+                queueSize = 0
+            )
+        }
+    }
+
     fun emergencyStop() {
         synchronized(queueLock) {
             pendingQueue.clear()
         }
+        activeChallengeCount.set(0)
         dispatcher.emergencyStopAll()
         val rec = TriggerExecutionRecord(
             timestampMs = System.currentTimeMillis(),
@@ -901,6 +1122,8 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         _state.update { st ->
             st.copy(
                 isEmergencyStopped = true,
+                isChallengeExecuting = false,
+                cooldownStatusHint = "",
                 queueSize = 0,
                 activeOverlays = emptyList(),
                 lastSimEvent = null,

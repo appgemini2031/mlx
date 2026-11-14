@@ -800,14 +800,14 @@ fun AppUpdateDialog(
                             }
 
                             if (tokenInput.isNotBlank() || state.githubToken.isNotBlank()) {
-                                TextButton(
-                                    onClick = {
-                                        tokenInput = ""
-                                        updateManager.saveGithubToken("")
-                                    },
+                                ConfirmDeleteTextButton(
+                                    label = "Hapus",
+                                    fontSize = 10.sp,
+                                    idleFg = Color(0xFFFF6B6B),
                                     modifier = Modifier.testTag("clear_github_token_button")
                                 ) {
-                                    Text("Hapus", fontSize = 10.sp, color = Color(0xFFFF6B6B))
+                                    tokenInput = ""
+                                    updateManager.saveGithubToken("")
                                 }
                             }
 

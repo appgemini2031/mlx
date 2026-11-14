@@ -19,7 +19,9 @@ enum class FloatingPickerMode {
     PICK_IMAGE,
     PICK_AUDIO,
     IMPORT_PRESET_FILE,
-    EXPORT_PRESET_FILE
+    EXPORT_PRESET_FILE,
+    IMPORT_FULL_BACKUP_FILE,
+    EXPORT_FULL_BACKUP_FILE
 }
 
 data class FloatingPickerResult(
@@ -145,6 +147,46 @@ class FloatingPickerProxyActivity : ComponentActivity() {
         finish()
     }
 
+    private val importFullBackupPicker = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val raw = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+                FullAppBackupManager.importFullBackupJson(applicationContext, raw).fold(
+                    onSuccess = { msg ->
+                        Toast.makeText(this, "✅ $msg", Toast.LENGTH_LONG).show()
+                    },
+                    onFailure = { err ->
+                        Toast.makeText(this, "❌ ${err.message}", Toast.LENGTH_LONG).show()
+                    }
+                )
+            } catch (t: Throwable) {
+                Toast.makeText(this, "❌ Gagal baca backup: ${t.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+        finish()
+    }
+
+    private val exportFullBackupCreator = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        val payload = FloatingPickerBridge.pendingExportJson
+            ?: FullAppBackupManager.exportFullBackupJson(applicationContext)
+        FloatingPickerBridge.pendingExportJson = null
+        if (uri != null) {
+            try {
+                contentResolver.openOutputStream(uri, "wt")?.use { out ->
+                    out.write(payload.toByteArray(Charsets.UTF_8))
+                }
+                Toast.makeText(this, "✅ Backup semua settingan diekspor", Toast.LENGTH_SHORT).show()
+            } catch (t: Throwable) {
+                Toast.makeText(this, "❌ Gagal ekspor backup: ${t.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+        finish()
+    }
+
     private fun copyMediaToAppStorage(uri: Uri, prefix: String): Uri? {
         return try {
             val mediaDir = File(filesDir, "mlbb_media").apply { mkdirs() }
@@ -236,6 +278,12 @@ class FloatingPickerProxyActivity : ComponentActivity() {
             }
             FloatingPickerMode.EXPORT_PRESET_FILE -> {
                 exportPresetCreator.launch(fileName)
+            }
+            FloatingPickerMode.IMPORT_FULL_BACKUP_FILE -> {
+                importFullBackupPicker.launch(arrayOf("*/*"))
+            }
+            FloatingPickerMode.EXPORT_FULL_BACKUP_FILE -> {
+                exportFullBackupCreator.launch(fileName)
             }
         }
     }

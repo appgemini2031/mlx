@@ -912,4 +912,117 @@ class LiveEventPreferences private constructor(private val appContext: Context) 
         prefs.edit().putInt(KEY_BIGO_BEAN_RATE_IDR, safeRate).apply()
         _config.value = _config.value.copy(bigoBeanRateIdr = safeRate)
     }
+
+    fun importFullConfig(cfg: LiveEventConfig) {
+        val safePlat = if (cfg.activePlatform.equals("BIGO", ignoreCase = true)) "BIGO" else "TIKTOK"
+        val safeAvatarZone = when (cfg.avatarSpawnZone.uppercase()) {
+            "LEFT", "CENTER", "RIGHT", "SPREAD" -> cfg.avatarSpawnZone.uppercase()
+            else -> "SPREAD"
+        }
+        val safeLikersOrient = if (cfg.topLikersOrientation.equals("VERTICAL", true)) "VERTICAL" else "HORIZONTAL"
+        val safeGiftOrient = if (cfg.topGiftOrientation.equals("VERTICAL", true)) "VERTICAL" else "HORIZONTAL"
+
+        prefs.edit()
+            .putString(KEY_SERVER_HOST, cfg.serverHost.trim())
+            .putInt(KEY_SERVER_PORT, cfg.serverPort.coerceIn(1, 65535))
+            .putBoolean(KEY_AUTO_CONNECT, cfg.autoConnect)
+            .putString(KEY_ACTIVE_PLATFORM, safePlat)
+            .putString(KEY_TARGET_USERNAME, cfg.targetUsername.trim().removePrefix("@"))
+            .putString(KEY_BACKUP_USERNAMES, cfg.backupUsernames.joinToString(","))
+            .putString(KEY_TARGET_BIGO_ID, cfg.targetBigoId.trim().removePrefix("@"))
+            .putString(KEY_BACKUP_BIGO_IDS, cfg.backupBigoIds.joinToString(","))
+            .putBoolean(KEY_ENABLE_COMMENT, cfg.enableComment)
+            .putBoolean(KEY_ENABLE_GIFT, cfg.enableGift)
+            .putBoolean(KEY_ENABLE_LIKE, cfg.enableLike)
+            .putBoolean(KEY_ENABLE_JOIN, cfg.enableJoin)
+            .putBoolean(KEY_ENABLE_FOLLOW, cfg.enableFollow)
+            .putBoolean(KEY_ENABLE_SHARE, cfg.enableShare)
+            .putBoolean(KEY_ENABLE_VIEWER_COUNT, cfg.enableViewerCount)
+            .putBoolean(KEY_ENABLE_SHOP_ORDER, cfg.enableShopOrder)
+            .putBoolean(KEY_ENABLE_PIN_PRODUCT, cfg.enablePinProduct)
+            .putLong(KEY_BANNER_DURATION_MS, cfg.bannerDurationMs.coerceIn(500L, 30000L))
+            .putString(KEY_CUSTOM_DOA_PREFIX, cfg.customDoaPrefix)
+            .putBoolean(KEY_SEPARATE_OVERLAYS, cfg.separateOverlays)
+            .putFloat(KEY_LIKE_POS_X, cfg.likePosXpct.coerceIn(0.02f, 0.98f))
+            .putFloat(KEY_LIKE_POS_Y, cfg.likePosYpct.coerceIn(0.02f, 0.98f))
+            .putFloat(KEY_LIKE_SCALE, cfg.likeScale.coerceIn(0.4f, 2.5f))
+            .putFloat(KEY_LIKE_FONT_SIZE, cfg.likeFontSizeSp.coerceIn(8f, 28f))
+            .putFloat(KEY_GIFT_POS_X, cfg.giftPosXpct.coerceIn(0.02f, 0.98f))
+            .putFloat(KEY_GIFT_POS_Y, cfg.giftPosYpct.coerceIn(0.02f, 0.98f))
+            .putFloat(KEY_GIFT_SCALE, cfg.giftScale.coerceIn(0.4f, 2.5f))
+            .putFloat(KEY_GIFT_FONT_SIZE, cfg.giftFontSizeSp.coerceIn(8f, 28f))
+            .putFloat(KEY_COMMENT_POS_X, cfg.commentPosXpct.coerceIn(0.02f, 0.98f))
+            .putFloat(KEY_COMMENT_POS_Y, cfg.commentPosYpct.coerceIn(0.02f, 0.98f))
+            .putFloat(KEY_COMMENT_SCALE, cfg.commentScale.coerceIn(0.4f, 2.5f))
+            .putFloat(KEY_COMMENT_FONT_SIZE, cfg.commentFontSizeSp.coerceIn(8f, 28f))
+            .putBoolean(KEY_ENABLE_EVENT_STATS, cfg.enableEventStatsOverlay)
+            .putBoolean(KEY_SHOW_DIAMONDS_IN_ANALYTICS, cfg.showDiamondsInAnalytics)
+            .putFloat(KEY_EVENT_STATS_POS_X, cfg.eventStatsPosXpct.coerceIn(0.02f, 0.98f))
+            .putFloat(KEY_EVENT_STATS_POS_Y, cfg.eventStatsPosYpct.coerceIn(0.02f, 0.98f))
+            .putFloat(KEY_EVENT_STATS_SCALE, cfg.eventStatsScale.coerceIn(0.4f, 2.5f))
+            .putFloat(KEY_EVENT_STATS_FONT_SIZE, cfg.eventStatsFontSizeSp.coerceIn(8f, 24f))
+            .putFloat(KEY_EVENT_STATS_WIDTH_PCT, cfg.eventStatsWidthPct.coerceIn(0.40f, 0.98f))
+            .putBoolean(KEY_ENABLE_AVATAR_BUBBLE, cfg.enableAvatarBubble)
+            .putBoolean(KEY_AVATAR_ON_CHAT, cfg.avatarOnChat)
+            .putBoolean(KEY_AVATAR_ON_GIFT, cfg.avatarOnGift)
+            .putBoolean(KEY_AVATAR_ON_LIKE, cfg.avatarOnLike)
+            .putBoolean(KEY_AVATAR_ON_JOIN, cfg.avatarOnJoin)
+            .putBoolean(KEY_AVATAR_ON_FOLLOW, cfg.avatarOnFollow)
+            .putBoolean(KEY_AVATAR_ON_SHARE, cfg.avatarOnShare)
+            .putFloat(KEY_AVATAR_SIZE_SCALE, cfg.avatarSizeScale.coerceIn(0.2f, 4.5f))
+            .putFloat(KEY_AVATAR_SIZE_CHAT, cfg.avatarSizeChat.coerceIn(0.2f, 4.5f))
+            .putFloat(KEY_AVATAR_SIZE_GIFT, cfg.avatarSizeGift.coerceIn(0.2f, 4.5f))
+            .putFloat(KEY_AVATAR_SIZE_LIKE, cfg.avatarSizeLike.coerceIn(0.2f, 4.5f))
+            .putFloat(KEY_AVATAR_SIZE_JOIN, cfg.avatarSizeJoin.coerceIn(0.2f, 4.5f))
+            .putFloat(KEY_AVATAR_SIZE_FOLLOW, cfg.avatarSizeFollow.coerceIn(0.2f, 4.5f))
+            .putFloat(KEY_AVATAR_SIZE_SHARE, cfg.avatarSizeShare.coerceIn(0.2f, 4.5f))
+            .putLong(KEY_AVATAR_FLIGHT_DURATION_MS, cfg.avatarFlightDurationMs.coerceIn(800L, 20000L))
+            .putLong(KEY_AVATAR_DURATION_CHAT, cfg.avatarDurationChat.coerceIn(800L, 20000L))
+            .putLong(KEY_AVATAR_DURATION_GIFT, cfg.avatarDurationGift.coerceIn(800L, 20000L))
+            .putLong(KEY_AVATAR_DURATION_LIKE, cfg.avatarDurationLike.coerceIn(800L, 20000L))
+            .putLong(KEY_AVATAR_DURATION_JOIN, cfg.avatarDurationJoin.coerceIn(800L, 20000L))
+            .putLong(KEY_AVATAR_DURATION_FOLLOW, cfg.avatarDurationFollow.coerceIn(800L, 20000L))
+            .putLong(KEY_AVATAR_DURATION_SHARE, cfg.avatarDurationShare.coerceIn(800L, 20000L))
+            .putString(KEY_AVATAR_SPAWN_ZONE, safeAvatarZone)
+            .putBoolean(KEY_ENABLE_TOP_LIKERS, cfg.enableTopLikersOverlay)
+            .putFloat(KEY_TOP_LIKERS_POS_X, cfg.topLikersPosXpct.coerceIn(-1.5f, 2.5f))
+            .putFloat(KEY_TOP_LIKERS_POS_Y, cfg.topLikersPosYpct.coerceIn(-1.5f, 2.5f))
+            .putFloat(KEY_TOP_LIKERS_SCALE, cfg.topLikersScale.coerceAtLeast(0.05f))
+            .putFloat(KEY_TOP_LIKERS_FONT_SIZE, cfg.topLikersFontSizeSp.coerceAtLeast(3f))
+            .putFloat(KEY_TOP_LIKERS_LATIN_FONT_SIZE, cfg.topLikersLatinFontSizeSp.coerceAtLeast(3f))
+            .putFloat(KEY_TOP_LIKERS_WIDTH_PCT, cfg.topLikersWidthPct.coerceAtLeast(0.10f))
+            .putInt(KEY_TOP_LIKERS_HEIGHT_PAD_V, cfg.topLikersHeightPadV.coerceAtLeast(0))
+            .putString(KEY_TOP_LIKERS_ORIENTATION, safeLikersOrient)
+            .putString(KEY_TOP_GIFT_ORIENTATION, safeGiftOrient)
+            .putFloat(KEY_TOP_GIFT_AVATAR_SCALE, cfg.topGiftAvatarScale.coerceIn(0.5f, 2.2f))
+            .putBoolean(KEY_SHOW_TOP_QURAN, cfg.showTopQuran)
+            .putBoolean(KEY_SHOW_TOP_SURAH, cfg.showTopSurah)
+            .putBoolean(KEY_SHOW_TOP_AYAH, cfg.showTopAyah)
+            .putBoolean(KEY_SHOW_TOP_HURUF, cfg.showTopHuruf)
+            .putString(KEY_TARGET_GIFT_NAME, cfg.targetGiftName.ifBlank { "Paus" })
+            .putInt(KEY_TARGET_GIFT_COINS, cfg.targetGiftCoins.coerceAtLeast(1))
+            .putInt(KEY_COIN_RATE_IDR, cfg.coinRateIdr.coerceIn(10, 1000))
+            .putString(KEY_TARGET_BIGO_GIFT_NAME, cfg.targetBigoGiftName.ifBlank { "Supercar" })
+            .putInt(KEY_TARGET_BIGO_GIFT_BEANS, cfg.targetBigoGiftBeans.coerceAtLeast(1))
+            .putInt(KEY_BIGO_BEAN_RATE_IDR, cfg.bigoBeanRateIdr.coerceIn(10, 1000))
+            .putBoolean("key_event_frame_proportional_v2", true)
+            .apply()
+
+        _config.value = loadConfig().copy(
+            customGiftPrefix = cfg.customGiftPrefix,
+            customJoinPrefix = cfg.customJoinPrefix,
+            customFollowPrefix = cfg.customFollowPrefix,
+            customSharePrefix = cfg.customSharePrefix,
+            likeDurationMs = cfg.likeDurationMs,
+            giftDurationMs = cfg.giftDurationMs,
+            commentDurationMs = cfg.commentDurationMs
+        )
+        runCatching {
+            val recv = LiveEventReceiver.getInstance(appContext)
+            if (_config.value.enableEventStatsOverlay) recv.refreshEventStatsIfEnabled()
+            else com.tajasb.notif.OverlayBannerBroadcaster.broadcastHide(appContext, "EVENT_STATS")
+            if (_config.value.enableTopLikersOverlay) recv.refreshTopLikersIfEnabled()
+            else com.tajasb.notif.OverlayBannerBroadcaster.broadcastHide(appContext, "TOP_LIKERS")
+        }
+    }
 }

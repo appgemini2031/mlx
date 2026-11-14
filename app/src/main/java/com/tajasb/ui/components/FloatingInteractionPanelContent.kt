@@ -89,6 +89,7 @@ import com.tajasb.interaction.ExecutionMode
 import com.tajasb.interaction.FloatingPickerBridge
 import com.tajasb.interaction.FloatingPickerMode
 import com.tajasb.interaction.FloatingPickerProxyActivity
+import com.tajasb.interaction.FullAppBackupManager
 import com.tajasb.interaction.InstalledAppInfo
 import com.tajasb.interaction.InstalledAppSearcher
 import com.tajasb.interaction.LiveInteractionEvent
@@ -273,6 +274,14 @@ fun FloatingInteractionPanelContent(
                                 engine.forceTestRuleNow(updated.id) { res ->
                                     android.os.Handler(android.os.Looper.getMainLooper()).post {
                                         Toast.makeText(context, res, Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            },
+                            onInspectCooldown = { updated, callback ->
+                                engine.addOrUpdateRule(updated)
+                                engine.inspectRuleCooldownOnce(updated.id) { res ->
+                                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                        callback(res)
                                     }
                                 }
                             },
@@ -515,7 +524,7 @@ private fun DropdownConceptList(
                     }
                     ActionPillButton("▶", EmeraldGreen) { onTestRule(rule) }
                     ActionPillButton("✎", NeonCyan) { onEditRule(rule) }
-                    ActionPillButton("✕", Color(0xFFEF4444)) { onDeleteRule(rule) }
+                    ConfirmDeleteActionPill(text = "✕") { onDeleteRule(rule) }
                 }
             }
         }
@@ -534,6 +543,7 @@ private fun DropdownConceptEditor(
     onCancel: () -> Unit,
     onDragExternalStepPin: (UniversalTriggerRule, String?) -> Unit,
     onTestNow: (UniversalTriggerRule) -> Unit,
+    onInspectCooldown: (UniversalTriggerRule, (String) -> Unit) -> Unit,
     onPreviewSound: (String) -> Unit,
     onKeyboardFocusChanged: (Boolean) -> Unit
 ) {
@@ -545,6 +555,15 @@ private fun DropdownConceptEditor(
     var cooldownText by remember(rule.id) { mutableStateOf(if (rule.enableCooldown) rule.cooldownMs.toString() else "0") }
     var minQtyText by remember(rule.id) { mutableStateOf(if (rule.enableMinimumQuantity) rule.minimumQuantity.toString() else "1") }
     var fineNudge by remember { mutableStateOf(true) }
+
+    var draftEnableVisualCooldown by remember(rule.id) { mutableStateOf(rule.enableVisualCooldownWait) }
+    var draftCooldownWidthRatio by remember(rule.id) { mutableStateOf(rule.cooldownAreaWidthRatio.coerceIn(0.025f, 0.45f)) }
+    var draftCooldownHeightRatio by remember(rule.id) { mutableStateOf(rule.cooldownAreaHeightRatio.coerceIn(0.025f, 0.55f)) }
+    var draftCooldownOffsetX by remember(rule.id) { mutableStateOf(rule.cooldownAreaOffsetX.coerceIn(-0.30f, 0.30f)) }
+    var draftCooldownOffsetY by remember(rule.id) { mutableStateOf(rule.cooldownAreaOffsetY.coerceIn(-0.30f, 0.30f)) }
+    var draftCooldownMaxWaitText by remember(rule.id) { mutableStateOf(rule.cooldownMaxWaitMs.toString()) }
+    var showCooldownScanSection by remember(rule.id) { mutableStateOf(rule.enableVisualCooldownWait) }
+    var cooldownScanTestMsg by remember(rule.id) { mutableStateOf<String?>(null) }
 
     var draftSteps by remember(rule.id) {
         mutableStateOf(rule.actionSequence)
@@ -590,13 +609,17 @@ private fun DropdownConceptEditor(
             val sy = (s.posY ?: rule.overlayPosY).coerceIn(0.01f, 0.99f)
             when (s.actionType) {
                 ActionType.SIMULATED_CLICK -> {
-                    val hold = s.durationMs.coerceIn(40L, 5000L)
+                    val hold = s.durationMs.coerceIn(0L, 12_000L)
+                    val dragDur = s.dragDurationMs.coerceIn(60L, 5000L)
                     s.copy(
                         enabled = true,
                         stepName = s.stepName.trim(),
                         paramValue = String.format(Locale.US, "%.3f,%.3f", sx, sy),
                         secondaryValue = hold.toString(),
                         durationMs = hold,
+                        holdAndDrag = s.holdAndDrag,
+                        dragDirection = s.dragDirection.trim().ifBlank { "RIGHT" },
+                        dragDurationMs = dragDur,
                         delayMs = s.delayMs.coerceIn(0L, 60_000L),
                         repeatCount = s.repeatCount.coerceIn(1, 20),
                         posX = sx,
@@ -604,7 +627,7 @@ private fun DropdownConceptEditor(
                     )
                 }
                 ActionType.SIMULATED_SWIPE -> {
-                    val dur = s.durationMs.coerceIn(90L, 3000L)
+                    val dur = s.durationMs.coerceIn(60L, 5000L)
                     s.copy(
                         enabled = true,
                         stepName = s.stepName.trim(),
@@ -653,6 +676,7 @@ private fun DropdownConceptEditor(
         }
         val cd = cooldownText.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
         val minQ = minQtyText.toIntOrNull()?.coerceAtLeast(1) ?: 1
+        val maxWait = draftCooldownMaxWaitText.toLongOrNull()?.coerceIn(1500L, 180_000L) ?: 35_000L
         rule.copy(
             enabled = true,
             isPinVisible = draftPinVisible,
@@ -665,6 +689,12 @@ private fun DropdownConceptEditor(
             minimumQuantity = minQ,
             enableCooldown = cd > 0L,
             cooldownMs = cd,
+            enableVisualCooldownWait = draftEnableVisualCooldown,
+            cooldownAreaWidthRatio = draftCooldownWidthRatio.coerceIn(0.025f, 0.45f),
+            cooldownAreaHeightRatio = draftCooldownHeightRatio.coerceIn(0.025f, 0.55f),
+            cooldownAreaOffsetX = draftCooldownOffsetX.coerceIn(-0.30f, 0.30f),
+            cooldownAreaOffsetY = draftCooldownOffsetY.coerceIn(-0.30f, 0.30f),
+            cooldownMaxWaitMs = maxWait,
             actionSequence = normalized
         )
     }
@@ -971,7 +1001,7 @@ private fun DropdownConceptEditor(
                                 onSaveDraftOnly(buildRuleWithSteps(next))
                             }
                         }
-                        ActionPillButton("✕", Color(0xFFEF4444)) {
+                        ConfirmDeleteActionPill(text = "✕") {
                             val next = draftSteps.filterNot { it.id == step.id }
                             draftSteps = next
                             if (expandedStepId == step.id) expandedStepId = next.firstOrNull()?.id
@@ -997,24 +1027,53 @@ private fun DropdownConceptEditor(
                                 val sy = (step.posY ?: rule.overlayPosY).coerceIn(0.01f, 0.99f)
 
                                 if (step.actionType == ActionType.SIMULATED_SWIPE) {
-                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        listOf("LEFT", "RIGHT", "UP", "DOWN").forEach { dir ->
-                                            SelectPill(dir, step.paramValue.equals(dir, ignoreCase = true)) {
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        listOf(
+                                            "LEFT" to "⬅ Kiri",
+                                            "RIGHT" to "➡ Kanan",
+                                            "UP" to "⬆ Atas",
+                                            "DOWN" to "⬇ Bawah",
+                                            "RANDOM" to "🎲 Random"
+                                        ).forEach { (dir, label) ->
+                                            SelectPill(label, step.paramValue.equals(dir, ignoreCase = true)) {
                                                 updateCurrentStep { it.copy(paramValue = dir) }
                                             }
                                         }
                                     }
+                                    ComfortableInput(
+                                        label = "Arah Custom (opsional: 45° atau X,Y mis. 0.80,0.40)",
+                                        value = step.paramValue,
+                                        onValueChange = { raw -> updateCurrentStep { it.copy(paramValue = raw) } },
+                                        onFocusChange = onKeyboardFocusChanged
+                                    )
+                                }
+
+                                var durationDraft by remember(step.id, step.durationMs) {
+                                    mutableStateOf(step.durationMs.toString())
+                                }
+                                var repeatDraft by remember(step.id, step.repeatCount) {
+                                    mutableStateOf(step.repeatCount.toString())
                                 }
 
                                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                     ComfortableInput(
-                                        label = if (step.actionType == ActionType.SIMULATED_SWIPE) "Durasi(ms)" else "Tahan(ms)",
-                                        value = step.durationMs.toString(),
+                                        label = if (step.actionType == ActionType.SIMULATED_SWIPE) "Durasi(ms)" else "Tahan(ms, 0=Klik)",
+                                        value = durationDraft,
                                         onValueChange = { raw ->
-                                            val v = raw.filter(Char::isDigit).toLongOrNull() ?: 70L
-                                            updateCurrentStep {
-                                                val c = v.coerceIn(40L, 5000L)
-                                                it.copy(durationMs = c, secondaryValue = c.toString())
+                                            val digits = raw.filter(Char::isDigit).take(5)
+                                            durationDraft = digits
+                                            digits.toLongOrNull()?.let { v ->
+                                                val c = if (step.actionType == ActionType.SIMULATED_CLICK) {
+                                                    v.coerceIn(0L, 12_000L)
+                                                } else {
+                                                    v.coerceIn(60L, 5000L)
+                                                }
+                                                updateCurrentStep {
+                                                    it.copy(durationMs = c, secondaryValue = c.toString())
+                                                }
                                             }
                                         },
                                         keyboardType = KeyboardType.Number,
@@ -1023,15 +1082,114 @@ private fun DropdownConceptEditor(
                                     )
                                     ComfortableInput(
                                         label = "Ulang(x)",
-                                        value = step.repeatCount.toString(),
+                                        value = repeatDraft,
                                         onValueChange = { raw ->
-                                            val v = raw.filter(Char::isDigit).toIntOrNull() ?: 1
-                                            updateCurrentStep { it.copy(repeatCount = v.coerceIn(1, 20)) }
+                                            val digits = raw.filter(Char::isDigit).take(2)
+                                            repeatDraft = digits
+                                            digits.toIntOrNull()?.let { v ->
+                                                updateCurrentStep { it.copy(repeatCount = v.coerceIn(1, 20)) }
+                                            }
                                         },
                                         keyboardType = KeyboardType.Number,
                                         onFocusChange = onKeyboardFocusChanged,
-                                        modifier = Modifier.weight(0.8f)
+                                        modifier = Modifier.weight(0.75f)
                                     )
+                                }
+
+                                if (step.actionType == ActionType.SIMULATED_CLICK) {
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        SelectPill("0ms (Klik)", step.durationMs == 0L) {
+                                            durationDraft = "0"
+                                            updateCurrentStep { it.copy(durationMs = 0L, secondaryValue = "0") }
+                                        }
+                                        SelectPill("400ms", step.durationMs == 400L) {
+                                            durationDraft = "400"
+                                            updateCurrentStep { it.copy(durationMs = 400L, secondaryValue = "400") }
+                                        }
+                                        SelectPill("1000ms", step.durationMs == 1000L) {
+                                            durationDraft = "1000"
+                                            updateCurrentStep { it.copy(durationMs = 1000L, secondaryValue = "1000") }
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(DarkBackground.copy(alpha = 0.65f))
+                                            .padding(horizontal = 7.dp, vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "✊ Tahan + Geser → Lepas",
+                                                color = if (step.holdAndDrag) NeonCyan else Color(0xFFCBD5E1),
+                                                fontSize = 8.8.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                text = "Tahan (${step.durationMs}ms), lalu geser arah pilihan tanpa melepas jari.",
+                                                color = Color(0xFF94A3B8),
+                                                fontSize = 7.4.sp
+                                            )
+                                        }
+                                        Switch(
+                                            checked = step.holdAndDrag,
+                                            onCheckedChange = { checked ->
+                                                updateCurrentStep { it.copy(holdAndDrag = checked) }
+                                            },
+                                            colors = SwitchDefaults.colors(checkedTrackColor = NeonCyan)
+                                        )
+                                    }
+
+                                    if (step.holdAndDrag) {
+                                        FlowRow(
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            listOf(
+                                                "LEFT" to "⬅ Kiri",
+                                                "RIGHT" to "➡ Kanan",
+                                                "UP" to "⬆ Atas",
+                                                "DOWN" to "⬇ Bawah",
+                                                "RANDOM" to "🎲 Random"
+                                            ).forEach { (dir, label) ->
+                                                SelectPill(label, step.dragDirection.equals(dir, ignoreCase = true)) {
+                                                    updateCurrentStep { it.copy(dragDirection = dir) }
+                                                }
+                                            }
+                                        }
+                                        var dragDurDraft by remember(step.id, step.dragDurationMs) {
+                                            mutableStateOf(step.dragDurationMs.toString())
+                                        }
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            ComfortableInput(
+                                                label = "Arah Geser (atau 45° / X,Y)",
+                                                value = step.dragDirection,
+                                                onValueChange = { raw -> updateCurrentStep { it.copy(dragDirection = raw) } },
+                                                onFocusChange = onKeyboardFocusChanged,
+                                                modifier = Modifier.weight(1.25f)
+                                            )
+                                            ComfortableInput(
+                                                label = "Durasi Geser(ms)",
+                                                value = dragDurDraft,
+                                                onValueChange = { raw ->
+                                                    val digits = raw.filter(Char::isDigit).take(4)
+                                                    dragDurDraft = digits
+                                                    digits.toLongOrNull()?.let { v ->
+                                                        updateCurrentStep { it.copy(dragDurationMs = v.coerceIn(60L, 5000L)) }
+                                                    }
+                                                },
+                                                keyboardType = KeyboardType.Number,
+                                                onFocusChange = onKeyboardFocusChanged,
+                                                modifier = Modifier.weight(0.85f)
+                                            )
+                                        }
+                                    }
                                 }
 
                                 val nudgeDelta = if (fineNudge) 0.0025f else 0.015f
@@ -1299,7 +1457,7 @@ private fun DropdownConceptEditor(
                                         )
                                     }
                                     if (step.paramValue.isNotBlank()) {
-                                        TextChip("Hapus", Color(0xFF991B1B), Color.White) {
+                                        ConfirmDeleteTextChip(label = "Hapus") {
                                             updateCurrentStep { it.copy(paramValue = "") }
                                         }
                                     }
@@ -1475,6 +1633,149 @@ private fun DropdownConceptEditor(
             }
         }
 
+        // Dropdown Visual Skill Cooldown Reader MLBB (baca angka detik cooldown dari layar game)
+        SubDropdownHeader(
+            title = "⏱️ Cooldown Skill ML: ${if (draftEnableVisualCooldown) "AUTO TUNGGU AKTIF" else "OFF"}",
+            open = showCooldownScanSection
+        ) {
+            showCooldownScanSection = !showCooldownScanSection
+        }
+
+        if (showCooldownScanSection) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(DarkSurface)
+                    .border(
+                        0.8.dp,
+                        if (draftEnableVisualCooldown) NeonCyan.copy(alpha = 0.7f) else DarkCardBorder,
+                        RoundedCornerShape(7.dp)
+                    )
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Baca Angka Cooldown MLBB",
+                            color = Color.White,
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Jika area tombol masih ada angka detik cooldown, antrian otomatis menunggu hingga skill aktif (kosong angka).",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 7.8.sp
+                        )
+                    }
+                    Switch(
+                        checked = draftEnableVisualCooldown,
+                        onCheckedChange = { enabled ->
+                            draftEnableVisualCooldown = enabled
+                            onSaveDraftOnly(buildRule())
+                        },
+                        colors = SwitchDefaults.colors(checkedTrackColor = NeonCyan)
+                    )
+                }
+
+                if (draftEnableVisualCooldown) {
+                    Text(
+                        text = "Lebar Scan: ${(draftCooldownWidthRatio * 100).roundToInt()}%  •  Tinggi Scan: ${(draftCooldownHeightRatio * 100).roundToInt()}%",
+                        color = NeonCyan,
+                        fontSize = 8.4.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Slider(
+                            value = draftCooldownWidthRatio.coerceIn(0.025f, 0.35f),
+                            onValueChange = {
+                                draftCooldownWidthRatio = it.coerceIn(0.025f, 0.35f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            valueRange = 0.025f..0.35f,
+                            colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan),
+                            modifier = Modifier.weight(1f).height(20.dp)
+                        )
+                        Slider(
+                            value = draftCooldownHeightRatio.coerceIn(0.025f, 0.45f),
+                            onValueChange = {
+                                draftCooldownHeightRatio = it.coerceIn(0.025f, 0.45f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            valueRange = 0.025f..0.45f,
+                            colors = SliderDefaults.colors(thumbColor = EmeraldGreen, activeTrackColor = EmeraldGreen),
+                            modifier = Modifier.weight(1f).height(20.dp)
+                        )
+                    }
+                    Text(
+                        text = "Geser Box X: ${(draftCooldownOffsetX * 100).roundToInt()}%  •  Geser Box Y: ${(draftCooldownOffsetY * 100).roundToInt()}%",
+                        color = Color(0xFFCBD5E1),
+                        fontSize = 8.2.sp
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Slider(
+                            value = draftCooldownOffsetX.coerceIn(-0.25f, 0.25f),
+                            onValueChange = {
+                                draftCooldownOffsetX = it.coerceIn(-0.25f, 0.25f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            valueRange = -0.25f..0.25f,
+                            colors = SliderDefaults.colors(thumbColor = NeonOrange, activeTrackColor = NeonOrange),
+                            modifier = Modifier.weight(1f).height(20.dp)
+                        )
+                        Slider(
+                            value = draftCooldownOffsetY.coerceIn(-0.25f, 0.25f),
+                            onValueChange = {
+                                draftCooldownOffsetY = it.coerceIn(-0.25f, 0.25f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            valueRange = -0.25f..0.25f,
+                            colors = SliderDefaults.colors(thumbColor = NeonPurple, activeTrackColor = NeonPurple),
+                            modifier = Modifier.weight(1f).height(20.dp)
+                        )
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ComfortableInput(
+                            label = "Max Tunggu(ms)",
+                            value = draftCooldownMaxWaitText,
+                            onValueChange = { draftCooldownMaxWaitText = it.filter(Char::isDigit).take(6) },
+                            keyboardType = KeyboardType.Number,
+                            onFocusChange = onKeyboardFocusChanged,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextChip("Reset Box", Color(0xFF334155), Color.White) {
+                            draftCooldownWidthRatio = 0.075f
+                            draftCooldownHeightRatio = 0.12f
+                            draftCooldownOffsetX = 0f
+                            draftCooldownOffsetY = 0f
+                            onSaveDraftOnly(buildRule())
+                        }
+                        TextChip("🔍 Tes Scan", NeonCyan, Color.Black) {
+                            onInspectCooldown(buildRule()) { result ->
+                                cooldownScanTestMsg = result
+                            }
+                        }
+                    }
+                    cooldownScanTestMsg?.let { msg ->
+                        Text(
+                            text = "Hasil Scan: $msg",
+                            color = EmeraldGreen,
+                            fontSize = 8.4.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             OutlinedButton(
                 onClick = onCancel,
@@ -1501,9 +1802,14 @@ private fun shortStepLabel(step: UniversalActionStep): String {
         ActionType.SIMULATED_CLICK -> {
             val x = ((step.posX ?: 0.5f) * 100f).roundToInt()
             val y = ((step.posY ?: 0.5f) * 100f).roundToInt()
-            "Klik ($x%,$y%)"
+            val dragTag = if (step.holdAndDrag) "+Geser ${step.dragDirection}" else ""
+            val holdTag = if (step.durationMs == 0L || step.holdAndDrag || step.durationMs != 70L) " ${step.durationMs}ms" else ""
+            "Klik ($x%,$y%)$holdTag$dragTag"
         }
-        ActionType.SIMULATED_SWIPE -> "Geser ${step.paramValue.ifBlank { "RIGHT" }}"
+        ActionType.SIMULATED_SWIPE -> {
+            val dir = if (step.paramValue.equals("RANDOM", true)) "🎲Random" else step.paramValue.ifBlank { "RIGHT" }
+            "Geser $dir"
+        }
         ActionType.DELAY, ActionType.WAIT -> "Jeda ${step.durationMs}ms"
         ActionType.HOME_BACK_GAME -> "Home ${step.durationMs}ms→Game"
         ActionType.CUSTOM_IMAGE, ActionType.SHOW_OVERLAY -> "Overlay"
@@ -1718,6 +2024,30 @@ private fun DropdownLiveSettingsSection(
             )
         }
 
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(7.dp))
+                .background(DarkSurface)
+                .padding(horizontal = 8.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("🔒 Blokir Sentuhan Layar Saat Challenge", color = Color.White, fontSize = 9.2.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    text = "Sentuhan manual diblokir selama challenge berjalan.",
+                    color = Color(0xFF94A3B8),
+                    fontSize = 7.6.sp
+                )
+            }
+            Switch(
+                checked = uiState.blockTouchDuringChallenge,
+                onCheckedChange = { engine.setBlockTouchDuringChallenge(it) },
+                colors = SwitchDefaults.colors(checkedTrackColor = Color(0xFFDC2626))
+            )
+        }
+
         // Pengaturan Ukuran & Transparansi Overlay Floating
         Column(
             modifier = Modifier
@@ -1798,23 +2128,62 @@ private fun DropdownLiveSettingsSection(
         }
 
         Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(7.dp))
+                .background(DarkSurface)
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("💾 Backup JSON Semua", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                TextChip("📤 Ekspor", EmeraldGreen, Color.Black) {
+                    val json = FullAppBackupManager.exportFullBackupJson(context)
+                    FloatingPickerBridge.launch(
+                        context = context,
+                        mode = FloatingPickerMode.EXPORT_FULL_BACKUP_FILE,
+                        suggestedFileName = "streambattle_backup_${System.currentTimeMillis() / 1000}.json",
+                        exportJsonPayload = json
+                    )
+                }
+                TextChip("📥 Impor", NeonCyan, Color.Black) {
+                    FloatingPickerBridge.launch(
+                        context = context,
+                        mode = FloatingPickerMode.IMPORT_FULL_BACKUP_FILE
+                    )
+                }
+            }
+        }
+
+        Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             OutlinedButton(
                 onClick = onResetHudPosition,
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
                 modifier = Modifier.weight(1f).height(34.dp)
             ) {
-                Text("↺ Reset Posisi", color = NeonCyan, fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
+                Text("↺ Reset", color = NeonCyan, fontSize = 9.2.sp, fontWeight = FontWeight.Bold)
+            }
+            OutlinedButton(
+                onClick = {
+                    engine.updateFloatingConfig { it.copy(hudCollapsed = true) }
+                    onKeyboardFocusChanged(false)
+                },
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                modifier = Modifier.weight(1f).height(34.dp)
+            ) {
+                Text("— Ciutkan", color = NeonOrange, fontSize = 9.2.sp, fontWeight = FontWeight.Bold)
             }
             Button(
                 onClick = onHideFloatingForLive,
                 colors = ButtonDefaults.buttonColors(containerColor = NeonPurple),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
                 modifier = Modifier.weight(1f).height(34.dp)
             ) {
-                Text("👁️ Live Bersih", color = Color.White, fontSize = 9.5.sp, fontWeight = FontWeight.Black)
+                Text("👁️ Live Bersih", color = Color.White, fontSize = 9.2.sp, fontWeight = FontWeight.Black)
             }
         }
     }

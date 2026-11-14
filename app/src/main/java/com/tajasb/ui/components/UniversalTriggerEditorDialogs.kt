@@ -994,9 +994,12 @@ private fun ConditionRowItem(
                 Switch(checked = condition.enabled, onCheckedChange = { onChange(condition.copy(enabled = it)) })
                 Text("Syarat Aktif", color = Color(0xFFCBD5E1), fontSize = 9.sp)
             }
-            IconButton(onClick = onDelete, modifier = Modifier.size(26.dp)) {
-                Icon(Icons.Default.Delete, contentDescription = "Hapus Condition", tint = Color(0xFFEF4444), modifier = Modifier.size(15.dp))
-            }
+            ConfirmDeleteIconButton(
+                contentDescriptionText = "Hapus Condition",
+                size = 26.dp,
+                iconSize = 15.dp,
+                onConfirm = onDelete
+            )
         }
         // Inline chip selector untuk Field (bebas PopupWindow)
         Row(
@@ -1101,9 +1104,12 @@ private fun ActionStepCard(
                 IconButton(onClick = onDuplicate, modifier = Modifier.size(24.dp)) {
                     Icon(Icons.Default.ContentCopy, contentDescription = "Duplikat", tint = NeonCyan, modifier = Modifier.size(13.dp))
                 }
-                IconButton(onClick = onDelete, modifier = Modifier.size(24.dp)) {
-                    Icon(Icons.Default.Delete, contentDescription = "Hapus", tint = Color(0xFFEF4444), modifier = Modifier.size(13.dp))
-                }
+                ConfirmDeleteIconButton(
+                    contentDescriptionText = "Hapus",
+                    size = 24.dp,
+                    iconSize = 13.dp,
+                    onConfirm = onDelete
+                )
             }
         }
 
@@ -1176,7 +1182,10 @@ private fun ActionStepCard(
             NumberFieldBox(
                 label = "Durasi",
                 value = step.durationMs.toString(),
-                onValueChange = { it.filter(Char::isDigit).toLongOrNull()?.let { v -> onUpdate(step.copy(durationMs = v.coerceAtLeast(100L))) } },
+                onValueChange = { raw ->
+                    val minDur = if (step.actionType == ActionType.SIMULATED_CLICK) 0L else 60L
+                    raw.filter(Char::isDigit).toLongOrNull()?.let { v -> onUpdate(step.copy(durationMs = v.coerceAtLeast(minDur))) }
+                },
                 modifier = Modifier.weight(1f)
             )
             NumberFieldBox(
@@ -1327,13 +1336,12 @@ fun UniversalPresetEditorOverlay(
                                     label = step.actionType.defaultParamHint
                                 )
                             }
-                            IconButton(
-                                onClick = {
-                                    draft = draft.copy(actionSequence = draft.actionSequence.filterNot { it.id == step.id })
-                                },
-                                modifier = Modifier.size(26.dp)
+                            ConfirmDeleteIconButton(
+                                contentDescriptionText = "Hapus",
+                                size = 26.dp,
+                                iconSize = 15.dp
                             ) {
-                                Icon(Icons.Default.Delete, contentDescription = "Hapus", tint = Color(0xFFEF4444), modifier = Modifier.size(15.dp))
+                                draft = draft.copy(actionSequence = draft.actionSequence.filterNot { it.id == step.id })
                             }
                         }
                     }

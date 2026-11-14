@@ -27,7 +27,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.tajasb.pro.cavvnb"
+        applicationId = "com.tajasb.pro.ilrtzg"
         minSdk = 26
         targetSdk = 35
         versionCode = vCode
@@ -91,6 +91,7 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
     implementation(libs.coil.compose)
+    implementation(libs.mlkit.text.recognition)
 
     testImplementation(libs.junit)
     testImplementation("org.json:json:20240303")

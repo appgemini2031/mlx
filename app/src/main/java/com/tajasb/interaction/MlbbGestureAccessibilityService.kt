@@ -5,15 +5,20 @@ import android.accessibilityservice.GestureDescription
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Path
+import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.Log
+import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import androidx.annotation.RequiresApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,7 +26,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
+import kotlin.math.cos
 import kotlin.math.min
+import kotlin.math.sin
+import kotlin.random.Random
 
 /**
  * Pemetaan koordinat ternormalisasi (0.0..1.0) ke piksel layar fisik penuh
@@ -49,7 +57,8 @@ object ScreenCoordinateMapper {
         startNormY: Float,
         spec: String,
         screenW: Int,
-        screenH: Int
+        screenH: Int,
+        angleDegreesOverride: Double? = null
     ): Pair<Pair<Float, Float>, Pair<Float, Float>> {
         val start = toScreenPx(startNormX, startNormY, screenW, screenH)
         val clean = spec.trim().uppercase()
@@ -60,7 +69,17 @@ object ScreenCoordinateMapper {
         }
 
         val stepPx = (min(screenW, screenH).coerceAtLeast(100) * 0.24f).coerceAtLeast(48f)
+        val explicitAngle = parseAngleDegrees(clean)
         val (dx, dy) = when {
+            clean == "RANDOM" || clean.contains("ACAK") -> {
+                val deg = angleDegreesOverride ?: Random.nextDouble(0.0, 360.0)
+                val rad = Math.toRadians(deg)
+                (cos(rad) * stepPx).toFloat() to (sin(rad) * stepPx).toFloat()
+            }
+            explicitAngle != null -> {
+                val rad = Math.toRadians(explicitAngle)
+                (cos(rad) * stepPx).toFloat() to (sin(rad) * stepPx).toFloat()
+            }
             clean.contains("LEFT") -> -stepPx to 0f
             clean.contains("UP") -> 0f to -stepPx
             clean.contains("DOWN") -> 0f to stepPx
@@ -69,6 +88,19 @@ object ScreenCoordinateMapper {
         val endX = (start.first + dx).coerceIn(2f, (screenW - 2).coerceAtLeast(2).toFloat())
         val endY = (start.second + dy).coerceIn(2f, (screenH - 2).coerceAtLeast(2).toFloat())
         return ensureNonZeroSegment(start, endX to endY, screenW, screenH)
+    }
+
+    private fun parseAngleDegrees(cleanUpper: String): Double? {
+        if (cleanUpper.startsWith("ANGLE:")) {
+            return cleanUpper.removePrefix("ANGLE:").trim().removeSuffix("°").toDoubleOrNull()
+        }
+        if (cleanUpper.endsWith("°")) {
+            return cleanUpper.removeSuffix("°").trim().toDoubleOrNull()
+        }
+        if (!cleanUpper.contains(",") && cleanUpper.toDoubleOrNull() != null) {
+            return cleanUpper.toDoubleOrNull()
+        }
+        return null
     }
 
     private fun ensureNonZeroSegment(
@@ -104,6 +136,8 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         var onPrepareScreenForTouch: ((hideForTouch: Boolean) -> Unit)? = null
 
         fun peekInstance(): MlbbGestureAccessibilityService? = activeInstance
+
+        fun currentInstance(): MlbbGestureAccessibilityService? = activeInstance
 
         fun isAccessibilityServiceEnabled(context: Context): Boolean {
             if (activeInstance != null) return true
@@ -239,12 +273,12 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
     suspend fun dispatchTap(
         normX: Float,
         normY: Float,
-        holdMs: Long = 70L,
+        holdMs: Long = 0L,
         tapCount: Int = 1
     ): Boolean {
         val (screenW, screenH) = getRealScreenSizePx()
         val (px, py) = ScreenCoordinateMapper.toScreenPx(normX, normY, screenW, screenH)
-        val safeHold = holdMs.coerceIn(40L, 2500L)
+        val safeHold = if (holdMs <= 0L) 38L else holdMs.coerceIn(38L, 12_000L)
         val repeats = tapCount.coerceIn(1, 10)
 
         var allOk = true
@@ -272,6 +306,69 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         return allOk
     }
 
+    /**
+     * Tahan di titik awal selama [holdMs] (jika >0), lalu masih dalam keadaan menekan/tahan
+     * menggeser ke [dragSpec] selama [dragDurationMs], kemudian melepas jari.
+     */
+    suspend fun dispatchHoldAndDrag(
+        normX: Float,
+        normY: Float,
+        holdMs: Long,
+        holdAndDrag: Boolean,
+        dragSpec: String,
+        dragDurationMs: Long = 220L
+    ): Boolean {
+        if (!holdAndDrag) {
+            return dispatchTap(normX, normY, holdMs = holdMs, tapCount = 1)
+        }
+        if (holdMs <= 0L) {
+            return dispatchSwipe(normX, normY, dragSpec, durationMs = dragDurationMs)
+        }
+
+        val (screenW, screenH) = getRealScreenSizePx()
+        val (start, end) = ScreenCoordinateMapper.resolveSwipePoints(
+            startNormX = normX,
+            startNormY = normY,
+            spec = dragSpec.ifBlank { "RIGHT" },
+            screenW = screenW,
+            screenH = screenH
+        )
+        val safeHold = holdMs.coerceIn(40L, 12_000L)
+        val safeDrag = dragDurationMs.coerceIn(60L, 5000L)
+        val midX = (start.first + 0.5f).coerceIn(1f, (screenW - 1).coerceAtLeast(2).toFloat())
+        val midY = start.second
+
+        val prepare = onPrepareScreenForTouch
+        if (prepare != null) {
+            mainHandler.post { prepare(true) }
+            delay(55L)
+        }
+        return try {
+            val holdPath = Path().apply {
+                moveTo(start.first, start.second)
+                lineTo(midX, midY)
+            }
+            val holdStroke = GestureDescription.StrokeDescription(holdPath, 0L, safeHold, true)
+            val holdGesture = GestureDescription.Builder().addStroke(holdStroke).build()
+            val holdOk = dispatchGestureAsync(holdGesture, safeHold + 1000L)
+            if (!holdOk) {
+                false
+            } else {
+                val dragPath = Path().apply {
+                    moveTo(midX, midY)
+                    lineTo(end.first, end.second)
+                }
+                val dragStroke = holdStroke.continueStroke(dragPath, 0L, safeDrag, false)
+                val dragGesture = GestureDescription.Builder().addStroke(dragStroke).build()
+                dispatchGestureAsync(dragGesture, safeDrag + 1000L)
+            }
+        } finally {
+            if (prepare != null) {
+                mainHandler.post { prepare(false) }
+            }
+        }
+    }
+
     suspend fun dispatchSwipe(
         startNormX: Float,
         startNormY: Float,
@@ -286,7 +383,7 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
             screenW = screenW,
             screenH = screenH
         )
-        val safeDur = durationMs.coerceIn(90L, 2000L)
+        val safeDur = durationMs.coerceIn(60L, 5000L)
 
         val prepare = onPrepareScreenForTouch
         if (prepare != null) {
@@ -304,6 +401,77 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         } finally {
             if (prepare != null) {
                 mainHandler.post { prepare(false) }
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    suspend fun captureScreenRegionBitmap(
+        centerNormX: Float,
+        centerNormY: Float,
+        widthRatio: Float,
+        heightRatio: Float
+    ): Bitmap? {
+        return withTimeoutOrNull(1800L) {
+            suspendCancellableCoroutine { cont ->
+                try {
+                    takeScreenshot(
+                        Display.DEFAULT_DISPLAY,
+                        mainExecutor,
+                        object : TakeScreenshotCallback {
+                            override fun onSuccess(screenshot: ScreenshotResult) {
+                                var hwBitmap: Bitmap? = null
+                                val hb = screenshot.hardwareBuffer
+                                val cropped = try {
+                                    hwBitmap = Bitmap.wrapHardwareBuffer(hb, screenshot.colorSpace)
+                                    if (hwBitmap == null) {
+                                        null
+                                    } else {
+                                        val fullW = hwBitmap.width
+                                        val fullH = hwBitmap.height
+                                        val rw = (fullW * widthRatio.coerceIn(0.025f, 0.45f)).toInt().coerceIn(28, fullW)
+                                        val rh = (fullH * heightRatio.coerceIn(0.025f, 0.55f)).toInt().coerceIn(28, fullH)
+                                        val cx = (centerNormX.coerceIn(0.02f, 0.98f) * fullW).toInt()
+                                        val cy = (centerNormY.coerceIn(0.02f, 0.98f) * fullH).toInt()
+                                        val left = (cx - rw / 2).coerceIn(0, (fullW - rw).coerceAtLeast(0))
+                                        val top = (cy - rh / 2).coerceIn(0, (fullH - rh).coerceAtLeast(0))
+                                        val out = Bitmap.createBitmap(rw, rh, Bitmap.Config.ARGB_8888)
+                                        val swCopy = hwBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                                        if (swCopy != null) {
+                                            val canvas = Canvas(out)
+                                            canvas.drawBitmap(
+                                                swCopy,
+                                                Rect(left, top, left + rw, top + rh),
+                                                Rect(0, 0, rw, rh),
+                                                null
+                                            )
+                                            swCopy.recycle()
+                                            out
+                                        } else {
+                                            out.recycle()
+                                            null
+                                        }
+                                    }
+                                } catch (t: Throwable) {
+                                    Log.w(TAG, "Crop screenshot error: ${t.message}")
+                                    null
+                                } finally {
+                                    try { hwBitmap?.recycle() } catch (_: Throwable) {}
+                                    try { hb.close() } catch (_: Throwable) {}
+                                }
+                                if (cont.isActive) cont.resume(cropped)
+                            }
+
+                            override fun onFailure(errorCode: Int) {
+                                Log.w(TAG, "takeScreenshot failed code=$errorCode")
+                                if (cont.isActive) cont.resume(null)
+                            }
+                        }
+                    )
+                } catch (t: Throwable) {
+                    Log.w(TAG, "takeScreenshot exception: ${t.message}")
+                    if (cont.isActive) cont.resume(null)
+                }
             }
         }
     }

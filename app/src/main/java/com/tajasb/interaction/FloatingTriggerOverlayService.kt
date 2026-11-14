@@ -119,29 +119,24 @@ private class DraggableFloatingContainer(
                 downRawX = ev.rawX
                 downRawY = ev.rawY
                 dragging = false
-                dragStarted = true
-                onDragStart()
+                dragStarted = false
                 return false
             }
             MotionEvent.ACTION_MOVE -> {
-                if (!dragStarted) {
-                    downRawX = ev.rawX
-                    downRawY = ev.rawY
-                    dragStarted = true
-                    onDragStart()
-                }
                 val dx = ev.rawX - downRawX
                 val dy = ev.rawY - downRawY
                 if (abs(dx) > touchSlop || abs(dy) > touchSlop) {
+                    if (!dragStarted) {
+                        dragStarted = true
+                        onDragStart()
+                    }
                     dragging = true
                     return true
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (!dragging && dragStarted) {
-                    dragStarted = false
-                    onDragEnd(false)
-                }
+                dragging = false
+                dragStarted = false
             }
         }
         return false
@@ -153,23 +148,18 @@ private class DraggableFloatingContainer(
                 downRawX = event.rawX
                 downRawY = event.rawY
                 dragging = false
-                if (!dragStarted) {
-                    dragStarted = true
-                    onDragStart()
-                }
+                dragStarted = false
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                if (!dragStarted) {
-                    downRawX = event.rawX
-                    downRawY = event.rawY
-                    dragStarted = true
-                    onDragStart()
-                }
                 val dx = (event.rawX - downRawX).roundToInt()
                 val dy = (event.rawY - downRawY).roundToInt()
                 if (!dragging && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
                     dragging = true
+                    if (!dragStarted) {
+                        dragStarted = true
+                        onDragStart()
+                    }
                 }
                 if (dragging) {
                     onDragMove(dx, dy)
@@ -177,7 +167,7 @@ private class DraggableFloatingContainer(
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (dragStarted) {
+                if (dragStarted || dragging) {
                     onDragEnd(dragging)
                 }
                 dragging = false
@@ -250,6 +240,9 @@ class FloatingTriggerOverlayService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var liveStageView: FrameLayout? = null
+    private var touchBlockerView: FrameLayout? = null
+    private var touchBlockerParams: WindowManager.LayoutParams? = null
+    private var touchBlockerStatusPill: TextView? = null
     private var singleHudView: LinearLayout? = null
     private var singleHudParams: WindowManager.LayoutParams? = null
     private var subMenuComposeOwner: FloatingComposeOwner? = null
@@ -268,6 +261,7 @@ class FloatingTriggerOverlayService : Service() {
     private var btnEngineTiny: TextView? = null
     private var btnPinTiny: TextView? = null
     private var btnSubMenuTiny: TextView? = null
+    private var btnMinTiny: TextView? = null
     private var btnCloseTiny: TextView? = null
 
     // Precision Cursor Navigation Bar views
@@ -318,11 +312,19 @@ class FloatingTriggerOverlayService : Service() {
 
         engine.setFloatingOverlayRunning(true)
         attachLiveStageWindow()
+        attachTouchBlockerWindow()
         attachSingleFloatingHudWindow()
         observeEngineState()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        } else {
+            0
+        }
+        ServiceCompat.startForeground(this, NOTIF_ID, buildNotification(engine.state.value.isFloatingHiddenForLive), fgsType)
+
         when (intent?.action) {
             ACTION_STOP_SERVICE -> {
                 stopSelf()
@@ -331,20 +333,27 @@ class FloatingTriggerOverlayService : Service() {
             ACTION_SHOW_FLOATING -> {
                 engine.setFloatingHiddenForLive(false)
                 engine.updateFloatingConfig { it.copy(hudCollapsed = false) }
+                lastState = engine.state.value
                 refreshSingleHudVisuals()
+                applyHudPositionFromConfig(lastState.floatingConfig, forceApply = true)
                 clampHudIntoSafeBounds()
+                updateNotification(lastState.isFloatingHiddenForLive)
                 return START_STICKY
             }
             ACTION_HIDE_FLOATING -> {
                 isSubMenuExpanded = false
                 engine.setFloatingHiddenForLive(true)
+                lastState = engine.state.value
                 refreshSingleHudVisuals()
+                updateNotification(lastState.isFloatingHiddenForLive)
                 return START_STICKY
             }
             ACTION_RESET_POSITION -> {
                 engine.setFloatingHiddenForLive(false)
                 engine.resetFloatingPosition()
-                applyHudPositionFromConfig(engine.state.value.floatingConfig, forceApply = true)
+                lastState = engine.state.value
+                applyHudPositionFromConfig(lastState.floatingConfig, forceApply = true)
+                updateNotification(lastState.isFloatingHiddenForLive)
                 Toast.makeText(this, "↺ Posisi floating direset ke area aman", Toast.LENGTH_SHORT).show()
                 return START_STICKY
             }
@@ -365,6 +374,7 @@ class FloatingTriggerOverlayService : Service() {
         } else if (openEdit) {
             isSubMenuExpanded = false
             engine.setFloatingHiddenForLive(false)
+            engine.updateFloatingConfig { it.copy(hudCollapsed = false) }
             if (engine.state.value.rules.isEmpty()) {
                 engine.createQuickTapTarget(UniversalTriggerSource.GIFT)
             } else {
@@ -377,9 +387,13 @@ class FloatingTriggerOverlayService : Service() {
             isSubMenuExpanded = true
         } else {
             engine.setFloatingHiddenForLive(false)
+            engine.updateFloatingConfig { it.copy(hudCollapsed = false) }
         }
+        lastState = engine.state.value
         refreshSingleHudVisuals()
+        applyHudPositionFromConfig(lastState.floatingConfig, forceApply = true)
         clampHudIntoSafeBounds()
+        updateNotification(lastState.isFloatingHiddenForLive)
         return START_STICKY
     }
 
@@ -403,12 +417,19 @@ class FloatingTriggerOverlayService : Service() {
         subMenuComposeOwner = null
         singleHudView?.let { safeRemoveView(it) }
         singleHudView = null
+        touchBlockerView?.let { safeRemoveView(it) }
+        touchBlockerView = null
         liveStageView?.let { safeRemoveView(it) }
         liveStageView = null
         engine.setFloatingOverlayRunning(false)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun updateNotification(isHiddenForLive: Boolean) {
+        val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        mgr?.notify(NOTIF_ID, buildNotification(isHiddenForLive))
+    }
 
     private fun observeEngineState() {
         serviceScope.launch {
@@ -425,11 +446,11 @@ class FloatingTriggerOverlayService : Service() {
                         clampHudIntoSafeBounds()
                     }
                 }
+                updateTouchBlockerState(st, temporarilyHiddenForAutomation = false)
                 renderLiveStage(st)
                 syncMarkerWindows(st)
                 if (hiddenChanged) {
-                    val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                    mgr?.notify(NOTIF_ID, buildNotification(st.isFloatingHiddenForLive))
+                    updateNotification(st.isFloatingHiddenForLive)
                 }
             }
         }
@@ -462,12 +483,154 @@ class FloatingTriggerOverlayService : Service() {
         }
     }
 
+    private fun attachTouchBlockerWindow() {
+        val blocker = FrameLayout(this).apply {
+            visibility = View.GONE
+            isClickable = true
+            isFocusable = false
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(Color.argb(38, 15, 23, 42))
+                setStroke(dp(2.5f), Color.argb(210, 239, 68, 68))
+            }
+            setOnTouchListener { _, _ -> true }
+        }
+        val pill = TextView(this).apply {
+            text = "🔒 Layar Terkunci — Challenge Sedang Berjalan"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(12), dp(5), dp(12), dp(5))
+            background = roundedBoxBg(
+                fillColor = Color.argb(220, 153, 27, 27),
+                strokeColor = Color.rgb(252, 165, 165),
+                strokePx = dp(1f),
+                radiusPx = dp(16).toFloat()
+            )
+        }
+        touchBlockerStatusPill = pill
+        blocker.addView(
+            pill,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            ).apply {
+                topMargin = dp(24)
+            }
+        )
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+            applyCutoutMode(this)
+        }
+        touchBlockerParams = params
+        try {
+            windowManager.addView(blocker, params)
+            touchBlockerView = blocker
+        } catch (t: Throwable) {
+            Log.e(TAG, "Gagal pasang touch blocker overlay: ${t.message}")
+        }
+    }
+
+    private fun updateTouchBlockerState(
+        st: UniversalEngineUiState,
+        temporarilyHiddenForAutomation: Boolean
+    ) {
+        val blocker = touchBlockerView ?: return
+        val params = touchBlockerParams ?: return
+        val shouldLock = !temporarilyHiddenForAutomation &&
+            st.blockTouchDuringChallenge &&
+            st.isChallengeExecuting &&
+            !st.isPositionEditMode &&
+            !st.isEmergencyStopped
+
+        val desiredVis = if (shouldLock) View.VISIBLE else View.GONE
+        if (blocker.visibility != desiredVis) {
+            blocker.visibility = desiredVis
+        }
+        if (shouldLock && st.cooldownStatusHint.isNotBlank()) {
+            touchBlockerStatusPill?.text = "🔒 Layar Terkunci • ${st.cooldownStatusHint}"
+        } else {
+            touchBlockerStatusPill?.text = "🔒 Layar Terkunci — Challenge Sedang Berjalan"
+        }
+        val currentlyNotTouchable = (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
+        val desiredNotTouchable = !shouldLock
+        if (currentlyNotTouchable != desiredNotTouchable) {
+            params.flags = if (desiredNotTouchable) {
+                params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            } else {
+                params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            }
+            try {
+                windowManager.updateViewLayout(blocker, params)
+            } catch (_: Throwable) {}
+        }
+    }
+
     private fun renderLiveStage(st: UniversalEngineUiState) {
         val stage = liveStageView ?: return
         stage.removeAllViews()
-        if (st.activeOverlays.isEmpty() && st.lastSimEvent == null) return
+        val hasScanAreas = st.isPositionEditMode && !st.isFloatingHiddenForLive &&
+            st.rules.any { it.isPinVisible && it.enableVisualCooldownWait }
+        if (st.activeOverlays.isEmpty() && st.lastSimEvent == null && !hasScanAreas) return
 
         val (screenW, screenH) = getDisplaySizePx()
+
+        if (hasScanAreas) {
+            for (rule in st.rules) {
+                if (!rule.isPinVisible || !rule.enableVisualCooldownWait) continue
+                val firstTouch = rule.actionSequence.firstOrNull {
+                    it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+                }
+                val cxNorm = ((firstTouch?.posX ?: rule.overlayPosX) + rule.cooldownAreaOffsetX).coerceIn(0.02f, 0.98f)
+                val cyNorm = ((firstTouch?.posY ?: rule.overlayPosY) + rule.cooldownAreaOffsetY).coerceIn(0.02f, 0.98f)
+                val boxW = (screenW * rule.cooldownAreaWidthRatio.coerceIn(0.025f, 0.45f)).roundToInt().coerceAtLeast(dp(24))
+                val boxH = (screenH * rule.cooldownAreaHeightRatio.coerceIn(0.025f, 0.55f)).roundToInt().coerceAtLeast(dp(24))
+                val left = ((cxNorm * screenW) - boxW / 2f).roundToInt().coerceIn(0, (screenW - boxW).coerceAtLeast(0))
+                val top = ((cyNorm * screenH) - boxH / 2f).roundToInt().coerceIn(0, (screenH - boxH).coerceAtLeast(0))
+                val ruleColor = rule.accentColorHex.toInt()
+                val scanFrame = FrameLayout(this).apply {
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = dp(6).toFloat()
+                        setColor(Color.argb(38, Color.red(ruleColor), Color.green(ruleColor), Color.blue(ruleColor)))
+                        setStroke(dp(1.8f), ruleColor, dp(6).toFloat(), dp(3).toFloat())
+                    }
+                }
+                val tag = TextView(this).apply {
+                    text = "⏱ CD"
+                    setTextColor(Color.WHITE)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 8f)
+                    setTypeface(null, Typeface.BOLD)
+                    setPadding(dp(4), dp(1), dp(4), dp(1))
+                    setBackgroundColor(Color.argb(190, 15, 23, 42))
+                }
+                scanFrame.addView(
+                    tag,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP or Gravity.END
+                    )
+                )
+                stage.addView(scanFrame, FrameLayout.LayoutParams(boxW, boxH).apply {
+                    leftMargin = left
+                    topMargin = top
+                })
+            }
+        }
 
         for (ov in st.activeOverlays) {
             val scale = ov.scale.coerceIn(0.35f, 3.0f)
@@ -563,6 +726,8 @@ class FloatingTriggerOverlayService : Service() {
     // ==================== Layer 2: External Trigger Pins OUTSIDE Floating (Colored + Per-Challenge Eye) ====================
 
     private fun setMarkerWindowsTemporaryHidden(hide: Boolean) {
+        updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = hide)
+        liveStageView?.visibility = if (hide) View.INVISIBLE else View.VISIBLE
         val targetVis = if (hide) View.INVISIBLE else View.VISIBLE
         for (entry in markerWindows.values) {
             if (entry.root.visibility != targetVis) {
@@ -778,11 +943,34 @@ class FloatingTriggerOverlayService : Service() {
             refreshSingleHudVisuals()
             clampHudIntoSafeBounds()
         }
-        val delPinBtn = makeMicroPinBtn("✕", Color.rgb(153, 27, 27), Color.WHITE) {
-            if (step != null && desc.totalTouchSteps > 1) {
-                engine.removeChoreographyStep(rule.id, step.id)
-            } else {
-                engine.deleteRule(rule.id)
+        var delArmed = false
+        var delResetRunnable: Runnable? = null
+        val idleDelBg = roundedBoxBg(Color.rgb(51, 65, 85), Color.argb(140, 239, 68, 68), dp(1f), dp(6).toFloat())
+        val armedDelBg = roundedBoxBg(Color.rgb(220, 38, 38), Color.rgb(254, 202, 202), dp(1.2f), dp(6).toFloat())
+        val delPinBtn = makeMicroPinBtn("✕", Color.rgb(51, 65, 85), Color.WHITE) {}.apply {
+            background = idleDelBg
+            setOnClickListener {
+                if (!delArmed) {
+                    delArmed = true
+                    background = armedDelBg
+                    setTextColor(Color.WHITE)
+                    delResetRunnable?.let { mainHandler.removeCallbacks(it) }
+                    val reset = Runnable {
+                        delArmed = false
+                        background = idleDelBg
+                        setTextColor(Color.WHITE)
+                    }
+                    delResetRunnable = reset
+                    mainHandler.postDelayed(reset, 3000L)
+                } else {
+                    delResetRunnable?.let { mainHandler.removeCallbacks(it) }
+                    delArmed = false
+                    if (step != null && desc.totalTouchSteps > 1) {
+                        engine.removeChoreographyStep(rule.id, step.id)
+                    } else {
+                        engine.deleteRule(rule.id)
+                    }
+                }
             }
         }
         fun btnLp() = LinearLayout.LayoutParams(
@@ -996,7 +1184,7 @@ class FloatingTriggerOverlayService : Service() {
         }
         hudTopRow = topRow
 
-        // Handle grip: geser bebas dari area mana pun; ketuk singkat untuk ciutkan/buka bubble minimalis
+        // Handle grip: geser bebas dari area mana pun; ketuk singkat grip untuk ciutkan/buka bubble minimalis
         val titleBtn = TextView(this).apply {
             text = "⠿"
             setTextColor(Color.WHITE)
@@ -1007,6 +1195,16 @@ class FloatingTriggerOverlayService : Service() {
             minimumHeight = dp(28)
             setPadding(dp(6), dp(4), dp(6), dp(4))
             background = roundedBoxBg(Color.argb(145, 30, 41, 59), Color.argb(80, 34, 211, 238), dp(0.8f), dp(7).toFloat())
+            setOnClickListener {
+                if (!isDraggingHud) {
+                    val nextCollapsed = !lastState.floatingConfig.hudCollapsed
+                    if (nextCollapsed) {
+                        isSubMenuExpanded = false
+                        setHudFocusableForKeyboard(false)
+                    }
+                    engine.updateFloatingConfig { it.copy(hudCollapsed = nextCollapsed) }
+                }
+            }
         }
         hudTitleBtn = titleBtn
 
@@ -1040,6 +1238,13 @@ class FloatingTriggerOverlayService : Service() {
         }
         btnSubMenuTiny = menuBtn
 
+        val minBtn = makeHudButton("—", Color.rgb(51, 65, 85), Color.WHITE) {
+            isSubMenuExpanded = false
+            setHudFocusableForKeyboard(false)
+            engine.updateFloatingConfig { it.copy(hudCollapsed = true) }
+        }
+        btnMinTiny = minBtn
+
         val closeBtn = makeHudButton("✕", Color.rgb(127, 29, 29), Color.WHITE) {
             stopSelf()
         }
@@ -1055,6 +1260,7 @@ class FloatingTriggerOverlayService : Service() {
         topRow.addView(engineBtn, gapLp())
         topRow.addView(pinBtn, gapLp())
         topRow.addView(menuBtn, gapLp())
+        topRow.addView(minBtn, gapLp())
         topRow.addView(closeBtn)
 
         val dpadPanel = buildPrecisionCursorBar()
@@ -1542,6 +1748,7 @@ class FloatingTriggerOverlayService : Service() {
         btnEngineTiny?.visibility = btnVis
         btnPinTiny?.visibility = btnVis
         btnSubMenuTiny?.visibility = btnVis
+        btnMinTiny?.visibility = btnVis
         btnCloseTiny?.visibility = btnVis
         subMenuContainer?.visibility = if (showSubMenu) View.VISIBLE else View.GONE
 
@@ -1608,6 +1815,19 @@ class FloatingTriggerOverlayService : Service() {
             setTextColor(if (showSubMenu) Color.BLACK else Color.WHITE)
             background = roundedBoxBg(
                 fillColor = if (showSubMenu) Color.rgb(34, 211, 238) else Color.rgb(51, 65, 85),
+                strokeColor = Color.TRANSPARENT,
+                strokePx = 0,
+                radiusPx = dp(6 * s).toFloat()
+            )
+        }
+
+        btnMinTiny?.apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
+            setPadding(pH, pV, pH, pV)
+            minimumWidth = minW
+            minimumHeight = minH
+            background = roundedBoxBg(
+                fillColor = Color.rgb(51, 65, 85),
                 strokeColor = Color.TRANSPARENT,
                 strokePx = 0,
                 radiusPx = dp(6 * s).toFloat()
@@ -1771,7 +1991,7 @@ class FloatingTriggerOverlayService : Service() {
     }
 
     private fun buildNotification(isHiddenForLive: Boolean): Notification {
-        val showFloatingPending = PendingIntent.getService(
+        val showFloatingPending = PendingIntent.getForegroundService(
             this,
             2,
             Intent(this, FloatingTriggerOverlayService::class.java).apply {
@@ -1785,7 +2005,7 @@ class FloatingTriggerOverlayService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val stopIntent = PendingIntent.getService(
+        val stopIntent = PendingIntent.getForegroundService(
             this,
             1,
             Intent(this, FloatingTriggerOverlayService::class.java).apply {
@@ -1796,7 +2016,7 @@ class FloatingTriggerOverlayService : Service() {
         val toggleAction = if (isHiddenForLive) {
             NotificationCompat.Action(0, "Tampilkan Floating", showFloatingPending)
         } else {
-            val hideIntent = PendingIntent.getService(
+            val hideIntent = PendingIntent.getForegroundService(
                 this,
                 3,
                 Intent(this, FloatingTriggerOverlayService::class.java).apply {

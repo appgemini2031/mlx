@@ -707,8 +707,11 @@ class AppUpdateManager private constructor(context: Context) {
         val rawTag = json.optString("tag_name", "").ifBlank {
             json.optString("version", "0.0.0")
         }
-        val cleanVersion = rawTag.trim().removePrefix("v").removePrefix("V")
         val releaseName = json.optString("name", "").ifBlank { "Rilis $rawTag" }
+        val semverMatch = Regex("v?(\\d+\\.\\d+\\.\\d+)").find(rawTag)
+            ?: Regex("v?(\\d+\\.\\d+\\.\\d+)").find(releaseName)
+        val cleanVersion = semverMatch?.groupValues?.get(1)
+            ?: rawTag.trim().removePrefix("v").removePrefix("V").replace(Regex("-b\\d+.*$"), "")
         val releaseNotes = json.optString("body", "").ifBlank {
             "Pembaruan aplikasi Tajasb VCam versi $rawTag tersedia."
         }

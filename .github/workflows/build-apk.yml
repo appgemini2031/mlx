@@ -59,17 +59,27 @@ jobs:
             echo "ERROR: Permanent debug.keystore could not be verified!"
             exit 1
           fi
-          # Pastikan VERSION_MAJOR/MINOR/PATCH dan VERSION_CODE selalu mengikuti Release tertinggi + 1 jika file lokal lebih rendah
+          # Pastikan VERSION_MAJOR/MINOR/PATCH (2.YYMM.DDHHMM) dan VERSION_CODE (UTC epoch/10)
+          # selalu naik secara global lintas repo, akun AI Studio, maupun remix agar APK selalu bisa menimpa
           if [ -f "app/version.properties" ]; then
             python3 - << 'PYEOF'
-          import os, re, json, urllib.request
+          import os, re, json, time, urllib.request
+          from datetime import datetime, timezone
+
           prop_path = "app/version.properties"
           txt = open(prop_path).read() if os.path.exists(prop_path) else ""
           def get_int(k, d):
               m = re.search(rf"^{k}=(\d+)", txt, re.M)
               return int(m.group(1)) if m else d
+
           cur = (get_int("VERSION_MAJOR", 1), get_int("VERSION_MINOR", 0), get_int("VERSION_PATCH", 50))
           code = get_int("VERSION_CODE", 2550)
+
+          now_ts = int(time.time())
+          dt = datetime.fromtimestamp(now_ts, timezone.utc)
+          utc_ver = (2, int(dt.strftime("%y%m")), int(dt.strftime("%d%H%M")))
+          utc_code = now_ts // 10
+
           repo = os.environ.get("GITHUB_REPOSITORY", "")
           tok = os.environ.get("GH_TOKEN", "")
           best_rel = (0, 0, 0)
@@ -91,10 +101,19 @@ jobs:
                                               best_rel = v
                   except Exception:
                       pass
-          if best_rel >= cur and best_rel > (0, 0, 0):
-              cur = (best_rel[0], best_rel[1], best_rel[2] + 1)
-          run_num = int(os.environ.get("GITHUB_RUN_NUMBER", "1") or "1")
-          code = max(code, 2550 + run_num, 2500 + cur[2])
+
+          # Pertahankan versi persis dari update.sh jika commit baru saja di-push (<= 30 menit) dan lebih tinggi dari rilis repo
+          just_pushed_from_cli = (cur[0] >= 2 and cur > best_rel and abs(utc_code - code) <= 180)
+          if not just_pushed_from_cli:
+              highest = max(cur, best_rel)
+              if utc_ver > highest:
+                  cur = utc_ver
+              else:
+                  cur = (highest[0], highest[1], highest[2] + 1)
+              code = max(code + 1, utc_code)
+          else:
+              code = max(code, utc_code)
+
           with open(prop_path, "w") as f:
               f.write(f"# Auto-generated Version Properties\nVERSION_MAJOR={cur[0]}\nVERSION_MINOR={cur[1]}\nVERSION_PATCH={cur[2]}\nVERSION_CODE={code}\n")
           print(f"Synced app/version.properties -> v{cur[0]}.{cur[1]}.{cur[2]} (code {code})")
@@ -110,20 +129,23 @@ jobs:
         id: get_version
         run: |
           if [ -f "app/version.properties" ]; then
-            MAJOR=$(grep -E "^VERSION_MAJOR=" app/version.properties | head -n 1 | cut -d'=' -f2 | tr -d '\r\n ' || echo "1")
-            MINOR=$(grep -E "^VERSION_MINOR=" app/version.properties | head -n 1 | cut -d'=' -f2 | tr -d '\r\n ' || echo "0")
-            PATCH=$(grep -E "^VERSION_PATCH=" app/version.properties | head -n 1 | cut -d'=' -f2 | tr -d '\r\n ' || echo "50")
-            CODE=$(grep -E "^VERSION_CODE=" app/version.properties | head -n 1 | cut -d'=' -f2 | tr -d '\r\n ' || echo "2550")
-            [ -z "$MAJOR" ] && MAJOR="1"
-            [ -z "$MINOR" ] && MINOR="0"
-            [ -z "$PATCH" ] && PATCH="50"
+            MAJOR=$(grep -E "^VERSION_MAJOR=" app/version.properties | head -n 1 | cut -d'=' -f2 | tr -d '\r\n ' || echo "2")
+            MINOR=$(grep -E "^VERSION_MINOR=" app/version.properties | head -n 1 | cut -d'=' -f2 | tr -d '\r\n ' || echo "2611")
+            PATCH=$(grep -E "^VERSION_PATCH=" app/version.properties | head -n 1 | cut -d'=' -f2 | tr -d '\r\n ' || echo "140000")
+            CODE=$(grep -E "^VERSION_CODE=" app/version.properties | head -n 1 | cut -d'=' -f2 | tr -d '\r\n ' || echo "179468000")
+            [ -z "$MAJOR" ] && MAJOR="2"
+            [ -z "$MINOR" ] && MINOR=$(date -u +"%y%m")
+            [ -z "$PATCH" ] && PATCH=$((10#$(date -u +"%d%H%M")))
             echo "APP_VER=${MAJOR}.${MINOR}.${PATCH}" >> $GITHUB_OUTPUT
             echo "TAG_NAME=v${MAJOR}.${MINOR}.${PATCH}-b${{ github.run_number }}" >> $GITHUB_OUTPUT
             echo "RELEASE_TITLE=MLx v${MAJOR}.${MINOR}.${PATCH} (Build ${{ github.run_number }})" >> $GITHUB_OUTPUT
           else
-            echo "APP_VER=1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
-            echo "TAG_NAME=v1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
-            echo "RELEASE_TITLE=MLx v1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+            FALLBACK_MIN=$(date -u +"%y%m")
+            FALLBACK_PAT=$((10#$(date -u +"%d%H%M")))
+            FALLBACK_VER="2.${FALLBACK_MIN}.${FALLBACK_PAT}"
+            echo "APP_VER=${FALLBACK_VER}" >> $GITHUB_OUTPUT
+            echo "TAG_NAME=v${FALLBACK_VER}-b${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "RELEASE_TITLE=MLx v${FALLBACK_VER} (Build ${{ github.run_number }})" >> $GITHUB_OUTPUT
           fi
 
       - name: Prepare Release APK Name

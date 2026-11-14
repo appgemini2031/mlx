@@ -420,23 +420,39 @@ ensure_canonical_keystore() {
   decode_b64_to_keystore "debug.keystore.base64" "debug.keystore"
 }
 
+get_scoped_version_cache() {
+  local slug
+  slug=$(extract_repo_slug 2>/dev/null || echo "")
+  if [ -z "$slug" ]; then
+    echo "$HOME/.tajasb_version.cfg"
+    return 0
+  fi
+  local safe_key
+  safe_key=$(echo "$slug" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/_/g')
+  echo "$HOME/.tajasb_version_${safe_key}.cfg"
+}
+
 backup_version_and_keystore() {
   mkdir -p .git 2>/dev/null || true
+  local scoped_cfg
+  scoped_cfg=$(get_scoped_version_cache)
   if [ -s "app/version.properties" ]; then
     cp -f "app/version.properties" ".git/tajasb_version.cfg" 2>/dev/null || true
-    cp -f "app/version.properties" "$HOME/.tajasb_version.cfg" 2>/dev/null || true
+    cp -f "app/version.properties" "$scoped_cfg" 2>/dev/null || true
   fi
   ensure_canonical_keystore
 }
 
 restore_version_and_keystore() {
+  local scoped_cfg
+  scoped_cfg=$(get_scoped_version_cache)
   if [ ! -s "app/version.properties" ]; then
     if [ -s ".git/tajasb_version.cfg" ]; then
       mkdir -p app 2>/dev/null || true
       cp -f ".git/tajasb_version.cfg" "app/version.properties" 2>/dev/null || true
-    elif [ -s "$HOME/.tajasb_version.cfg" ]; then
+    elif [ -s "$scoped_cfg" ]; then
       mkdir -p app 2>/dev/null || true
-      cp -f "$HOME/.tajasb_version.cfg" "app/version.properties" 2>/dev/null || true
+      cp -f "$scoped_cfg" "app/version.properties" 2>/dev/null || true
     fi
   fi
   ensure_canonical_keystore
@@ -794,7 +810,9 @@ if [ -n "$NESTED_SETTINGS" ]; then
 fi
 
 APP_NAME=$(grep '"name":' temp_update/metadata.json 2>/dev/null | head -n 1 | cut -d '"' -f 4 || echo "Tajasb")
+APP_ID=$(grep -E 'applicationId\s*=' temp_update/app/build.gradle.kts 2>/dev/null | head -n 1 | sed -E 's/.*applicationId\s*=\s*"([^"]+)".*/\1/' || echo "")
 log_info "Identitas Proyek : $APP_NAME"
+[ -n "$APP_ID" ] && log_info "Package ID (APK) : $APP_ID"
 
 # Jika Mode 2 (Ekstraksi Khusus Tools & Termux Event Saja Tanpa Kode APK)
 if [ "$PUSH_TO_GITHUB" = false ]; then
@@ -919,143 +937,109 @@ fi
 
 rm -rf temp_update
 
-log_step "TAHAP 4/5 : PEMBARUAN VERSI & PROTEKSI GITIGNORE"
+log_step "TAHAP 4/5 : PEMBARUAN VERSI (UTC GLOBAL) & PROTEKSI GITIGNORE"
 mkdir -p app
 PROP_FILE="app/version.properties"
-C_MAJ=$(read_version_prop "$PROP_FILE" "VERSION_MAJOR" "1")
-C_MIN=$(read_version_prop "$PROP_FILE" "VERSION_MINOR" "0")
-C_PAT=$(read_version_prop "$PROP_FILE" "VERSION_PATCH" "50")
-C_COD=$(read_version_prop "$PROP_FILE" "VERSION_CODE" "2550")
-
-[ -z "$ZIP_MAJ" ] && ZIP_MAJ="$C_MAJ"
-[ -z "$ZIP_MIN" ] && ZIP_MIN="$C_MIN"
-[ -z "$ZIP_PAT" ] && ZIP_PAT="$C_PAT"
-[ -z "$ZIP_COD" ] && ZIP_COD="$C_COD"
-
-# Gunakan patokan versi tertinggi berdasarkan tuple (MAJOR, MINOR, PATCH) agar cache lama v0.0.xxx
-# tidak menimpa patokan v1.0.50+
-pick_higher_semver() {
-  local m1="${1:-0}" n1="${2:-0}" p1="${3:-0}"
-  local m2="${4:-0}" n2="${5:-0}" p2="${6:-0}"
-  if [ "$m2" -gt "$m1" ] 2>/dev/null; then
-    echo "$m2 $n2 $p2"
-  elif [ "$m2" -eq "$m1" ] 2>/dev/null && [ "$n2" -gt "$n1" ] 2>/dev/null; then
-    echo "$m2 $n2 $p2"
-  elif [ "$m2" -eq "$m1" ] 2>/dev/null && [ "$n2" -eq "$n1" ] 2>/dev/null && [ "$p2" -gt "$p1" ] 2>/dev/null; then
-    echo "$m2 $n2 $p2"
-  else
-    echo "$m1 $n1 $p1"
-  fi
-}
-
-# Patokan minimum mutlak v1.0.50
-MAX_MAJ=1
-MAX_MIN=0
-MAX_PAT=50
-read -r MAX_MAJ MAX_MIN MAX_PAT <<< "$(pick_higher_semver "$MAX_MAJ" "$MAX_MIN" "$MAX_PAT" "$C_MAJ" "$C_MIN" "$C_PAT")"
-read -r MAX_MAJ MAX_MIN MAX_PAT <<< "$(pick_higher_semver "$MAX_MAJ" "$MAX_MIN" "$MAX_PAT" "$ZIP_MAJ" "$ZIP_MIN" "$ZIP_PAT")"
-
-H_MAJ=$(read_version_prop "$HOME/.tajasb_version.cfg" "VERSION_MAJOR" "0")
-H_MIN=$(read_version_prop "$HOME/.tajasb_version.cfg" "VERSION_MINOR" "0")
-H_PAT=$(read_version_prop "$HOME/.tajasb_version.cfg" "VERSION_PATCH" "0")
-H_COD=$(read_version_prop "$HOME/.tajasb_version.cfg" "VERSION_CODE" "0")
-
-G_MAJ=$(read_version_prop ".git/tajasb_version.cfg" "VERSION_MAJOR" "0")
-G_MIN=$(read_version_prop ".git/tajasb_version.cfg" "VERSION_MINOR" "0")
-G_PAT=$(read_version_prop ".git/tajasb_version.cfg" "VERSION_PATCH" "0")
-G_COD=$(read_version_prop ".git/tajasb_version.cfg" "VERSION_CODE" "0")
-
-read -r MAX_MAJ MAX_MIN MAX_PAT <<< "$(pick_higher_semver "$MAX_MAJ" "$MAX_MIN" "$MAX_PAT" "$H_MAJ" "$H_MIN" "$H_PAT")"
-read -r MAX_MAJ MAX_MIN MAX_PAT <<< "$(pick_higher_semver "$MAX_MAJ" "$MAX_MIN" "$MAX_PAT" "$G_MAJ" "$G_MIN" "$G_PAT")"
-
-# Cek otomatis versi tertinggi di GitHub Release & Remote Tags:
-# Jika di Termux rendah sedangkan di Release sudah tinggi, otomatis ikuti versi Release lalu naikkan +1.
-REL_MAJ=0
-REL_MIN=0
-REL_PAT=0
+SCOPED_VER_CFG=$(get_scoped_version_cache)
 CUR_SLUG_VER=$(extract_repo_slug)
 CUR_TOK_VER=$(extract_auth_token)
+
+# Kumpulkan tag remote via git ls-remote sebagai fallback tambahan
+LS_REMOTE_TAGS=""
 if [ -n "$CUR_SLUG_VER" ]; then
-  REL_OUT=$("$PYTHON_CMD" -c "
-import urllib.request, json, re, subprocess
-slug = '$CUR_SLUG_VER'
-tok = '$CUR_TOK_VER'
-best = (0, 0, 0)
-headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'Tajasb-Updater'}
-if tok:
-    headers['Authorization'] = f'Bearer {tok}'
-for ep in [f'https://api.github.com/repos/{slug}/releases?per_page=30', f'https://api.github.com/repos/{slug}/tags?per_page=30']:
+  LS_REMOTE_TAGS=$(git ls-remote --tags origin 2>/dev/null | grep -oE 'refs/tags/v?[0-9]+\.[0-9]+\.[0-9]+' | sed -E 's|refs/tags/v?||' | tr '\n' ' ' || true)
+fi
+
+VER_PY_OUT=$("$PYTHON_CMD" - "$PROP_FILE" ".git/tajasb_version.cfg" "$SCOPED_VER_CFG" "$ZIP_MAJ" "$ZIP_MIN" "$ZIP_PAT" "$ZIP_COD" "$CUR_SLUG_VER" "$CUR_TOK_VER" "$LS_REMOTE_TAGS" << 'PYEOF' 2>/dev/null
+import sys, os, re, json, time, urllib.request
+from datetime import datetime, timezone
+
+prop_file, git_cfg, scoped_cfg = sys.argv[1], sys.argv[2], sys.argv[3]
+zip_maj, zip_min, zip_pat, zip_cod = sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]
+slug, tok, ls_tags = sys.argv[8], sys.argv[9], sys.argv[10]
+
+def read_props(path):
+    if not path or not os.path.exists(path):
+        return None, None
+    txt = open(path, errors="ignore").read()
+    def gi(k):
+        m = re.search(rf"^{k}=(\d+)", txt, re.M)
+        return int(m.group(1)) if m else None
+    maj, mn, pat, cod = gi("VERSION_MAJOR"), gi("VERSION_MINOR"), gi("VERSION_PATCH"), gi("VERSION_CODE")
+    ver = (maj, mn, pat) if (maj is not None and mn is not None and pat is not None) else None
+    return ver, cod
+
+def to_int(s, d=0):
     try:
-        req = urllib.request.Request(ep, headers=headers)
-        with urllib.request.urlopen(req, timeout=8) as r:
-            data = json.loads(r.read().decode('utf-8', errors='ignore'))
-            if isinstance(data, list):
-                for item in data:
-                    cand_texts = [str(item.get('tag_name', '')), str(item.get('name', ''))]
-                    for a in item.get('assets', []) if isinstance(item.get('assets'), list) else []:
-                        cand_texts.append(str(a.get('name', '')))
-                    for t in cand_texts:
-                        for m in re.finditer(r'v?(\d+)\.(\d+)\.(\d+)', t):
-                            v = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-                            if v > best:
-                                best = v
+        return int(str(s).strip())
     except Exception:
-        pass
-print(f'{best[0]} {best[1]} {best[2]}')
-" 2>/dev/null || echo "0 0 0")
-  read -r REL_MAJ REL_MIN REL_PAT <<< "$REL_OUT"
-fi
+        return d
 
-# Fallback tambahan dari git ls-remote --tags origin jika ada
-while IFS= read -r tag_ver; do
-  if [ -n "$tag_ver" ]; then
-    t_maj=$(echo "$tag_ver" | cut -d'.' -f1)
-    t_min=$(echo "$tag_ver" | cut -d'.' -f2)
-    t_pat=$(echo "$tag_ver" | cut -d'.' -f3)
-    read -r REL_MAJ REL_MIN REL_PAT <<< "$(pick_higher_semver "$REL_MAJ" "$REL_MIN" "$REL_PAT" "$t_maj" "$t_min" "$t_pat")"
-  fi
-done < <(git ls-remote --tags origin 2>/dev/null | grep -oE 'refs/tags/v?[0-9]+\.[0-9]+\.[0-9]+' | sed -E 's|refs/tags/v?||' || true)
+c_ver, c_cod = read_props(prop_file)
+g_ver, g_cod = read_props(git_cfg)
+s_ver, s_cod = read_props(scoped_cfg)
+z_ver = (to_int(zip_maj), to_int(zip_min), to_int(zip_pat)) if (zip_maj and zip_min and zip_pat) else None
+z_cod = to_int(zip_cod, 0)
 
-HAS_HIGHER_REMOTE=0
-if [ "${REL_MAJ:-0}" -gt 0 ] 2>/dev/null || [ "${REL_PAT:-0}" -gt 0 ] 2>/dev/null; then
-  AFTER_REL=$(pick_higher_semver "$MAX_MAJ" "$MAX_MIN" "$MAX_PAT" "$REL_MAJ" "$REL_MIN" "$REL_PAT")
-  read -r NEW_M NEW_N NEW_P <<< "$AFTER_REL"
-  if [ "$NEW_M" != "$MAX_MAJ" ] || [ "$NEW_N" != "$MAX_MIN" ] || [ "$NEW_P" != "$MAX_PAT" ] || { [ "$REL_MAJ" -eq "$MAX_MAJ" ] && [ "$REL_MIN" -eq "$MAX_MIN" ] && [ "$REL_PAT" -ge "$MAX_PAT" ]; }; then
-    HAS_HIGHER_REMOTE=1
-    MAX_MAJ=$NEW_M
-    MAX_MIN=$NEW_N
-    MAX_PAT=$NEW_P
-  fi
-fi
+best_rel = (0, 0, 0)
+if slug:
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "Tajasb-Updater"}
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    for ep in [f"https://api.github.com/repos/{slug}/releases?per_page=30", f"https://api.github.com/repos/{slug}/tags?per_page=30"]:
+        try:
+            req = urllib.request.Request(ep, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = json.loads(r.read().decode("utf-8", errors="ignore"))
+                if isinstance(data, list):
+                    for item in data:
+                        cands = [str(item.get("tag_name", "")), str(item.get("name", ""))]
+                        for a in (item.get("assets") or []):
+                            if isinstance(a, dict):
+                                cands.append(str(a.get("name", "")))
+                        for t in cands:
+                            for m in re.finditer(r"v?(\d+)\.(\d+)\.(\d+)", t):
+                                v = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                                if v > best_rel:
+                                    best_rel = v
+        except Exception:
+            pass
 
-MAX_COD=2550
-[ "$C_COD" -gt "$MAX_COD" ] 2>/dev/null && MAX_COD=$C_COD
-[ "$ZIP_COD" -gt "$MAX_COD" ] 2>/dev/null && MAX_COD=$ZIP_COD
-[ "$H_COD" -gt "$MAX_COD" ] 2>/dev/null && MAX_COD=$H_COD
-[ "$G_COD" -gt "$MAX_COD" ] 2>/dev/null && MAX_COD=$G_COD
-REL_EST_COD=$((2500 + MAX_PAT))
-[ "$REL_EST_COD" -gt "$MAX_COD" ] 2>/dev/null && MAX_COD=$REL_EST_COD
+for m in re.finditer(r"(\d+)\.(\d+)\.(\d+)", ls_tags or ""):
+    v = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    if v > best_rel:
+        best_rel = v
 
-# Jika di GitHub Release sudah ada versi yang sama/lebih tinggi, otomatis ikuti versi Release lalu naikkan +1!
-# Hanya jika belum ada Release v1.x sama sekali dan Termux baru migrasi dari 0.x, mulai tepat di v1.0.50.
-if [ "$HAS_HIGHER_REMOTE" -eq 1 ]; then
-  PREV_VER_STR="Release v${REL_MAJ}.${REL_MIN}.${REL_PAT}"
-  V_MAJOR=$MAX_MAJ
-  V_MINOR=$MAX_MIN
-  V_PATCH=$((MAX_PAT + 1))
-  V_CODE=$((MAX_COD + 1))
-elif [ "${H_MAJ:-0}" -lt 1 ] 2>/dev/null && [ "${G_MAJ:-0}" -lt 1 ] 2>/dev/null && [ "${REL_MAJ:-0}" -lt 1 ] 2>/dev/null; then
-  PREV_VER_STR="v${H_MAJ:-0}.${H_MIN:-0}.${H_PAT:-0} (${H_COD:-2500})"
-  V_MAJOR=$MAX_MAJ
-  V_MINOR=$MAX_MIN
-  V_PATCH=$MAX_PAT
-  V_CODE=$MAX_COD
+now_ts = int(time.time())
+dt = datetime.fromtimestamp(now_ts, timezone.utc)
+utc_ver = (2, int(dt.strftime("%y%m")), int(dt.strftime("%d%H%M")))
+utc_code = now_ts // 10
+
+local_cands = [v for v in [c_ver, g_ver, s_ver, z_ver] if v is not None]
+prev_ver = max(local_cands + ([best_rel] if best_rel > (0, 0, 0) else [(1, 0, 50)]))
+prev_code = max([c for c in [c_cod, g_cod, s_cod, z_cod, 2550] if c is not None])
+
+if utc_ver > prev_ver:
+    new_ver = utc_ver
+else:
+    new_ver = (prev_ver[0], prev_ver[1], prev_ver[2] + 1)
+
+new_code = max(utc_code, prev_code + 1)
+
+print(f"{new_ver[0]} {new_ver[1]} {new_ver[2]} {new_code} v{prev_ver[0]}.{prev_ver[1]}.{prev_ver[2]}({prev_code})")
+PYEOF
+)
+
+if [ -n "$VER_PY_OUT" ]; then
+  read -r V_MAJOR V_MINOR V_PATCH V_CODE PREV_VER_STR <<< "$VER_PY_OUT"
 else
-  PREV_VER_STR="v${MAX_MAJ}.${MAX_MIN}.${MAX_PAT} (${MAX_COD})"
-  V_MAJOR=$MAX_MAJ
-  V_MINOR=$MAX_MIN
-  V_PATCH=$((MAX_PAT + 1))
-  V_CODE=$((MAX_COD + 1))
+  # Fallback bash murni berbasis UTC
+  V_MAJOR=2
+  V_MINOR=$(date -u +"%y%m")
+  V_PATCH=$((10#$(date -u +"%d%H%M")))
+  UTC_SEC=$(date -u +"%s")
+  V_CODE=$((UTC_SEC / 10))
+  PREV_VER_STR="baseline"
 fi
 
 cat << EOF > "$PROP_FILE"
@@ -1188,6 +1172,7 @@ fi
     echo "  ☁️  RINGKASAN PIPELINE & ZERO-LOCAL-APK-FOOTPRINT"
     echo "======================================================="
     echo "  🏷️  Versi Target : v${V_MAJOR}.${V_MINOR}.${V_PATCH} (Code: ${V_CODE})"
+    [ -n "$APP_ID" ] && echo "  📱 Package ID   : ${APP_ID}"
     echo "  📌 Commit SHA   : ${TARGET_COMMIT_SHA:0:7}"
     echo "  🛡️  Status Push  : Terkirim & Sedang Dikompilasi di Cloud"
     echo "  🧹 Lokal Termux : Kode APK Dihapus (Termux Event & Tools Aman)"

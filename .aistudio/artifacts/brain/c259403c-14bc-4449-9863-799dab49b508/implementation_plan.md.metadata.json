@@ -1,6 +1,0 @@
-{
-  "summary":  "Rencana perbaikan bug kritis dan perombakan UX Pusat Pengaturan Bawah BeyBattle Royale:\n1. Perbaikan Bug 'Diam Saat Live Rame' & Auto-Reset: Isolasi thread-safety antrean event + try-catch loop fisika 60 FPS agar tidak pernah crash/freeze saat event membeludak, penanganan kondisi seri (0 pemain) & 1 pemain, serta sinkronisasi publishStateUpdate saat auto-reset.\n2. Penghentian Total Kebocoran Suara & Kontrol Audio Terpisah: Gerbang isGameActive pada seluruh handler event live, stopAll() instan untuk TTS & AudioTrack saat keluar arena, pembatasan kanal AudioTrack agar aman saat ramai, serta saklar terpisah SFX, TTS Announcer, dan Slider Volume.\n3. Layar Atas Bersih Total & Dock Bawah Super Minimalis: Memindahkan seluruh tombol dari bagian atas layar ke satu dock bawah yang ramping dan rapi.\n4. Pusat Pengaturan Lengkap di Bawah (Tidak Kaku): Semua parameter permainan dapat dikustomisasi bebas (Auto-Reset & durasi selebrasi, Auto-Bot, batas pemain, fisika pantulan/damage/peluruhan HP, batas pertumbuhan Like, toggle rintangan satuan Vortex/Laser/Trapdoor/Boss, dimensi P×L, background, serta visibilitas Kill Feed & Ticker).",
-  "updatedAt":  "2026-11-11T09:19:48.334750544Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

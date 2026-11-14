@@ -1,6 +1,0 @@
-{
-  "summary": "Rencana implementasi Modul Audio Anti-Deteksi & Pemecah Sidik Jari Akustik (Acoustic Fingerprint Disruptor) untuk Video Audio Hook dan Standalone MP3 Player. Mencakup pergeseran nada mikro (Micro-Pitch Shifting), variasi tempo dinamis (Dynamic Speed Drift), penyesuaian intensitas (Rendah, Sedang, Agresif), serta kontrol saklar di Menu Utama dan Floating Window.",
-  "updatedAt": "2026-10-16T14:01:43.575667807Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

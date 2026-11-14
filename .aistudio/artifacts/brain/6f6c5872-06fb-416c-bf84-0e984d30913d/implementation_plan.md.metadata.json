@@ -1,6 +1,0 @@
-{
-  "summary":  "Rencana implementasi arsitektur 2-Perangkat Best Practice untuk Live Event TikTok (Konsep Mekah & Siaran Langsung):\n1. Device 1 (Termux/Server Event Engine): Daemon Python berbasis Webcast WebSocket client yang membaca stream event langsung dari server TikTok (@username) tanpa perlu scanning layar, lalu memancarkannya via WebSocket LAN server lokal.\n2. Device 2 (Android App CuanCame Event Receiver): Klien WebSocket LAN ringan yang menerima data event terstruktur secara instan (<5ms latency), hemat baterai dan RAM, bebas error accessibility update UI.\n3. Panel Kontrol Multi-Saklar (Granular Event Switches): Kontrol saklar on/off mandiri untuk setiap jenis event (Komentar & Doa, Gift Saweran, Tap Like, Sambutan Join, Follow Baru, Share Siaran, dan Statistik Penonton Aktif).\n4. Integrasi Overlay Realtime: Menghubungkan event masuk langsung ke Banner Doa, Notifikasi Gift, dan OSD Kamera Virtual tanpa interferensi manual.",
-  "updatedAt":  "2026-11-07T11:42:09.467947463Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

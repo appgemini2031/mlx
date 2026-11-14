@@ -1,6 +1,0 @@
-{
-  "summary": "Revisi Rencana Penataan Efisiensi UI Sesuai Umpan Balik:\n1. Sembunyikan Total Kartu Al-Qur'an Jika OFF: Menghapus kartu placeholder Al-Qur'an di Tab Musik saat fitur dimatikan di pengaturan, sehingga tidak ada ruang yang terbuang sia-sia saat fitur tidak digunakan.\n2. Pemusatan Anti-Deteksi di Tab Sistem: Menghapus kartu Anti-Deteksi Video & Audio duplikat dari Tab Video dan Tab Musik.\n3. Migrasi Teks Panjang ke Tombol Info: Seluruh penjelasan panjang disimpan di tombol info dialog '!' (FeatureInfoButton) yang rapi.\n4. Tata Letak Bersih & Ringkas: Pengurangan tinggi dan padding di seluruh tab tanpa merusak fungsi aplikasi.",
-  "updatedAt": "2026-11-06T11:10:56.873792171Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

@@ -1,6 +1,0 @@
-{
-  "summary": "Rencana revisi pemindaian komentar TikTok Live: deteksi menu/sheet penutup agar tidak membaca menu sebagai komentar, eliminasi pesan asisten TikTok, peningkatan akurasi parsing komentar penonton sesuai contoh Ref 3 & 4, serta penyimpanan koordinat posisi jumlah penonton ke penyimpanan lokal.",
-  "updatedAt": "2026-10-14T15:11:26.993202517Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

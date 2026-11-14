@@ -1,6 +1,0 @@
-{
-  "summary": "Rencana implementasi arsitektur modular untuk update.sh dan pengamanan kunci privat:\n1. Self-Update di Awal: update.sh langsung mendeteksi ZIP terbaru di folder Download dan memperbarui dirinya sendiri sebelum menu interaktif ditampilkan, sehingga menu tidak pernah muncul dua kali.\n2. Modularisasi Skrip ke direktori tools/ (license_manager, remote_kill, telegram_bot, apk_downloader, release_manager, local_builder).\n3. Pengamanan Anti-Bocor Git: Memindahkan Private Key ECDSA dan data sewa ke direktori lokal terproteksi, memasukkan tools/, cuancame_rentals.json, dan file kunci ke .gitignore secara ketat sehingga tidak ada rahasia yang ter-push ke GitHub.",
-  "updatedAt": "2026-10-18T16:03:14.244871982Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

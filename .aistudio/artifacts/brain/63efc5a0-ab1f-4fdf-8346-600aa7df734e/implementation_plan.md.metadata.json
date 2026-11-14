@@ -1,0 +1,6 @@
+{
+  "summary":  "Rencana arsitektur 2-perangkat untuk mode Live Mobile Legends tanpa Floating HUD: Device 1 (Termux) berperan sebagai Event Server sekaligus Remote Controller via Web Dashboard LAN & terminal, sedangkan Device 2 (HP Gaming) memisahkan Mode Setup Kalibrasi Posisi Floating dengan Mode Live Bersih (tanpa tombol HUD melayang).",
+  "updatedAt":  "2026-11-14T14:16:22.170252312Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

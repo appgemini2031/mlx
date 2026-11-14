@@ -1,6 +1,0 @@
-{
-  "summary":  "Rencana penambahan fitur Ganti Akun Firebase / Firestore di Termux CLI (update.sh) dan Telegram Bot Admin (tools/telegram_bot.py). Mendukung ganti via input kredensial langsung (Project ID, API Key, Database ID), upload/deteksi file google-services.json, multi-project node pool cadangan, dan sinkronisasi otomatis ke konfigurasi Android.",
-  "updatedAt":  "2026-11-10T05:19:27.516311829Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

@@ -1,6 +1,0 @@
-{
-  "summary":  "Rencana perbaikan pembacaan dan pemrosesan seluruh event siaran langsung (Chat/Doa, Gift/Saweran, Tap Like, Join, Follow, Share). Memperbaiki kompatibilitas kunci JSON, otomatisasi ping-pong WebSocket, format teks ringkas padat bebas kata berulang, sinkronisasi kontributor doa di kartu Khatam, pemisahan visual banner event interaksi (Join/Follow/Share tidak lagi merah seperti Like), dan penyelarasan analitik dashboard.",
-  "updatedAt":  "2026-11-08T18:31:03.420753587Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

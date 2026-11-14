@@ -1,6 +1,0 @@
-{
-  "summary":  "Revisi rancangan Pemantau Tangkapan Layar Otomatis ke Telegram setiap 2,5 menit (kualitas rendah anti-lag + caption Baterai, RAM, Video, Tap) tanpa penghapusan otomatis agar seluruh riwayat foto tetap tersimpan dan hanya dihapus manual oleh pengguna.",
-  "updatedAt":  "2026-11-01T10:49:32.522545048Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

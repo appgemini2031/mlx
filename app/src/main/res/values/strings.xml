@@ -1,6 +1,8 @@
 <resources>
-    <string name="app_name">Pintasan</string>
-    <string name="floating_service_started">Pintasan Floating Aktif</string>
-    <string name="floating_service_desc">Jendela melayang pintasan aplikasi &amp; multitasking siap digunakan</string>
-    <string name="accessibility_service_desc">Membantu fitur Belah Layar (Split Screen) HP dan pintasan aplikasi multitasking otomatis.</string>
+    <string name="app_name">StreamBattle Studio</string>
+    <string name="floating_service_started">MLBB Floating HUD Aktif</string>
+    <string name="floating_service_desc">Kontrol Mobile Legends Floating HUD dan Termux Event</string>
+    <string name="accessibility_service_label">Auto Tap MLBB (StreamBattle)</string>
+    <string name="accessibility_service_summary">Mengetuk &amp; menggeser tombol Mobile Legends otomatis dari event live</string>
+    <string name="accessibility_service_desc">Izin ini hanya digunakan untuk menjalankan sentuhan (Tap/Hold/Swipe) pada koordinat tombol Mobile Legends yang Anda pasang saat event live masuk.</string>
 </resources>

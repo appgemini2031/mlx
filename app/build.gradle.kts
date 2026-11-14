@@ -18,12 +18,16 @@ val vPatch = (versionProps.getProperty("VERSION_PATCH") ?: "50").toInt()
 val vCode = (versionProps.getProperty("VERSION_CODE") ?: "2550").toInt()
 val vName = "${vMajor}.${vMinor}.${vPatch}"
 
+base {
+    archivesName.set("MLx-v${vName}")
+}
+
 android {
     namespace = "com.example"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.acopy.pro.ufajnb"
+        applicationId = "com.tajasb.pro.cavvnb"
         minSdk = 26
         targetSdk = 35
         versionCode = vCode
@@ -86,8 +90,7 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
-    implementation("com.google.zxing:core:3.5.3")
-    // implementation(libs.coil.compose)
+    implementation(libs.coil.compose)
 
     testImplementation(libs.junit)
     testImplementation("org.json:json:20240303")

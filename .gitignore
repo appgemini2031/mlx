@@ -13,8 +13,8 @@ local.properties
 !.env.example
 *.keystore
 !debug.keystore.base64
-.acopy/
-.acopy*
+.tajasb/
+.tajasb*
 tools/
 *.pem
 *.key

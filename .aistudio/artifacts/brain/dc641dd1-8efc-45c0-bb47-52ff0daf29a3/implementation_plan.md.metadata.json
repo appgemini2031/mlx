@@ -1,6 +1,0 @@
-{
-  "summary":  "Revisi Rencana: Menetapkan Game Tarik Tambang dan Khataman Al-Qur'an KEDUANYA DEFAULT OFF:\n1. Layar Kamera Virtual Bersih 100% di Awal: Baik Game Tarik Tambang maupun Khataman Al-Qur'an disetel DEFAULT OFF sejak awal inisialisasi aplikasi/layanan floating. Tidak ada overlay atau game yang muncul menutupi layar secara otomatis.\n2. Kontrol Penuh di Tangan Host: Host dapat mengaktifkan Game Tarik Tambang kapan saja lewat tombol 'GAME: ON' di Floating Window, atau mengaktifkan Khataman lewat tombol 'KHATAM: ON' sesuai kebutuhan siaran.\n3. Hubungan Mutual-Exclusive & Nol Beban: Saat keduanya OFF, beban CPU, GPU, dan RAM adalah 0%. Ketika salah satu dinyalakan, modul yang lain dipastikan standby tanpa tumpang-tindih visual.\n4. Mekanisme Gamifikasi Tetap Siaga: Logika game (Tap Like, Chat kata kunci kubu, dan Saweran Gift koin) siap berjalan seketika saat host menekan tombol ON.",
-  "updatedAt":  "2026-11-09T19:12:53.449681820Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

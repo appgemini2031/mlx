@@ -1,6 +1,0 @@
-{
-  "summary": "Rencana perbaikan bug siklus Bridge Cycle (stuck di Master Loop & antrean lama tidak selesai). Memperbaiki penangkapan state looping di VideoPlayerView, memperbaiki penerimaan broadcast VIDEO_COMPLETED pada VcamRepository, serta menyediakan opsi tes siklus Langsung Transisi dan Tunggu Master Selesai sesuai pilihan pengguna.",
-  "updatedAt": "2026-10-14T09:56:50.189212004Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

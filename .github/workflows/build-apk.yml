@@ -74,7 +74,7 @@ jobs:
           tok = os.environ.get("GH_TOKEN", "")
           best_rel = (0, 0, 0)
           if repo:
-              headers = {"Accept": "application/vnd.github+json", "User-Agent": "Acopy-CI"}
+              headers = {"Accept": "application/vnd.github+json", "User-Agent": "Tajasb-CI"}
               if tok:
                   headers["Authorization"] = f"Bearer {tok}"
               for ep in [f"https://api.github.com/repos/{repo}/releases?per_page=30", f"https://api.github.com/repos/{repo}/tags?per_page=30"]:
@@ -119,11 +119,11 @@ jobs:
             [ -z "$PATCH" ] && PATCH="50"
             echo "APP_VER=${MAJOR}.${MINOR}.${PATCH}" >> $GITHUB_OUTPUT
             echo "TAG_NAME=v${MAJOR}.${MINOR}.${PATCH}-b${{ github.run_number }}" >> $GITHUB_OUTPUT
-            echo "RELEASE_TITLE=asisten copy v${MAJOR}.${MINOR}.${PATCH} (Build ${{ github.run_number }})" >> $GITHUB_OUTPUT
+            echo "RELEASE_TITLE=MLx v${MAJOR}.${MINOR}.${PATCH} (Build ${{ github.run_number }})" >> $GITHUB_OUTPUT
           else
             echo "APP_VER=1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
             echo "TAG_NAME=v1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
-            echo "RELEASE_TITLE=asisten copy v1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "RELEASE_TITLE=MLx v1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Prepare Release APK Name
@@ -133,8 +133,8 @@ jobs:
           APK_FILE=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
           if [ -n "$APK_FILE" ] && [ -f "$APK_FILE" ]; then
             echo "Found compiled APK: $APK_FILE"
-            # Berkas APK langsung versi otomatis tanpa prefix nama: v1.0.xx.apk
-            cp "$APK_FILE" "release_assets/v${APP_VER}.apk"
+            # Berkas APK dengan format nama di depan dan versi di belakang: MLx-v1.0.xx.apk
+            cp "$APK_FILE" "release_assets/MLx-v${APP_VER}.apk"
             ls -la release_assets/
           else
             echo "Error: No compiled APK found in app/build/outputs/apk!"
@@ -144,8 +144,8 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: acopy-apk-${{ steps.get_version.outputs.TAG_NAME }}
-          path: release_assets/v${{ steps.get_version.outputs.APP_VER }}.apk
+          name: MLx-apk-${{ steps.get_version.outputs.TAG_NAME }}
+          path: release_assets/MLx-v${{ steps.get_version.outputs.APP_VER }}.apk
           retention-days: 14
 
       - name: Publish Release via GitHub CLI (Anti-Tag-Conflict)
@@ -155,7 +155,7 @@ jobs:
           TAG="${{ steps.get_version.outputs.TAG_NAME }}"
           TITLE="${{ steps.get_version.outputs.RELEASE_TITLE }}"
           APP_VER="${{ steps.get_version.outputs.APP_VER }}"
-          APK_PATH="release_assets/v${APP_VER}.apk"
+          APK_PATH="release_assets/MLx-v${APP_VER}.apk"
 
           echo "Publishing $APK_PATH to GitHub Releases with tag $TAG..."
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -187,7 +187,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: ${{ steps.get_version.outputs.RELEASE_TITLE }}
           files: |
-            release_assets/v${{ steps.get_version.outputs.APP_VER }}.apk
+            release_assets/MLx-v${{ steps.get_version.outputs.APP_VER }}.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true

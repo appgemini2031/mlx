@@ -1,6 +1,0 @@
-{
-  "summary": "Revisi menyeluruh rencana implementasi Auto-Download APK: Menganalisis dan menyelesaikan tuntas masalah masa lalu (download APK lama karena build belum selesai). Menerapkan sistem verifikasi ketat berbasis Git Commit SHA, Version Tag (app/version.properties), pemantauan workflow run head_sha secara realtime, dan pencegahan download 'buta' (anti-blind download).",
-  "updatedAt": "2026-10-18T14:45:25.459838145Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

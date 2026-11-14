@@ -1,6 +1,0 @@
-{
-  "summary":  "Panduan dan rencana implementasi privasi maksimal agar Bot Telegram 100% tidak terlihat publik (Invisible Stealth Mode):\n1. Arsitektur 1-on-1 Chat Privat: Menolak seluruh obrolan grup dan otomatis keluar (leaveChat) jika bot dimasukkan ke grup secara paksa.\n2. Hardening Konfigurasi di @BotFather: Mematikan izin masuk grup (/setjoingroups -> Disable) dan mematikan mode inline (/setinline -> Turn off).\n3. Penyamaran Identitas (Camouflage Profile): Panduan mengubah nama bot menjadi utilitas umum (seperti 'Personal Notes' atau 'System Monitor') tanpa kata kunci sensitif.\n4. Kode Pertahanan Script: Validasi ketat chat.type == 'private' yang dipadukan dengan Whitelist ID Admin, PIN Salted SHA-256, dan Silent Drop 100%.",
-  "updatedAt":  "2026-10-21T18:39:52.775101312Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

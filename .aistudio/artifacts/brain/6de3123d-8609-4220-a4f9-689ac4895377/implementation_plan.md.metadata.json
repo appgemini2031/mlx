@@ -1,6 +1,0 @@
-{
-  "summary":  "Rencana komprehensif transformasi Bigo Live Event Broker di Termux dari modul gimik/statik menjadi Real Live Event Engine fungsional:\n1. Perbaikan Endpoint API Bigo Asli: Mengganti scraping HTML usang dengan endpoint resmi Bigo Studio (ta.bigo.tv/official_website/studio/getInternalStudioInfo) untuk deteksi Room ID, UID, SID, status siaran (Alive), nickname, dan HLS stream secara akurat.\n2. Dual-Engine Realtime Ingestion (WebSocket + HTTP Webhook): Membuka gerbang POST /event & /webhook serta WebSocket bridge pada port 8765 sehingga event live nyata dari browser, API, atau script collector dapat langsung masuk dan diteruskan ke Device 2 (<5ms).\n3. Bigo Live Danmaku Webcast Collector: Menyediakan script collector otomatis (Node.js & Bookmarklet/Tampermonkey) untuk menangkap chat doa, saweran beans, gift animasi, dan sambutan penonton langsung dari ruang siaran Bigo aktif tanpa rekayasa.\n4. Sinkronisasi Data Bersih & Akurat ke Device 2: Mengintegrasikan beans counter, konversi rupiah, dan status live secara sinkron ke seluruh fitur interaktif CuanCame (Banner Doa, Tarik Tambang, Raja Singgasana, dan Khatam Al-Qur'an).",
-  "updatedAt":  "2026-11-10T06:54:56.660813272Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

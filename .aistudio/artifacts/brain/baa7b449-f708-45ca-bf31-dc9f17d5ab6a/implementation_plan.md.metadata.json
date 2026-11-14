@@ -1,6 +1,0 @@
-{
-  "summary": "Rencana revitalisasi tata letak antarmuka Floating Window Menu CuanCame: (1) Sistem kartu lipat (Accordion) per kategori untuk memangkas panjang scroll hingga 60%, (2) Redesain hierarchy kontrol Video utama di atas tanpa perlu scroll, (3) Pembersihan sub-mode Tab Notif (Jualan, Stiker, Watermark, Doa) dengan pill chips yang lega dan preview instan, (4) Bottom Dock yang dapat diciutkan (collapsible) agar ruang kerja layar lebih lapang, serta (5) Standarisasi target sentuh touch-friendly 44-48dp tanpa mengubah logika atau fungsi backend sedikit pun.",
-  "updatedAt": "2026-10-17T00:15:43.718281811Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

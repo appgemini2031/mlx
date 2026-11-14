@@ -1,0 +1,1638 @@
+package com.tajasb.interaction
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.util.Log
+import com.tajasb.eventrelay.LiveEventItem
+import com.tajasb.eventrelay.LiveEventReceiver
+import com.tajasb.eventrelay.LiveEventType
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import java.util.LinkedHashMap
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+
+data class CounterEvaluationResult(
+    val shouldExecute: Boolean,
+    val status: DispatchStatus,
+    val updatedCounter: TriggerCounterState,
+    val detail: String
+)
+
+/**
+ * Evaluator murni (JVM-testable) untuk kondisi, counter, threshold, combo, milestone,
+ * cooldown, dan reset condition.
+ */
+object UniversalRuleEvaluator {
+
+    fun evaluateCounterAndEligibility(
+        rule: UniversalTriggerRule,
+        currentCounter: TriggerCounterState?,
+        event: LiveInteractionEvent,
+        isMlbbMatchActive: Boolean,
+        nowMs: Long = System.currentTimeMillis()
+    ): CounterEvaluationResult {
+        var counter = currentCounter ?: TriggerCounterState(ruleId = rule.id)
+
+        if (!rule.enabled) {
+            return CounterEvaluationResult(
+                shouldExecute = false,
+                status = DispatchStatus.SKIPPED_CONDITION,
+                updatedCounter = counter,
+                detail = "Rule nonaktif"
+            )
+        }
+
+        // Minimum Quantity (hanya aktif bila saklar enableMinimumQuantity = true)
+        if (rule.enableMinimumQuantity && event.quantity < rule.minimumQuantity) {
+            return CounterEvaluationResult(
+                shouldExecute = false,
+                status = DispatchStatus.SKIPPED_CONDITION,
+                updatedCounter = counter,
+                detail = "Qty ${event.quantity} < minimum ${rule.minimumQuantity}"
+            )
+        }
+
+        // Reset idle timeout jika saklar resetCondition = AFTER_IDLE_TIMEOUT aktif
+        if (rule.enableResetCondition &&
+            rule.resetCondition == ResetConditionType.AFTER_IDLE_TIMEOUT &&
+            counter.lastEventAtMs > 0L &&
+            (nowMs - counter.lastEventAtMs) >= rule.resetTimeoutMs
+        ) {
+            counter = counter.copy(
+                accumulatedCount = 0,
+                comboCount = 0,
+                comboWindowStartMs = 0L,
+                lastMilestoneReached = 0
+            )
+        }
+
+        val eventQty = event.quantity.coerceAtLeast(1)
+
+        // Cek kondisi non-counter terlebih dahulu jika diaktifkan
+        if ((rule.enableConditions || rule.enableCustomCondition || rule.accumulationMode == AccumulationMode.CUSTOM) &&
+            rule.conditions.any { it.enabled }
+        ) {
+            val nonCounterConds = rule.conditions.filter {
+                it.enabled && it.field != ConditionField.ACCUMULATED_COUNT && it.field != ConditionField.COMBO_COUNT
+            }
+            if (nonCounterConds.isNotEmpty() && !evaluateConditionList(nonCounterConds, event, counter, isMlbbMatchActive)) {
+                return CounterEvaluationResult(
+                    shouldExecute = false,
+                    status = DispatchStatus.SKIPPED_CONDITION,
+                    updatedCounter = counter,
+                    detail = "Syarat event tidak terpenuhi"
+                )
+            }
+        }
+
+        // Hitung akumulasi & combo baru
+        val nextAccumulated = counter.accumulatedCount + eventQty
+        val withinComboWindow = counter.comboWindowStartMs > 0L &&
+            (nowMs - counter.comboWindowStartMs) <= rule.comboWindowMs.coerceAtLeast(200L)
+        val nextComboStart = if (withinComboWindow) counter.comboWindowStartMs else nowMs
+        val nextComboCount = if (withinComboWindow) counter.comboCount + eventQty else eventQty
+
+        val previewCounter = counter.copy(
+            accumulatedCount = nextAccumulated,
+            comboCount = nextComboCount,
+            comboWindowStartMs = nextComboStart,
+            lastEventAtMs = nowMs
+        )
+
+        // Evaluasi kondisi berbasis counter bila aktif
+        val counterConds = if (rule.enableConditions || rule.enableCustomCondition || rule.accumulationMode == AccumulationMode.CUSTOM) {
+            rule.conditions.filter {
+                it.enabled && (it.field == ConditionField.ACCUMULATED_COUNT || it.field == ConditionField.COMBO_COUNT)
+            }
+        } else {
+            emptyList()
+        }
+        val counterCondsPassed = if (counterConds.isEmpty()) {
+            true
+        } else {
+            evaluateConditionList(counterConds, event, previewCounter, isMlbbMatchActive)
+        }
+
+        // Evaluasi mode accumulation utama + saklar independen
+        val modeResult = evaluateModeTrigger(rule, counter, previewCounter, counterConds.isNotEmpty(), counterCondsPassed)
+
+        if (!modeResult.first) {
+            return CounterEvaluationResult(
+                shouldExecute = false,
+                status = DispatchStatus.ACCUMULATED,
+                updatedCounter = previewCounter,
+                detail = modeResult.second
+            )
+        }
+
+        // Cek Cooldown (jika saklar enableCooldown = true)
+        if (rule.enableCooldown && rule.cooldownMs > 0L && counter.lastExecutedAtMs > 0L) {
+            val elapsed = nowMs - counter.lastExecutedAtMs
+            if (elapsed < rule.cooldownMs) {
+                val remaining = rule.cooldownMs - elapsed
+                return CounterEvaluationResult(
+                    shouldExecute = false,
+                    status = DispatchStatus.SKIPPED_COOLDOWN,
+                    updatedCounter = previewCounter,
+                    detail = "Cooldown aktif (sisa ${remaining}ms)"
+                )
+            }
+        }
+
+        // Jika lolos eksekusi, perbarui milestone & terapkan reset condition jika aktif
+        val milestoneStep = rule.milestoneStep.coerceAtLeast(1)
+        val reachedMilestone = if (rule.accumulationMode == AccumulationMode.MILESTONE || rule.enableMilestone) {
+            (nextAccumulated / milestoneStep) * milestoneStep
+        } else {
+            previewCounter.lastMilestoneReached
+        }
+
+        var postExecCounter = previewCounter.copy(
+            lastMilestoneReached = reachedMilestone,
+            lastExecutedAtMs = nowMs
+        )
+
+        if (rule.enableResetCondition) {
+            when (rule.resetCondition) {
+                ResetConditionType.AFTER_TRIGGER -> {
+                    postExecCounter = postExecCounter.copy(
+                        accumulatedCount = 0,
+                        comboCount = 0,
+                        comboWindowStartMs = 0L,
+                        lastMilestoneReached = 0
+                    )
+                }
+                ResetConditionType.ON_COUNT_REACHED -> {
+                    if (nextAccumulated >= rule.thresholdValue.coerceAtLeast(1)) {
+                        postExecCounter = postExecCounter.copy(
+                            accumulatedCount = 0,
+                            comboCount = 0,
+                            comboWindowStartMs = 0L
+                        )
+                    }
+                }
+                ResetConditionType.NONE,
+                ResetConditionType.AFTER_IDLE_TIMEOUT,
+                ResetConditionType.MANUAL_ONLY -> Unit
+            }
+        }
+
+        return CounterEvaluationResult(
+            shouldExecute = true,
+            status = DispatchStatus.EXECUTED,
+            updatedCounter = postExecCounter,
+            detail = modeResult.second
+        )
+    }
+
+    private fun evaluateModeTrigger(
+        rule: UniversalTriggerRule,
+        previousCounter: TriggerCounterState,
+        previewCounter: TriggerCounterState,
+        hasCounterConditions: Boolean,
+        counterCondsPassed: Boolean
+    ): Pair<Boolean, String> {
+        // Jika ada kondisi counter yang tidak terpenuhi, tahan sebagai akumulasi
+        if (hasCounterConditions && !counterCondsPassed) {
+            return false to "Terkumpul ${previewCounter.accumulatedCount} (menunggu kondisi counter)"
+        }
+
+        val thresholdTarget = rule.thresholdValue.coerceAtLeast(1)
+        val milestoneStep = rule.milestoneStep.coerceAtLeast(1)
+
+        // Cek saklar independen tambahan yang aktif meski mode berbeda
+        val independentGates = mutableListOf<Pair<Boolean, String>>()
+        if (rule.enableThreshold && rule.accumulationMode != AccumulationMode.THRESHOLD) {
+            val met = previewCounter.accumulatedCount >= thresholdTarget
+            independentGates += met to "Threshold ${previewCounter.accumulatedCount}/$thresholdTarget"
+        }
+        if (rule.enableCombo && rule.accumulationMode != AccumulationMode.COMBO) {
+            val met = previewCounter.comboCount >= thresholdTarget
+            independentGates += met to "Combo ${previewCounter.comboCount}/$thresholdTarget"
+        }
+        if (rule.enableMilestone && rule.accumulationMode != AccumulationMode.MILESTONE) {
+            val currentMilestone = (previewCounter.accumulatedCount / milestoneStep) * milestoneStep
+            val met = currentMilestone > previousCounter.lastMilestoneReached && currentMilestone > 0
+            independentGates += met to "Milestone ${previewCounter.accumulatedCount}/kelipatan $milestoneStep"
+        }
+
+        for ((met, msg) in independentGates) {
+            if (!met) return false to "Terkumpul: $msg"
+        }
+
+        return when (rule.accumulationMode) {
+            AccumulationMode.INDIVIDUAL -> {
+                true to "Direct #${previewCounter.accumulatedCount}"
+            }
+            AccumulationMode.ACCUMULATION -> {
+                if (hasCounterConditions && counterCondsPassed) {
+                    true to "Akumulasi #${previewCounter.accumulatedCount} (Kondisi terpenuhi)"
+                } else if (rule.enableIndividual && !rule.enableThreshold && thresholdTarget <= 1) {
+                    true to "Akumulasi #${previewCounter.accumulatedCount}"
+                } else if (previewCounter.accumulatedCount >= thresholdTarget) {
+                    true to "Akumulasi ${previewCounter.accumulatedCount}/$thresholdTarget tercapai"
+                } else {
+                    false to "Terkumpul ${previewCounter.accumulatedCount}/$thresholdTarget"
+                }
+            }
+            AccumulationMode.THRESHOLD -> {
+                if (previewCounter.accumulatedCount >= thresholdTarget) {
+                    true to "Threshold ${previewCounter.accumulatedCount}/$thresholdTarget tercapai"
+                } else {
+                    false to "Menuju threshold ${previewCounter.accumulatedCount}/$thresholdTarget"
+                }
+            }
+            AccumulationMode.COMBO -> {
+                if (previewCounter.comboCount >= thresholdTarget) {
+                    true to "Combo ${previewCounter.comboCount}/$thresholdTarget (${rule.comboWindowMs}ms)"
+                } else {
+                    false to "Combo berjalan ${previewCounter.comboCount}/$thresholdTarget"
+                }
+            }
+            AccumulationMode.MILESTONE -> {
+                val currentMilestone = (previewCounter.accumulatedCount / milestoneStep) * milestoneStep
+                if (currentMilestone > previousCounter.lastMilestoneReached && currentMilestone > 0) {
+                    true to "Milestone $currentMilestone tercapai (Total ${previewCounter.accumulatedCount})"
+                } else {
+                    false to "Progres milestone ${previewCounter.accumulatedCount} (step $milestoneStep)"
+                }
+            }
+            AccumulationMode.RANDOM -> {
+                true to "Random selection #${previewCounter.accumulatedCount}"
+            }
+            AccumulationMode.CUSTOM -> {
+                if (!rule.enableConditions && !rule.enableCustomCondition && !hasCounterConditions) {
+                    true to "Custom langsung #${previewCounter.accumulatedCount}"
+                } else if (counterCondsPassed) {
+                    true to "Custom condition terpenuhi (#${previewCounter.accumulatedCount})"
+                } else {
+                    false to "Menunggu custom condition (#${previewCounter.accumulatedCount})"
+                }
+            }
+        }
+    }
+
+    fun evaluateConditionList(
+        conditions: List<TriggerCondition>,
+        event: LiveInteractionEvent,
+        counter: TriggerCounterState,
+        isMlbbMatchActive: Boolean
+    ): Boolean {
+        for (cond in conditions) {
+            if (!cond.enabled) continue
+            if (!evaluateSingleCondition(cond, event, counter, isMlbbMatchActive)) {
+                return false
+            }
+        }
+        return true
+    }
+
+    fun evaluateSingleCondition(
+        cond: TriggerCondition,
+        event: LiveInteractionEvent,
+        counter: TriggerCounterState,
+        isMlbbMatchActive: Boolean
+    ): Boolean {
+        val targetRaw = cond.value.trim()
+        return when (cond.field) {
+            ConditionField.QUANTITY -> compareNumeric(event.quantity.toLong(), cond.operator, targetRaw)
+            ConditionField.ACCUMULATED_COUNT -> compareNumeric(counter.accumulatedCount.toLong(), cond.operator, targetRaw)
+            ConditionField.COMBO_COUNT -> compareNumeric(counter.comboCount.toLong(), cond.operator, targetRaw)
+            ConditionField.DIAMONDS -> compareNumeric(event.diamonds.toLong(), cond.operator, targetRaw)
+            ConditionField.GIFT_NAME -> compareText(event.giftName, cond.operator, targetRaw)
+            ConditionField.SENDER_NAME -> compareText(event.senderName, cond.operator, targetRaw)
+            ConditionField.CHAT_TEXT -> compareText(event.text, cond.operator, targetRaw)
+            ConditionField.MATCH_NOT_ACTIVE -> {
+                val expectedNotActive = targetRaw.equals("true", ignoreCase = true) || targetRaw == "1" || targetRaw.isEmpty()
+                (!isMlbbMatchActive) == expectedNotActive
+            }
+        }
+    }
+
+    private fun compareNumeric(actual: Long, op: ConditionOperator, targetRaw: String): Boolean {
+        val target = targetRaw.toLongOrNull() ?: return false
+        return when (op) {
+            ConditionOperator.EQUALS -> actual == target
+            ConditionOperator.NOT_EQUALS -> actual != target
+            ConditionOperator.GREATER_OR_EQUAL -> actual >= target
+            ConditionOperator.LESS_OR_EQUAL -> actual <= target
+            ConditionOperator.CONTAINS -> actual.toString().contains(targetRaw, ignoreCase = true)
+            ConditionOperator.MULTIPLE_OF -> target > 0L && actual > 0L && (actual % target == 0L)
+        }
+    }
+
+    private fun compareText(actual: String, op: ConditionOperator, targetRaw: String): Boolean {
+        return when (op) {
+            ConditionOperator.EQUALS -> actual.equals(targetRaw, ignoreCase = true)
+            ConditionOperator.NOT_EQUALS -> !actual.equals(targetRaw, ignoreCase = true)
+            ConditionOperator.CONTAINS -> actual.contains(targetRaw, ignoreCase = true)
+            ConditionOperator.GREATER_OR_EQUAL -> actual.length >= (targetRaw.toIntOrNull() ?: 0)
+            ConditionOperator.LESS_OR_EQUAL -> actual.length <= (targetRaw.toIntOrNull() ?: Int.MAX_VALUE)
+            ConditionOperator.MULTIPLE_OF -> false
+        }
+    }
+}
+
+private data class QueuedDispatchTask(
+    val seq: Long,
+    val priority: Int,
+    val rule: UniversalTriggerRule,
+    val event: LiveInteractionEvent,
+    val counterSnapshot: TriggerCounterState,
+    val matchActiveSnapshot: Boolean,
+    val detailNote: String
+)
+
+/**
+ * Single Trigger Engine untuk Universal Interaction Mapping System (MLBB Special Mode).
+ * Mengamati LiveEventReceiver secara pasif (tanpa memodifikasi LiveEventReceiver.kt) dan
+ * menjadi satu-satunya jalur eksekusi bagi Live Relay maupun Test Center.
+ */
+class UniversalTriggerEngine private constructor(private val appContext: Context) : ActionDispatchSink {
+
+    companion object {
+        private const val TAG = "UniversalTriggerEngine"
+        private const val PREFS_NAME = "tajasb_universal_mapping_prefs"
+        private const val KEY_RULES = "universal_rules_json"
+        private const val KEY_PRESETS = "universal_presets_json"
+        private const val KEY_ENGINE_ENABLED = "engine_enabled"
+        private const val KEY_MATCH_ACTIVE = "mlbb_match_active"
+        private const val KEY_ACTIVE_SCENE = "active_scene"
+        private const val KEY_FLOATING_CONFIG = "floating_window_config_json"
+        private const val MAX_HISTORY = 60
+        private const val DUPLICATE_WINDOW_MS = 2500L
+
+        @Volatile
+        private var instance: UniversalTriggerEngine? = null
+
+        fun getInstance(context: Context): UniversalTriggerEngine {
+            return instance ?: synchronized(this) {
+                instance ?: UniversalTriggerEngine(context.applicationContext).also { instance = it }
+            }
+        }
+
+        fun peekInstance(): UniversalTriggerEngine? = instance
+    }
+
+    private val prefs: SharedPreferences = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val dispatcher = UniversalActionDispatcher(appContext, this)
+
+    private val _state = MutableStateFlow(loadInitialState())
+    val state: StateFlow<UniversalEngineUiState> = _state.asStateFlow()
+
+    private val queueLock = Any()
+    private val pendingQueue = mutableListOf<QueuedDispatchTask>()
+    private val queueSeq = AtomicLong(0L)
+    private val isWorkerRunning = AtomicBoolean(false)
+
+    private val recentEventIds = object : LinkedHashMap<String, Long>(128, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean = size > 180
+    }
+    private val recentRelayIds = object : LinkedHashMap<String, Long>(128, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean = size > 200
+    }
+
+    private var lastObservedRelayEventId: String? = null
+
+    init {
+        observeLiveEventRelay()
+        startOverlayExpiryTicker()
+    }
+
+    private fun loadInitialState(): UniversalEngineUiState {
+        // TIDAK ADA RULE DEFAULT HARDCODED untuk Like/Follow/Share/Gift.
+        val savedRules = UniversalInteractionJsonCodec.decodeRules(prefs.getString(KEY_RULES, null))
+        val savedPresets = UniversalInteractionJsonCodec.decodePresets(prefs.getString(KEY_PRESETS, null))
+        val enabled = prefs.getBoolean(KEY_ENGINE_ENABLED, true)
+        val matchActive = prefs.getBoolean(KEY_MATCH_ACTIVE, false)
+        val scene = prefs.getString(KEY_ACTIVE_SCENE, "SCENE_UTAMA")?.ifBlank { "SCENE_UTAMA" } ?: "SCENE_UTAMA"
+        val floatingCfg = UniversalInteractionJsonCodec.decodeFloatingConfig(prefs.getString(KEY_FLOATING_CONFIG, null))
+        val initialRule = savedRules.firstOrNull { it.isPinVisible } ?: savedRules.firstOrNull()
+        val initialStep = initialRule?.actionSequence?.firstOrNull {
+            it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+        }
+        return UniversalEngineUiState(
+            isEngineEnabled = enabled,
+            isMlbbMatchActive = matchActive,
+            isEmergencyStopped = false,
+            activePinRuleId = initialRule?.id,
+            activePinStepId = initialStep?.id,
+            floatingConfig = floatingCfg,
+            activeSceneName = scene,
+            rules = savedRules,
+            presets = savedPresets
+        )
+    }
+
+    private fun observeLiveEventRelay() {
+        scope.launch {
+            try {
+                val receiver = LiveEventReceiver.getInstance(appContext)
+                receiver.lastEvent.collect { item ->
+                    if (item == null) return@collect
+                    if (item.id == lastObservedRelayEventId) return@collect
+                    synchronized(recentRelayIds) {
+                        if (recentRelayIds.containsKey(item.id)) return@collect
+                        recentRelayIds[item.id] = System.currentTimeMillis()
+                    }
+                    lastObservedRelayEventId = item.id
+                    onRelayEventReceived(item)
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Relay observer stopped: ${t.message}")
+            }
+        }
+    }
+
+    private fun startOverlayExpiryTicker() {
+        scope.launch {
+            while (true) {
+                delay(250L)
+                val now = System.currentTimeMillis()
+                val current = _state.value
+                val hasExpiredOverlay = current.activeOverlays.any { it.expiresAtMs <= now }
+                val simExpired = current.lastSimEvent != null && (now - current.lastSimEvent.timestampMs) > 650L
+                if (hasExpiredOverlay || simExpired) {
+                    _state.update { st ->
+                        st.copy(
+                            activeOverlays = st.activeOverlays.filter { it.expiresAtMs > now },
+                            lastSimEvent = if (st.lastSimEvent != null && (now - st.lastSimEvent.timestampMs) > 650L) null else st.lastSimEvent
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun onRelayEventReceived(item: LiveEventItem) {
+        val currentRules = _state.value.rules
+        if (currentRules.none { it.enabled }) return
+
+        val sender = item.senderName.ifBlank { item.nickname.ifBlank { "Penonton" } }
+        when (item.type) {
+            LiveEventType.LIKE -> {
+                dispatchEvent(
+                    LiveInteractionEvent(
+                        id = "${item.id}_LIKE",
+                        source = UniversalTriggerSource.LIKE,
+                        senderName = sender,
+                        quantity = item.likeCount.coerceAtLeast(1),
+                        avatarUrl = item.avatarUrl,
+                        timestampMs = item.timestamp
+                    )
+                )
+            }
+            LiveEventType.FOLLOW -> {
+                dispatchEvent(
+                    LiveInteractionEvent(
+                        id = "${item.id}_FOLLOW",
+                        source = UniversalTriggerSource.FOLLOW,
+                        senderName = sender,
+                        quantity = 1,
+                        avatarUrl = item.avatarUrl,
+                        timestampMs = item.timestamp
+                    )
+                )
+            }
+            LiveEventType.SHARE -> {
+                dispatchEvent(
+                    LiveInteractionEvent(
+                        id = "${item.id}_SHARE",
+                        source = UniversalTriggerSource.SHARE,
+                        senderName = sender,
+                        quantity = 1,
+                        avatarUrl = item.avatarUrl,
+                        timestampMs = item.timestamp
+                    )
+                )
+            }
+            LiveEventType.GIFT -> {
+                val giftQty = item.giftCount.coerceAtLeast(1)
+                val coins = item.diamondCount.coerceAtLeast(0)
+                if (currentRules.any { it.enabled && it.triggerSource == UniversalTriggerSource.GIFT }) {
+                    dispatchEvent(
+                        LiveInteractionEvent(
+                            id = "${item.id}_GIFT",
+                            source = UniversalTriggerSource.GIFT,
+                            senderName = sender,
+                            quantity = giftQty,
+                            diamonds = coins,
+                            giftName = item.giftName,
+                            avatarUrl = item.avatarUrl,
+                            timestampMs = item.timestamp
+                        )
+                    )
+                }
+                if (currentRules.any { it.enabled && it.triggerSource == UniversalTriggerSource.GIFT_QUANTITY }) {
+                    dispatchEvent(
+                        LiveInteractionEvent(
+                            id = "${item.id}_GIFT_QTY",
+                            source = UniversalTriggerSource.GIFT_QUANTITY,
+                            senderName = sender,
+                            quantity = if (coins > 0) coins else giftQty,
+                            diamonds = coins,
+                            giftName = item.giftName,
+                            avatarUrl = item.avatarUrl,
+                            timestampMs = item.timestamp
+                        )
+                    )
+                }
+            }
+            LiveEventType.CHAT -> {
+                dispatchEvent(
+                    LiveInteractionEvent(
+                        id = "${item.id}_CHAT",
+                        source = UniversalTriggerSource.CHAT,
+                        senderName = sender,
+                        quantity = 1,
+                        text = item.text,
+                        avatarUrl = item.avatarUrl,
+                        timestampMs = item.timestamp
+                    )
+                )
+            }
+            LiveEventType.MEMBER -> {
+                dispatchEvent(
+                    LiveInteractionEvent(
+                        id = "${item.id}_MEMBER",
+                        source = UniversalTriggerSource.MEMBER_JOIN,
+                        senderName = sender,
+                        quantity = 1,
+                        avatarUrl = item.avatarUrl,
+                        timestampMs = item.timestamp
+                    )
+                )
+            }
+            LiveEventType.SHOP_ORDER -> {
+                dispatchEvent(
+                    LiveInteractionEvent(
+                        id = "${item.id}_ORDER",
+                        source = UniversalTriggerSource.SHOP_ORDER,
+                        senderName = sender,
+                        quantity = item.productQuantity.coerceAtLeast(1),
+                        text = item.productName,
+                        avatarUrl = item.avatarUrl,
+                        timestampMs = item.timestamp
+                    )
+                )
+            }
+            LiveEventType.PIN_PRODUCT,
+            LiveEventType.ROOM_STATS,
+            LiveEventType.BROKER_STATUS -> Unit
+        }
+    }
+
+    /**
+     * Titik masuk tunggal (Unified Trigger Entry) untuk Live Relay maupun Test Center.
+     * Menjamin simulasi menggunakan konfigurasi tersimpan yang identik dengan live stream.
+     */
+    fun dispatchEvent(event: LiveInteractionEvent): List<TriggerExecutionRecord> {
+        val snapshot = _state.value
+        if (!snapshot.isEngineEnabled || snapshot.isEmergencyStopped) {
+            return emptyList()
+        }
+
+        val now = System.currentTimeMillis()
+        // Duplicate protection
+        synchronized(recentEventIds) {
+            val prevTs = recentEventIds[event.id]
+            if (prevTs != null && (now - prevTs) < DUPLICATE_WINDOW_MS) {
+                val dupRec = TriggerExecutionRecord(
+                    timestampMs = now,
+                    ruleId = "DUP",
+                    ruleName = "Duplicate Protection",
+                    source = event.source,
+                    senderName = event.senderName,
+                    quantity = event.quantity,
+                    status = DispatchStatus.SKIPPED_DUPLICATE,
+                    detail = "Event ID duplikat diabaikan (${event.id.take(8)})"
+                )
+                appendHistory(dupRec)
+                return listOf(dupRec)
+            }
+            recentEventIds[event.id] = now
+        }
+
+        val matchingRules = snapshot.rules.filter { it.enabled && it.triggerSource == event.source }
+        if (matchingRules.isEmpty()) {
+            val emptyRec = TriggerExecutionRecord(
+                timestampMs = now,
+                ruleId = "-",
+                ruleName = "Belum ada trigger untuk ${event.source.displayName}",
+                source = event.source,
+                senderName = event.senderName,
+                quantity = event.quantity,
+                status = DispatchStatus.SKIPPED_CONDITION,
+                detail = "Buat & aktifkan rule untuk sumber ${event.source.displayName} di Builder."
+            )
+            appendHistory(emptyRec)
+            return listOf(emptyRec)
+        }
+
+        val sortedRules = matchingRules.sortedByDescending {
+            if (it.enablePriority) it.priority else 5
+        }
+
+        val immediateRecords = mutableListOf<TriggerExecutionRecord>()
+        val updatedCounters = snapshot.counters.toMutableMap()
+        val tasksToEnqueue = mutableListOf<QueuedDispatchTask>()
+
+        for (rule in sortedRules) {
+            val eval = UniversalRuleEvaluator.evaluateCounterAndEligibility(
+                rule = rule,
+                currentCounter = updatedCounters[rule.id],
+                event = event,
+                isMlbbMatchActive = snapshot.isMlbbMatchActive,
+                nowMs = now
+            )
+            updatedCounters[rule.id] = eval.updatedCounter
+
+            if (eval.shouldExecute) {
+                val prio = if (rule.enablePriority) rule.priority else 5
+                tasksToEnqueue += QueuedDispatchTask(
+                    seq = queueSeq.incrementAndGet(),
+                    priority = prio,
+                    rule = rule,
+                    event = event,
+                    counterSnapshot = eval.updatedCounter,
+                    matchActiveSnapshot = snapshot.isMlbbMatchActive,
+                    detailNote = eval.detail
+                )
+                immediateRecords += TriggerExecutionRecord(
+                    timestampMs = now,
+                    ruleId = rule.id,
+                    ruleName = rule.triggerName,
+                    source = event.source,
+                    senderName = event.senderName,
+                    quantity = event.quantity,
+                    status = DispatchStatus.QUEUED,
+                    detail = "${eval.detail} • Antrean Prio $prio"
+                )
+            } else {
+                val skipRec = TriggerExecutionRecord(
+                    timestampMs = now,
+                    ruleId = rule.id,
+                    ruleName = rule.triggerName,
+                    source = event.source,
+                    senderName = event.senderName,
+                    quantity = event.quantity,
+                    status = eval.status,
+                    detail = eval.detail
+                )
+                immediateRecords += skipRec
+            }
+        }
+
+        if (tasksToEnqueue.isNotEmpty()) {
+            synchronized(queueLock) {
+                pendingQueue.addAll(tasksToEnqueue)
+                pendingQueue.sortWith(compareByDescending<QueuedDispatchTask> { it.priority }.thenBy { it.seq })
+            }
+        }
+
+        val qSize = synchronized(queueLock) { pendingQueue.size }
+        _state.update { st ->
+            st.copy(
+                counters = updatedCounters,
+                queueSize = qSize,
+                history = (immediateRecords.reversed() + st.history).take(MAX_HISTORY)
+            )
+        }
+
+        if (tasksToEnqueue.isNotEmpty()) {
+            ensureQueueWorkerRunning()
+        }
+
+        return immediateRecords
+    }
+
+    /**
+     * Menjalankan 1 rule tertentu secara langsung untuk pengujian (melewati filter cooldown/threshold/minQty)
+     * agar tombol ▶ Tes di pin maupun dropdown selalu mengeksekusi Tap ML + Overlay + Sound dengan jelas.
+     */
+    fun testSpecificRule(
+        ruleId: String,
+        senderName: String = "Tester",
+        quantity: Int = 1,
+        diamonds: Int = 10,
+        giftName: String = "Rose",
+        customText: String = "Test event"
+    ): List<TriggerExecutionRecord> {
+        val rule = _state.value.rules.firstOrNull { it.id == ruleId } ?: return emptyList()
+        val effectiveQty = if (rule.enableMinimumQuantity) maxOf(quantity, rule.minimumQuantity) else quantity.coerceAtLeast(1)
+        val event = LiveInteractionEvent(
+            source = rule.triggerSource,
+            senderName = senderName.ifBlank { "Tester" },
+            quantity = effectiveQty,
+            diamonds = diamonds.coerceAtLeast(0),
+            giftName = giftName,
+            text = customText
+        )
+        forceTestRuleNow(ruleId, event)
+        return emptyList()
+    }
+
+    fun forceTestRuleNow(
+        ruleId: String,
+        customEvent: LiveInteractionEvent? = null,
+        onResult: ((String) -> Unit)? = null
+    ) {
+        val rule = _state.value.rules.firstOrNull { it.id == ruleId } ?: run {
+            onResult?.invoke("Target tidak ditemukan")
+            return
+        }
+        val event = customEvent ?: LiveInteractionEvent(
+            source = rule.triggerSource,
+            senderName = "Tester",
+            quantity = if (rule.enableMinimumQuantity) rule.minimumQuantity else 1,
+            diamonds = 10,
+            giftName = "Rose",
+            text = "Tes ${rule.triggerName}"
+        )
+        scope.launch {
+            val summary = try {
+                dispatcher.dispatchRuleActions(
+                    rule = rule.copy(enabled = true),
+                    event = event,
+                    counterCount = (_state.value.counters[rule.id]?.accumulatedCount ?: 0) + 1,
+                    isMlbbMatchActive = false
+                )
+            } catch (t: Throwable) {
+                "Error: ${t.message}"
+            }
+            val a11yOk = MlbbGestureAccessibilityService.peekInstance() != null
+            val needsA11y = rule.actionSequence.any {
+                it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+            } && !a11yOk
+            val status = if (needsA11y) DispatchStatus.SKIPPED_CONDITION else DispatchStatus.EXECUTED
+            appendHistory(
+                TriggerExecutionRecord(
+                    timestampMs = System.currentTimeMillis(),
+                    ruleId = rule.id,
+                    ruleName = rule.triggerName,
+                    source = event.source,
+                    senderName = event.senderName,
+                    quantity = event.quantity,
+                    status = status,
+                    detail = "TES • $summary"
+                )
+            )
+            onResult?.invoke(summary)
+        }
+    }
+
+    fun previewSoundSpec(spec: String) {
+        dispatcher.playConfiguredSound(spec.ifBlank { "CHIME" })
+    }
+
+    fun previewRuleActions(rule: UniversalTriggerRule) {
+        val sampleEvent = LiveInteractionEvent(
+            source = rule.triggerSource,
+            senderName = "PreviewPenonton",
+            quantity = if (rule.enableMinimumQuantity) rule.minimumQuantity else 1,
+            diamonds = 99,
+            giftName = "GiftPreview",
+            text = "Preview ${rule.triggerName}"
+        )
+        scope.launch {
+            dispatcher.dispatchRuleActions(
+                rule = rule.copy(enabled = true),
+                event = sampleEvent,
+                counterCount = 1,
+                isMlbbMatchActive = false
+            )
+        }
+    }
+
+    private fun ensureQueueWorkerRunning() {
+        if (!isWorkerRunning.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                while (true) {
+                    val nextTask = synchronized(queueLock) {
+                        if (pendingQueue.isEmpty() || _state.value.isEmergencyStopped) null
+                        else pendingQueue.removeAt(0)
+                    }
+                    if (nextTask == null) break
+
+                    _state.update { st ->
+                        st.copy(queueSize = synchronized(queueLock) { pendingQueue.size })
+                    }
+
+                    val summary = try {
+                        dispatcher.dispatchRuleActions(
+                            rule = nextTask.rule,
+                            event = nextTask.event,
+                            counterCount = nextTask.counterSnapshot.accumulatedCount,
+                            isMlbbMatchActive = _state.value.isMlbbMatchActive
+                        )
+                    } catch (t: Throwable) {
+                        "Error eksekusi: ${t.message}"
+                    }
+
+                    val execStatus = if (_state.value.isEmergencyStopped) {
+                        DispatchStatus.STOPPED_EMERGENCY
+                    } else {
+                        DispatchStatus.EXECUTED
+                    }
+                    appendHistory(
+                        TriggerExecutionRecord(
+                            timestampMs = System.currentTimeMillis(),
+                            ruleId = nextTask.rule.id,
+                            ruleName = nextTask.rule.triggerName,
+                            source = nextTask.event.source,
+                            senderName = nextTask.event.senderName,
+                            quantity = nextTask.event.quantity,
+                            status = execStatus,
+                            detail = "${nextTask.detailNote} • $summary"
+                        )
+                    )
+                }
+            } finally {
+                isWorkerRunning.set(false)
+                val hasMore = synchronized(queueLock) {
+                    pendingQueue.isNotEmpty() && !_state.value.isEmergencyStopped
+                }
+                if (hasMore) {
+                    ensureQueueWorkerRunning()
+                }
+            }
+        }
+    }
+
+    // ==================== Engine Controls & Safety ====================
+
+    fun setEngineEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_ENGINE_ENABLED, enabled).apply()
+        _state.update { it.copy(isEngineEnabled = enabled, isEmergencyStopped = if (enabled) false else it.isEmergencyStopped) }
+    }
+
+    fun setMlbbMatchActive(active: Boolean) {
+        prefs.edit().putBoolean(KEY_MATCH_ACTIVE, active).apply()
+        _state.update { it.copy(isMlbbMatchActive = active) }
+    }
+
+    fun emergencyStop() {
+        synchronized(queueLock) {
+            pendingQueue.clear()
+        }
+        dispatcher.emergencyStopAll()
+        val rec = TriggerExecutionRecord(
+            timestampMs = System.currentTimeMillis(),
+            ruleId = "EMERGENCY",
+            ruleName = "Emergency Stop",
+            source = UniversalTriggerSource.CUSTOM_EVENT,
+            senderName = "Sistem",
+            quantity = 0,
+            status = DispatchStatus.STOPPED_EMERGENCY,
+            detail = "Seluruh antrean, suara, dan overlay dihentikan seketika"
+        )
+        _state.update { st ->
+            st.copy(
+                isEmergencyStopped = true,
+                queueSize = 0,
+                activeOverlays = emptyList(),
+                lastSimEvent = null,
+                history = (listOf(rec) + st.history).take(MAX_HISTORY)
+            )
+        }
+    }
+
+    fun resumeAfterEmergencyStop() {
+        _state.update { it.copy(isEmergencyStopped = false, isEngineEnabled = true) }
+        prefs.edit().putBoolean(KEY_ENGINE_ENABLED, true).apply()
+    }
+
+    fun resetCounter(ruleId: String) {
+        _state.update { st ->
+            val updated = st.counters.toMutableMap()
+            updated.remove(ruleId)
+            st.copy(counters = updated)
+        }
+    }
+
+    fun resetAllCounters() {
+        _state.update { it.copy(counters = emptyMap()) }
+    }
+
+    fun clearHistory() {
+        _state.update { it.copy(history = emptyList()) }
+    }
+
+    fun release() {
+        emergencyStop()
+        scope.cancel()
+    }
+
+    // ==================== Rule CRUD ====================
+
+    fun addOrUpdateRule(rule: UniversalTriggerRule) {
+        val current = _state.value.rules.toMutableList()
+        val idx = current.indexOfFirst { it.id == rule.id }
+        if (idx >= 0) {
+            current[idx] = rule
+        } else {
+            current.add(rule)
+        }
+        persistAndUpdateRules(current)
+    }
+
+    fun toggleRuleEnabled(ruleId: String) {
+        val updated = _state.value.rules.map {
+            if (it.id == ruleId) it.copy(enabled = !it.enabled) else it
+        }
+        persistAndUpdateRules(updated)
+    }
+
+    fun selectActivePin(ruleId: String?, stepId: String? = null) {
+        _state.update { st ->
+            val targetRule = ruleId?.let { id -> st.rules.firstOrNull { it.id == id } }
+            val validStepId = if (targetRule != null) {
+                stepId?.takeIf { sid -> targetRule.actionSequence.any { it.id == sid } }
+                    ?: targetRule.actionSequence.firstOrNull {
+                        it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+                    }?.id
+            } else {
+                null
+            }
+            st.copy(activePinRuleId = targetRule?.id, activePinStepId = validStepId)
+        }
+    }
+
+    fun toggleRulePinVisibility(ruleId: String) {
+        var becameVisible = false
+        val updated = _state.value.rules.map { rule ->
+            if (rule.id == ruleId) {
+                becameVisible = !rule.isPinVisible
+                rule.copy(isPinVisible = becameVisible)
+            } else {
+                rule
+            }
+        }
+        persistAndUpdateRules(updated)
+        if (becameVisible) {
+            selectActivePin(ruleId, null)
+        } else {
+            _state.update { st ->
+                val nextRule = if (st.activePinRuleId == ruleId) {
+                    updated.firstOrNull { it.isPinVisible } ?: updated.firstOrNull()
+                } else {
+                    updated.firstOrNull { it.id == st.activePinRuleId }
+                }
+                val nextStep = nextRule?.actionSequence?.firstOrNull {
+                    it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+                }?.id
+                st.copy(activePinRuleId = nextRule?.id, activePinStepId = nextStep)
+            }
+        }
+    }
+
+    fun setAllPinsVisible(visible: Boolean) {
+        val updated = _state.value.rules.map { it.copy(isPinVisible = visible) }
+        persistAndUpdateRules(updated)
+        if (visible) {
+            val active = _state.value.activePinRuleId ?: updated.firstOrNull()?.id
+            selectActivePin(active, _state.value.activePinStepId)
+        }
+    }
+
+    fun updateRuleColor(ruleId: String, colorHex: Long) {
+        val updated = _state.value.rules.map { rule ->
+            if (rule.id == ruleId) rule.copy(accentColorHex = colorHex) else rule
+        }
+        persistAndUpdateRules(updated)
+    }
+
+    fun cycleActivePin(delta: Int) {
+        val st = _state.value
+        val candidates = st.rules.filter { it.isPinVisible }.ifEmpty { st.rules }
+        if (candidates.isEmpty()) return
+
+        val pinPairs = mutableListOf<Pair<String, String?>>()
+        for (r in candidates) {
+            val touchSteps = r.actionSequence.filter {
+                it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+            }
+            if (touchSteps.isEmpty()) {
+                pinPairs += r.id to null
+            } else {
+                for (s in touchSteps) {
+                    pinPairs += r.id to s.id
+                }
+            }
+        }
+        if (pinPairs.isEmpty()) return
+        val curIdx = pinPairs.indexOfFirst { (rId, sId) ->
+            rId == st.activePinRuleId && (sId == st.activePinStepId || sId == null)
+        }.coerceAtLeast(0)
+        val nextIdx = ((curIdx + delta) % pinPairs.size + pinPairs.size) % pinPairs.size
+        val (nextRuleId, nextStepId) = pinPairs[nextIdx]
+        _state.update { it.copy(activePinRuleId = nextRuleId, activePinStepId = nextStepId) }
+    }
+
+    fun duplicateRule(ruleId: String) {
+        val current = _state.value.rules.toMutableList()
+        val idx = current.indexOfFirst { it.id == ruleId }
+        if (idx < 0) return
+        val orig = current[idx]
+        val usedColors = current.map { it.accentColorHex }.toSet()
+        val copyRule = orig.copy(
+            id = UUID.randomUUID().toString(),
+            triggerName = "${orig.triggerName} (Salinan)",
+            accentColorHex = ChallengeColorPalette.nextUnusedColor(usedColors),
+            conditions = orig.conditions.map { it.copy(id = UUID.randomUUID().toString()) },
+            actionSequence = orig.actionSequence.map { it.copy(id = UUID.randomUUID().toString()) }
+        )
+        current.add(idx + 1, copyRule)
+        persistAndUpdateRules(current)
+    }
+
+    fun deleteRule(ruleId: String) {
+        val updated = _state.value.rules.filterNot { it.id == ruleId }
+        _state.update { st ->
+            val counters = st.counters.toMutableMap().apply { remove(ruleId) }
+            val nextActive = if (st.activePinRuleId == ruleId) {
+                updated.firstOrNull { it.isPinVisible }?.id ?: updated.firstOrNull()?.id
+            } else {
+                st.activePinRuleId
+            }
+            st.copy(rules = updated, counters = counters, activePinRuleId = nextActive)
+        }
+        prefs.edit().putString(KEY_RULES, UniversalInteractionJsonCodec.encodeRules(updated)).apply()
+    }
+
+    fun moveRule(fromIndex: Int, toIndex: Int) {
+        val list = _state.value.rules.toMutableList()
+        if (fromIndex !in list.indices || toIndex !in list.indices || fromIndex == toIndex) return
+        val item = list.removeAt(fromIndex)
+        list.add(toIndex, item)
+        persistAndUpdateRules(list)
+    }
+
+    fun setFloatingOverlayRunning(running: Boolean) {
+        _state.update {
+            it.copy(
+                isFloatingOverlayRunning = running,
+                isFloatingHiddenForLive = if (!running) false else it.isFloatingHiddenForLive,
+                isPositionEditMode = if (!running) false else it.isPositionEditMode
+            )
+        }
+    }
+
+    fun setFloatingHiddenForLive(hidden: Boolean) {
+        _state.update {
+            it.copy(
+                isFloatingHiddenForLive = hidden,
+                isPositionEditMode = if (hidden) false else it.isPositionEditMode
+            )
+        }
+    }
+
+    fun setPositionEditMode(editing: Boolean) {
+        _state.update {
+            it.copy(
+                isPositionEditMode = editing,
+                isFloatingHiddenForLive = if (editing) false else it.isFloatingHiddenForLive
+            )
+        }
+    }
+
+    fun createEmptyConcept(
+        source: UniversalTriggerSource = UniversalTriggerSource.GIFT,
+        name: String? = null
+    ): UniversalTriggerRule {
+        val currentRules = _state.value.rules
+        val currentCount = currentRules.size
+        val defaultCoords = listOf(
+            0.80f to 0.72f,
+            0.72f to 0.78f,
+            0.86f to 0.56f,
+            0.64f to 0.80f,
+            0.50f to 0.76f,
+            0.22f to 0.72f
+        )
+        val (nx, ny) = defaultCoords[currentCount % defaultCoords.size]
+        val usedColors = currentRules.map { it.accentColorHex }.toSet()
+        val pickedColor = ChallengeColorPalette.nextUnusedColor(usedColors)
+        val rule = UniversalTriggerRule(
+            isPinVisible = true,
+            accentColorHex = pickedColor,
+            triggerSource = source,
+            triggerName = name?.trim()?.takeIf { it.isNotEmpty() } ?: "Konsep #${currentCount + 1}",
+            overlayPosX = nx,
+            overlayPosY = ny,
+            actionSequence = emptyList()
+        )
+        addOrUpdateRule(rule)
+        _state.update {
+            it.copy(
+                activePinRuleId = rule.id,
+                activePinStepId = null,
+                isFloatingHiddenForLive = false
+            )
+        }
+        return rule
+    }
+
+    fun createQuickTapTarget(
+        source: UniversalTriggerSource = UniversalTriggerSource.GIFT,
+        name: String? = null
+    ): UniversalTriggerRule {
+        val currentRules = _state.value.rules
+        val currentCount = currentRules.size
+        val defaultCoords = listOf(
+            0.80f to 0.72f,
+            0.72f to 0.78f,
+            0.86f to 0.56f,
+            0.64f to 0.80f,
+            0.50f to 0.76f,
+            0.22f to 0.72f
+        )
+        val (nx, ny) = defaultCoords[currentCount % defaultCoords.size]
+        val usedColors = currentRules.map { it.accentColorHex }.toSet()
+        val pickedColor = ChallengeColorPalette.nextUnusedColor(usedColors)
+        val coordText = String.format(java.util.Locale.US, "%.2f,%.2f", nx, ny)
+        val rule = UniversalTriggerRule(
+            isPinVisible = true,
+            accentColorHex = pickedColor,
+            triggerSource = source,
+            triggerName = name?.trim()?.takeIf { it.isNotEmpty() } ?: "Challenge #${currentCount + 1}",
+            overlayPosX = nx,
+            overlayPosY = ny,
+            actionSequence = listOf(
+                UniversalActionStep(
+                    actionType = ActionType.SIMULATED_CLICK,
+                    paramValue = coordText,
+                    secondaryValue = "70",
+                    durationMs = 70L,
+                    posX = nx,
+                    posY = ny
+                )
+            )
+        )
+        addOrUpdateRule(rule)
+        _state.update {
+            it.copy(
+                activePinRuleId = rule.id,
+                activePinStepId = rule.actionSequence.firstOrNull()?.id,
+                isPositionEditMode = true,
+                isFloatingHiddenForLive = false
+            )
+        }
+        return rule
+    }
+
+    fun addChoreographyTouchStep(
+        ruleId: String,
+        actionType: ActionType = ActionType.SIMULATED_CLICK
+    ): UniversalActionStep? {
+        val current = _state.value.rules.toMutableList()
+        val idx = current.indexOfFirst { it.id == ruleId }
+        if (idx < 0) return null
+        val rule = current[idx]
+        val existingTouchSteps = rule.actionSequence.filter {
+            it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
+        }
+        val lastTouch = existingTouchSteps.lastOrNull()
+        val baseX = lastTouch?.posX ?: rule.overlayPosX
+        val baseY = lastTouch?.posY ?: rule.overlayPosY
+        val nx = if (existingTouchSteps.isEmpty()) baseX else ((baseX + 0.06f).let { if (it > 0.90f) 0.25f else it }).coerceIn(0.05f, 0.95f)
+        val ny = if (existingTouchSteps.isEmpty()) baseY else ((baseY - 0.06f).let { if (it < 0.10f) 0.80f else it }).coerceIn(0.05f, 0.95f)
+        val coordText = String.format(java.util.Locale.US, "%.3f,%.3f", nx, ny)
+        val isSwipe = actionType == ActionType.SIMULATED_SWIPE
+        val newStep = UniversalActionStep(
+            enabled = true,
+            actionType = actionType,
+            paramValue = if (isSwipe) "RIGHT" else coordText,
+            secondaryValue = if (isSwipe) "220" else "70",
+            durationMs = if (isSwipe) 220L else 70L,
+            delayMs = if (existingTouchSteps.isEmpty()) 0L else 180L,
+            repeatCount = 1,
+            executionMode = ExecutionMode.SEQUENTIAL,
+            posX = nx,
+            posY = ny
+        )
+        // Sisipkan sebelum langkah media paralel (CUSTOM_IMAGE / PLAY_SOUND) agar koreografi sentuhan tetap berurutan rapi
+        val mediaIdx = rule.actionSequence.indexOfFirst {
+            it.actionType != ActionType.SIMULATED_CLICK &&
+                it.actionType != ActionType.SIMULATED_SWIPE &&
+                it.actionType != ActionType.DELAY
+        }
+        val updatedSeq = rule.actionSequence.toMutableList()
+        if (mediaIdx >= 0) {
+            updatedSeq.add(mediaIdx, newStep)
+        } else {
+            updatedSeq.add(newStep)
+        }
+        current[idx] = rule.copy(isPinVisible = true, actionSequence = updatedSeq)
+        persistAndUpdateRules(current)
+        _state.update {
+            it.copy(
+                activePinRuleId = ruleId,
+                activePinStepId = newStep.id,
+                isPositionEditMode = true,
+                isFloatingHiddenForLive = false
+            )
+        }
+        return newStep
+    }
+
+    fun removeChoreographyStep(ruleId: String, stepId: String) {
+        val current = _state.value.rules.toMutableList()
+        val idx = current.indexOfFirst { it.id == ruleId }
+        if (idx < 0) return
+        val rule = current[idx]
+        val updatedSeq = rule.actionSequence.filterNot { it.id == stepId }
+        current[idx] = rule.copy(actionSequence = updatedSeq)
+        persistAndUpdateRules(current)
+    }
+
+    fun moveChoreographyStep(ruleId: String, stepId: String, delta: Int) {
+        val current = _state.value.rules.toMutableList()
+        val rIdx = current.indexOfFirst { it.id == ruleId }
+        if (rIdx < 0) return
+        val seq = current[rIdx].actionSequence.toMutableList()
+        val fromIdx = seq.indexOfFirst { it.id == stepId }
+        val toIdx = fromIdx + delta
+        if (fromIdx < 0 || toIdx !in seq.indices || fromIdx == toIdx) return
+        val moved = seq.removeAt(fromIdx)
+        seq.add(toIdx, moved)
+        current[rIdx] = current[rIdx].copy(actionSequence = seq)
+        persistAndUpdateRules(current)
+    }
+
+    fun updateFloatingConfig(transform: (FloatingWindowConfig) -> FloatingWindowConfig) {
+        val rawNext = transform(_state.value.floatingConfig)
+        val clamped = rawNext.copy(
+            hudXRatio = rawNext.hudXRatio.coerceIn(0f, 1f),
+            hudYRatio = rawNext.hudYRatio.coerceIn(0f, 1f),
+            hudScale = rawNext.hudScale.coerceIn(0.65f, 1.35f),
+            hudOpacity = rawNext.hudOpacity.coerceIn(0.30f, 1.0f),
+            panelXRatio = rawNext.panelXRatio.coerceIn(0f, 1f),
+            panelYRatio = rawNext.panelYRatio.coerceIn(0f, 1f),
+            panelWidthRatio = rawNext.panelWidthRatio.coerceIn(0.38f, 0.98f),
+            panelHeightRatio = rawNext.panelHeightRatio.coerceIn(0.35f, 0.96f),
+            panelOpacity = rawNext.panelOpacity.coerceIn(0.45f, 1.0f)
+        )
+        prefs.edit().putString(KEY_FLOATING_CONFIG, UniversalInteractionJsonCodec.encodeFloatingConfig(clamped)).apply()
+        _state.update { it.copy(floatingConfig = clamped) }
+    }
+
+    fun resetFloatingConfig() {
+        val defaults = FloatingWindowConfig()
+        prefs.edit().putString(KEY_FLOATING_CONFIG, UniversalInteractionJsonCodec.encodeFloatingConfig(defaults)).apply()
+        _state.update { it.copy(floatingConfig = defaults) }
+    }
+
+    fun resetFloatingPosition() {
+        updateFloatingConfig {
+            it.copy(
+                hudXRatio = 0.08f,
+                hudYRatio = 0.16f,
+                hudCollapsed = false
+            )
+        }
+    }
+
+    fun updateRulePosition(ruleId: String, posX: Float, posY: Float) {
+        updateStepPosition(ruleId, null, posX, posY)
+    }
+
+    fun updateStepPosition(ruleId: String, stepId: String?, posX: Float, posY: Float) {
+        val clampedX = posX.coerceIn(0.01f, 0.99f)
+        val clampedY = posY.coerceIn(0.01f, 0.99f)
+        val coordText = String.format(java.util.Locale.US, "%.3f,%.3f", clampedX, clampedY)
+        val updated = _state.value.rules.map { rule ->
+            if (rule.id != ruleId) {
+                rule
+            } else {
+                val touchSteps = rule.actionSequence.filter {
+                    it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
+                }
+                val targetStepId = stepId ?: touchSteps.firstOrNull()?.id
+                val isFirstTouch = targetStepId == null || touchSteps.firstOrNull()?.id == targetStepId
+                rule.copy(
+                    overlayPosX = if (isFirstTouch) clampedX else rule.overlayPosX,
+                    overlayPosY = if (isFirstTouch) clampedY else rule.overlayPosY,
+                    actionSequence = rule.actionSequence.map { step ->
+                        val isExplicitTarget = stepId != null && step.id == stepId
+                        val isTargetTouch = isExplicitTarget || (stepId == null && touchSteps.size <= 1 && (step.actionType == ActionType.SIMULATED_CLICK || step.actionType == ActionType.SIMULATED_SWIPE))
+                        when {
+                            isTargetTouch && step.actionType == ActionType.SIMULATED_CLICK ->
+                                step.copy(paramValue = coordText, posX = clampedX, posY = clampedY)
+                            isTargetTouch ->
+                                step.copy(posX = clampedX, posY = clampedY)
+                            isFirstTouch && step.actionType == ActionType.CUSTOM_IMAGE ->
+                                step.copy(posX = clampedX, posY = clampedY)
+                            else -> step
+                        }
+                    }
+                )
+            }
+        }
+        persistAndUpdateRules(updated)
+    }
+
+    fun nudgeRulePosition(ruleId: String, dx: Float, dy: Float) {
+        nudgeStepPosition(ruleId, _state.value.activePinStepId, dx, dy)
+    }
+
+    fun nudgeStepPosition(ruleId: String, stepId: String?, dx: Float, dy: Float) {
+        val rule = _state.value.rules.firstOrNull { it.id == ruleId } ?: return
+        val targetStep = stepId?.let { id -> rule.actionSequence.firstOrNull { it.id == id } }
+            ?: rule.actionSequence.firstOrNull {
+                it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+            }
+        val curX = targetStep?.posX ?: rule.overlayPosX
+        val curY = targetStep?.posY ?: rule.overlayPosY
+        updateStepPosition(
+            ruleId = ruleId,
+            stepId = targetStep?.id,
+            posX = (curX + dx).coerceIn(0.01f, 0.99f),
+            posY = (curY + dy).coerceIn(0.01f, 0.99f)
+        )
+    }
+
+    fun updateRuleScale(ruleId: String, scale: Float) {
+        val clampedScale = scale.coerceIn(0.35f, 3.0f)
+        val updated = _state.value.rules.map { rule ->
+            if (rule.id == ruleId) rule.copy(overlayScale = clampedScale) else rule
+        }
+        persistAndUpdateRules(updated)
+    }
+
+    fun updateRuleImageOverlay(ruleId: String, imageUri: String, caption: String? = null) {
+        val current = _state.value.rules.toMutableList()
+        val idx = current.indexOfFirst { it.id == ruleId }
+        if (idx < 0) return
+        val rule = current[idx]
+        val existingIdx = rule.actionSequence.indexOfFirst { it.actionType == ActionType.CUSTOM_IMAGE }
+        val updatedSeq = rule.actionSequence.toMutableList()
+        if (imageUri.isBlank()) {
+            updatedSeq.removeAll { it.actionType == ActionType.CUSTOM_IMAGE }
+        } else {
+            val nextStep = (if (existingIdx >= 0) updatedSeq[existingIdx] else UniversalActionStep(actionType = ActionType.CUSTOM_IMAGE)).copy(
+                enabled = true,
+                actionType = ActionType.CUSTOM_IMAGE,
+                paramValue = imageUri,
+                secondaryValue = caption ?: (if (existingIdx >= 0) updatedSeq[existingIdx].secondaryValue else ""),
+                posX = rule.overlayPosX,
+                posY = rule.overlayPosY,
+                executionMode = ExecutionMode.PARALLEL
+            )
+            if (existingIdx >= 0) updatedSeq[existingIdx] = nextStep else updatedSeq.add(nextStep)
+        }
+        current[idx] = rule.copy(actionSequence = updatedSeq)
+        persistAndUpdateRules(current)
+    }
+
+    fun updateStepParam(ruleId: String, stepId: String, paramValue: String) {
+        val updated = _state.value.rules.map { rule ->
+            if (rule.id != ruleId) {
+                rule
+            } else {
+                rule.copy(
+                    actionSequence = rule.actionSequence.map { s ->
+                        if (s.id == stepId) s.copy(enabled = true, paramValue = paramValue) else s
+                    }
+                )
+            }
+        }
+        persistAndUpdateRules(updated)
+    }
+
+    fun updateRuleSoundEffect(ruleId: String, soundSpec: String) {
+        val current = _state.value.rules.toMutableList()
+        val idx = current.indexOfFirst { it.id == ruleId }
+        if (idx < 0) return
+        val rule = current[idx]
+        val existingIdx = rule.actionSequence.indexOfFirst {
+            it.actionType == ActionType.PLAY_SOUND || it.actionType == ActionType.CUSTOM_BACKSOUND
+        }
+        val updatedSeq = rule.actionSequence.toMutableList()
+        if (soundSpec.isBlank()) {
+            updatedSeq.removeAll {
+                it.actionType == ActionType.PLAY_SOUND || it.actionType == ActionType.CUSTOM_BACKSOUND
+            }
+        } else {
+            val nextStep = (if (existingIdx >= 0) updatedSeq[existingIdx] else UniversalActionStep(actionType = ActionType.PLAY_SOUND)).copy(
+                enabled = true,
+                actionType = ActionType.PLAY_SOUND,
+                paramValue = soundSpec,
+                executionMode = ExecutionMode.PARALLEL
+            )
+            if (existingIdx >= 0) updatedSeq[existingIdx] = nextStep else updatedSeq.add(nextStep)
+        }
+        current[idx] = rule.copy(actionSequence = updatedSeq)
+        persistAndUpdateRules(current)
+    }
+
+    private fun persistAndUpdateRules(rules: List<UniversalTriggerRule>) {
+        prefs.edit().putString(KEY_RULES, UniversalInteractionJsonCodec.encodeRules(rules)).apply()
+        _state.update { st ->
+            val activeRule = st.activePinRuleId?.let { id -> rules.firstOrNull { it.id == id } }
+                ?: rules.firstOrNull { it.isPinVisible }
+                ?: rules.firstOrNull()
+            val validStepId = if (activeRule != null) {
+                st.activePinStepId?.takeIf { sid -> activeRule.actionSequence.any { it.id == sid } }
+                    ?: activeRule.actionSequence.firstOrNull {
+                        it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+                    }?.id
+            } else {
+                null
+            }
+            st.copy(rules = rules, activePinRuleId = activeRule?.id, activePinStepId = validStepId)
+        }
+    }
+
+    // ==================== Universal Preset CRUD + Assign Trigger ====================
+
+    fun savePreset(preset: UniversalPreset) {
+        val current = _state.value.presets.toMutableList()
+        val idx = current.indexOfFirst { it.id == preset.id }
+        if (idx >= 0) current[idx] = preset else current.add(preset)
+        persistAndUpdatePresets(current)
+    }
+
+    fun renamePreset(presetId: String, newName: String) {
+        val clean = newName.trim()
+        if (clean.isEmpty()) return
+        val updated = _state.value.presets.map {
+            if (it.id == presetId) it.copy(name = clean) else it
+        }
+        persistAndUpdatePresets(updated)
+    }
+
+    fun duplicatePreset(presetId: String) {
+        val current = _state.value.presets.toMutableList()
+        val idx = current.indexOfFirst { it.id == presetId }
+        if (idx < 0) return
+        val orig = current[idx]
+        val copy = orig.copy(
+            id = UUID.randomUUID().toString(),
+            name = "${orig.name} (Salinan)",
+            conditions = orig.conditions.map { it.copy(id = UUID.randomUUID().toString()) },
+            actionSequence = orig.actionSequence.map { it.copy(id = UUID.randomUUID().toString()) }
+        )
+        current.add(idx + 1, copy)
+        persistAndUpdatePresets(current)
+    }
+
+    fun deletePreset(presetId: String) {
+        val updated = _state.value.presets.filterNot { it.id == presetId }
+        persistAndUpdatePresets(updated)
+    }
+
+    fun exportPresetJson(presetId: String): String? {
+        val preset = _state.value.presets.firstOrNull { it.id == presetId } ?: return null
+        return UniversalInteractionJsonCodec.exportPresetPackageJson(preset)
+    }
+
+    fun exportAllPresetsJson(): String {
+        return UniversalInteractionJsonCodec.exportAllPresetsJson(_state.value.presets)
+    }
+
+    fun importPresetsJson(rawJson: String): Result<Int> {
+        val parsed = UniversalInteractionJsonCodec.importPresetsFromJson(rawJson)
+        return parsed.map { imported ->
+            val existing = _state.value.presets.toMutableList()
+            var count = 0
+            for (preset in imported) {
+                val fresh = preset.copy(
+                    id = UUID.randomUUID().toString(),
+                    conditions = preset.conditions.map { it.copy(id = UUID.randomUUID().toString()) },
+                    actionSequence = preset.actionSequence.map { it.copy(id = UUID.randomUUID().toString()) }
+                )
+                existing.add(fresh)
+                count++
+            }
+            persistAndUpdatePresets(existing)
+            count
+        }
+    }
+
+    /**
+     * Menghubungkan preset universal apa pun ke sumber trigger mana pun (Like/Follow/Share/Gift/dll).
+     */
+    fun assignPresetToTrigger(
+        presetId: String,
+        targetSource: UniversalTriggerSource,
+        customTriggerName: String? = null
+    ): UniversalTriggerRule? {
+        val preset = _state.value.presets.firstOrNull { it.id == presetId } ?: return null
+        val newRule = UniversalTriggerRule(
+            id = UUID.randomUUID().toString(),
+            enabled = true,
+            triggerSource = targetSource,
+            triggerName = customTriggerName?.trim()?.takeIf { it.isNotEmpty() }
+                ?: "${preset.name} (${targetSource.displayName})",
+            enableConditions = preset.enableConditions && preset.conditions.isNotEmpty(),
+            conditions = preset.conditions.map { it.copy(id = UUID.randomUUID().toString()) },
+            accumulationMode = preset.accumulationMode,
+            enableAccumulation = preset.accumulationMode == AccumulationMode.ACCUMULATION,
+            enableThreshold = preset.accumulationMode == AccumulationMode.THRESHOLD,
+            thresholdValue = preset.thresholdValue,
+            enableCombo = preset.accumulationMode == AccumulationMode.COMBO,
+            comboWindowMs = preset.comboWindowMs,
+            enableMilestone = preset.accumulationMode == AccumulationMode.MILESTONE,
+            milestoneStep = preset.milestoneStep,
+            enableRandomSelection = preset.accumulationMode == AccumulationMode.RANDOM,
+            enableCustomCondition = preset.accumulationMode == AccumulationMode.CUSTOM,
+            actionSequence = preset.actionSequence.map { it.copy(id = UUID.randomUUID().toString()) },
+            enableDelayBefore = preset.delayBeforeMs > 0L,
+            delayBeforeMs = preset.delayBeforeMs,
+            enableDelayAfter = preset.delayAfterMs > 0L,
+            delayAfterMs = preset.delayAfterMs,
+            enableInterval = preset.intervalMs > 0L,
+            intervalMs = preset.intervalMs,
+            enableDuration = true,
+            durationMs = preset.durationMs,
+            enableRepeat = preset.repeatCount > 1,
+            repeatCount = preset.repeatCount,
+            enableCooldown = preset.cooldownMs > 0L,
+            cooldownMs = preset.cooldownMs,
+            enablePriority = true,
+            priority = preset.priority,
+            enableResetCondition = preset.resetCondition != ResetConditionType.NONE,
+            resetCondition = preset.resetCondition,
+            assignedPresetId = preset.id
+        )
+        addOrUpdateRule(newRule)
+        return newRule
+    }
+
+    private fun persistAndUpdatePresets(presets: List<UniversalPreset>) {
+        prefs.edit().putString(KEY_PRESETS, UniversalInteractionJsonCodec.encodePresets(presets)).apply()
+        _state.update { it.copy(presets = presets) }
+    }
+
+    // ==================== ActionDispatchSink Implementation ====================
+
+    override fun onShowOverlay(overlay: ActiveVisualOverlay) {
+        _state.update { st ->
+            val kept = (st.activeOverlays + overlay).takeLast(6)
+            st.copy(activeOverlays = kept)
+        }
+    }
+
+    override fun onHideOverlay(targetFilter: String) {
+        _state.update { st ->
+            val remaining = if (targetFilter.equals("ALL", ignoreCase = true) || targetFilter.isBlank()) {
+                emptyList()
+            } else {
+                st.activeOverlays.filterNot {
+                    it.title.contains(targetFilter, ignoreCase = true) ||
+                        it.kind.name.contains(targetFilter, ignoreCase = true)
+                }
+            }
+            st.copy(activeOverlays = remaining)
+        }
+    }
+
+    override fun onChangeScene(sceneName: String) {
+        val clean = sceneName.ifBlank { "SCENE_UTAMA" }
+        prefs.edit().putString(KEY_ACTIVE_SCENE, clean).apply()
+        _state.update { it.copy(activeSceneName = clean) }
+    }
+
+    override fun onInteractionTestSimulated(simEvent: InteractionTestSimEvent) {
+        _state.update { it.copy(lastSimEvent = simEvent) }
+    }
+
+    override fun onRecordStepDetail(
+        rule: UniversalTriggerRule,
+        event: LiveInteractionEvent,
+        status: DispatchStatus,
+        detail: String
+    ) {
+        appendHistory(
+            TriggerExecutionRecord(
+                timestampMs = System.currentTimeMillis(),
+                ruleId = rule.id,
+                ruleName = rule.triggerName,
+                source = event.source,
+                senderName = event.senderName,
+                quantity = event.quantity,
+                status = status,
+                detail = detail
+            )
+        )
+    }
+
+    private fun appendHistory(record: TriggerExecutionRecord) {
+        _state.update { st ->
+            st.copy(history = (listOf(record) + st.history).take(MAX_HISTORY))
+        }
+    }
+}

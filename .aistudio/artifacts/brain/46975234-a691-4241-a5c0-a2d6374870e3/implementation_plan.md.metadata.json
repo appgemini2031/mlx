@@ -1,6 +1,0 @@
-{
-  "summary": "Rencana revisi arsitektur dan alur sewa dengan 'update.sh' sebagai GERBANG AWAL TUNGGAL di Termux. Mengintegrasikan Generator Kunci Sewa, Remote Kill-Switch (Matikan/Kunci APK), Bot Telegram Pengelola Sewa, serta pengamanan APK terhadap pencurian (Hardware-Lock) dan manipulasi jam (Anti-Clock Rollback + HTTP Date UTC).",
-  "updatedAt": "2026-10-17T10:25:41.611005874Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

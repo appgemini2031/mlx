@@ -424,7 +424,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         val savedPresets = UniversalInteractionJsonCodec.decodePresets(prefs.getString(KEY_PRESETS, null))
         val enabled = prefs.getBoolean(KEY_ENGINE_ENABLED, true)
         val matchActive = prefs.getBoolean(KEY_MATCH_ACTIVE, false)
-        val blockTouch = prefs.getBoolean(KEY_BLOCK_TOUCH_DURING_CHALLENGE, false)
+        val blockTouch = prefs.getBoolean(KEY_BLOCK_TOUCH_DURING_CHALLENGE, true)
         val scene = prefs.getString(KEY_ACTIVE_SCENE, "SCENE_UTAMA")?.ifBlank { "SCENE_UTAMA" } ?: "SCENE_UTAMA"
         val floatingCfg = UniversalInteractionJsonCodec.decodeFloatingConfig(prefs.getString(KEY_FLOATING_CONFIG, null))
         val initialRule = savedRules.firstOrNull { it.isPinVisible } ?: savedRules.firstOrNull()
@@ -737,7 +737,8 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         quantity: Int = 1,
         diamonds: Int = 10,
         giftName: String = "Rose",
-        customText: String = "Test event"
+        customText: String = "Test event",
+        avatarUrl: String = ""
     ): List<TriggerExecutionRecord> {
         val rule = _state.value.rules.firstOrNull { it.id == ruleId } ?: return emptyList()
         val effectiveQty = if (rule.enableMinimumQuantity) maxOf(quantity, rule.minimumQuantity) else quantity.coerceAtLeast(1)
@@ -747,7 +748,8 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             quantity = effectiveQty,
             diamonds = diamonds.coerceAtLeast(0),
             giftName = giftName,
-            text = customText
+            text = customText,
+            avatarUrl = avatarUrl
         )
         forceTestRuleNow(ruleId, event)
         return emptyList()
@@ -855,49 +857,84 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         }
     }
 
-    private suspend fun waitForSkillCooldownIfNeeded(rule: UniversalTriggerRule): String? {
-        if (!rule.enableVisualCooldownWait) return null
-        val targetStep = rule.actionSequence.firstOrNull {
+    private fun resolveCooldownTargetStep(rule: UniversalTriggerRule): UniversalActionStep? {
+        val touchSteps = rule.actionSequence.filter {
             it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
         }
+        if (touchSteps.isEmpty()) return null
+        val explicitId = rule.cooldownTargetStepId
+        if (!explicitId.isNullOrBlank()) {
+            touchSteps.firstOrNull { it.id == explicitId }?.let { return it }
+        }
+        return touchSteps.firstOrNull()
+    }
+
+    private suspend fun scanRuleCooldownRaw(rule: UniversalTriggerRule): SkillCooldownScanResult {
+        val targetStep = resolveCooldownTargetStep(rule)
         val cx = (targetStep?.posX ?: rule.overlayPosX).coerceIn(0.02f, 0.98f)
         val cy = (targetStep?.posY ?: rule.overlayPosY).coerceIn(0.02f, 0.98f)
+        val prepareScan = MlbbGestureAccessibilityService.onPrepareScreenForScan
+            ?: MlbbGestureAccessibilityService.onPrepareScreenForTouch
+        return try {
+            if (prepareScan != null) {
+                withContext(Dispatchers.Main) { prepareScan.invoke(true) }
+                delay(95L)
+            }
+            SkillCooldownDetector.inspectSkillArea(
+                centerNormX = cx,
+                centerNormY = cy,
+                widthRatio = rule.cooldownAreaWidthRatio,
+                heightRatio = rule.cooldownAreaHeightRatio,
+                offsetX = rule.cooldownAreaOffsetX,
+                offsetY = rule.cooldownAreaOffsetY
+            )
+        } finally {
+            if (prepareScan != null) {
+                withContext(Dispatchers.Main) { prepareScan.invoke(false) }
+            }
+        }
+    }
+
+    private suspend fun waitForSkillCooldownIfNeeded(rule: UniversalTriggerRule): String? {
+        if (!rule.enableVisualCooldownWait) return null
         val startedMs = System.currentTimeMillis()
         val maxWait = rule.cooldownMaxWaitMs.coerceIn(2000L, 120_000L)
-        var waitedSecondsHint: Double? = null
+        var maxCooldownSeenSec: Double? = null
+        var lastCooldownSeenSec: Double? = null
+        var reconfirmedReady = false
 
         while (!_state.value.isEmergencyStopped && (System.currentTimeMillis() - startedMs) < maxWait) {
-            val scanResult = try {
-                withContext(Dispatchers.Main) {
-                    MlbbGestureAccessibilityService.onPrepareScreenForTouch?.invoke(true)
+            when (val scanResult = scanRuleCooldownRaw(rule)) {
+                is SkillCooldownScanResult.RateLimited -> {
+                    delay(scanResult.retryAfterMs.coerceIn(300L, 1250L))
                 }
-                delay(65L)
-                SkillCooldownDetector.inspectSkillArea(
-                    centerNormX = cx,
-                    centerNormY = cy,
-                    widthRatio = rule.cooldownAreaWidthRatio,
-                    heightRatio = rule.cooldownAreaHeightRatio,
-                    offsetX = rule.cooldownAreaOffsetX,
-                    offsetY = rule.cooldownAreaOffsetY
-                )
-            } finally {
-                withContext(Dispatchers.Main) {
-                    MlbbGestureAccessibilityService.onPrepareScreenForTouch?.invoke(false)
-                }
-            }
-
-            when (scanResult) {
                 is SkillCooldownScanResult.Ready -> {
+                    val lastSec = lastCooldownSeenSec
+                    val remainingWindow = maxWait - (System.currentTimeMillis() - startedMs)
+                    if (lastSec != null && lastSec > 1.8 && !reconfirmedReady && remainingWindow > 1200L) {
+                        reconfirmedReady = true
+                        delay(1080L)
+                        continue
+                    }
                     _state.update { it.copy(cooldownStatusHint = "") }
-                    return waitedSecondsHint?.let { "Tunggu CD (${String.format(Locale.US, "%.1f", it)}s) → Aktif" }
+                    return maxCooldownSeenSec?.let {
+                        "Tunggu CD (${String.format(Locale.US, "%.1f", it)}d) → Siap"
+                    }
                 }
                 is SkillCooldownScanResult.OnCooldown -> {
-                    waitedSecondsHint = scanResult.secondsRemaining
+                    reconfirmedReady = false
+                    lastCooldownSeenSec = scanResult.secondsRemaining
+                    maxCooldownSeenSec = maxOf(maxCooldownSeenSec ?: 0.0, scanResult.secondsRemaining)
                     val secText = String.format(Locale.US, "%.1f", scanResult.secondsRemaining)
                     _state.update {
                         it.copy(cooldownStatusHint = "⏱️ ${rule.triggerName}: cooldown ${secText}d")
                     }
-                    delay(if (scanResult.secondsRemaining > 1.5) 750L else 320L)
+                    // Android AccessibilityService.takeScreenshot() mensyaratkan jeda >= ~1 detik antar screenshot
+                    val waitStep = maxOf(
+                        1080L,
+                        (scanResult.secondsRemaining * 550.0).toLong().coerceAtMost(2200L)
+                    )
+                    delay(waitStep)
                 }
                 is SkillCooldownScanResult.Unavailable -> {
                     _state.update { it.copy(cooldownStatusHint = "") }
@@ -906,42 +943,25 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             }
         }
         _state.update { it.copy(cooldownStatusHint = "") }
-        return if (_state.value.isEmergencyStopped) null else "Timeout tunggu cooldown"
+        return if (_state.value.isEmergencyStopped) null else "Timeout tunggu cooldown (${maxWait / 1000}d)"
     }
 
     fun inspectRuleCooldownOnce(ruleId: String, onResult: (String) -> Unit) {
         val rule = _state.value.rules.firstOrNull { it.id == ruleId } ?: run {
-            onResult("Pin/Rule tidak ditemukan")
+            onResult("Konsep/Pin tidak ditemukan")
             return
         }
-        val targetStep = rule.actionSequence.firstOrNull {
-            it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
-        }
-        val cx = (targetStep?.posX ?: rule.overlayPosX).coerceIn(0.02f, 0.98f)
-        val cy = (targetStep?.posY ?: rule.overlayPosY).coerceIn(0.02f, 0.98f)
         scope.launch {
-            val res = try {
-                withContext(Dispatchers.Main) {
-                    MlbbGestureAccessibilityService.onPrepareScreenForTouch?.invoke(true)
-                }
-                delay(70L)
-                SkillCooldownDetector.inspectSkillArea(
-                    centerNormX = cx,
-                    centerNormY = cy,
-                    widthRatio = rule.cooldownAreaWidthRatio,
-                    heightRatio = rule.cooldownAreaHeightRatio,
-                    offsetX = rule.cooldownAreaOffsetX,
-                    offsetY = rule.cooldownAreaOffsetY
-                )
-            } finally {
-                withContext(Dispatchers.Main) {
-                    MlbbGestureAccessibilityService.onPrepareScreenForTouch?.invoke(false)
-                }
+            var res = scanRuleCooldownRaw(rule)
+            if (res is SkillCooldownScanResult.RateLimited) {
+                delay(res.retryAfterMs.coerceIn(300L, 1250L))
+                res = scanRuleCooldownRaw(rule)
             }
             val msg = when (res) {
-                is SkillCooldownScanResult.Ready -> "✅ Skill SIAP / Aktif (tidak ada angka cooldown)"
+                is SkillCooldownScanResult.Ready -> "✅ Skill SIAP / Aktif (angka cooldown tidak terdeteksi)"
                 is SkillCooldownScanResult.OnCooldown ->
-                    "⏳ Sedang Cooldown: ${String.format(Locale.US, "%.1f", res.secondsRemaining)} detik"
+                    "⏳ Cooldown terbaca: ${String.format(Locale.US, "%.1f", res.secondsRemaining)} detik (teks: \"${res.rawText.replace('\n', ' ').take(18)}\")"
+                is SkillCooldownScanResult.RateLimited -> "⏳ Terlalu cepat, coba tap Scan Sekali lagi"
                 is SkillCooldownScanResult.Unavailable -> "⚠️ ${res.reason}"
             }
             withContext(Dispatchers.Main) { onResult(msg) }
@@ -951,6 +971,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
     private fun ensureQueueWorkerRunning() {
         if (!isWorkerRunning.compareAndSet(false, true)) return
         scope.launch {
+            enterChallengeExecution()
             try {
                 while (true) {
                     val nextTask = synchronized(queueLock) {
@@ -963,7 +984,6 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                         st.copy(queueSize = synchronized(queueLock) { pendingQueue.size })
                     }
 
-                    enterChallengeExecution()
                     val summary = try {
                         val cooldownNote = waitForSkillCooldownIfNeeded(nextTask.rule)
                         if (_state.value.isEmergencyStopped) {
@@ -980,7 +1000,6 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                     } catch (t: Throwable) {
                         "Error eksekusi: ${t.message}"
                     } finally {
-                        exitChallengeExecution()
                         _state.update { it.copy(cooldownStatusHint = "") }
                     }
 
@@ -1003,6 +1022,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                     )
                 }
             } finally {
+                exitChallengeExecution()
                 isWorkerRunning.set(false)
                 val hasMore = synchronized(queueLock) {
                     pendingQueue.isNotEmpty() && !_state.value.isEmergencyStopped
@@ -1038,12 +1058,15 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         heightRatio: Float? = null,
         offsetX: Float? = null,
         offsetY: Float? = null,
-        maxWaitMs: Long? = null
+        maxWaitMs: Long? = null,
+        targetStepId: String? = null,
+        updateTargetStep: Boolean = false
     ) {
         val updated = _state.value.rules.map { rule ->
             if (rule.id != ruleId) rule
             else rule.copy(
                 enableVisualCooldownWait = enabled ?: rule.enableVisualCooldownWait,
+                cooldownTargetStepId = if (updateTargetStep) targetStepId else rule.cooldownTargetStepId,
                 cooldownAreaWidthRatio = (widthRatio ?: rule.cooldownAreaWidthRatio).coerceIn(0.025f, 0.45f),
                 cooldownAreaHeightRatio = (heightRatio ?: rule.cooldownAreaHeightRatio).coerceIn(0.025f, 0.55f),
                 cooldownAreaOffsetX = (offsetX ?: rule.cooldownAreaOffsetX).coerceIn(-0.25f, 0.25f),
@@ -1264,21 +1287,30 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         _state.update { it.copy(activePinRuleId = nextRuleId, activePinStepId = nextStepId) }
     }
 
-    fun duplicateRule(ruleId: String) {
+    fun duplicateRule(ruleId: String): UniversalTriggerRule? {
         val current = _state.value.rules.toMutableList()
         val idx = current.indexOfFirst { it.id == ruleId }
-        if (idx < 0) return
+        if (idx < 0) return null
         val orig = current[idx]
         val usedColors = current.map { it.accentColorHex }.toSet()
+        val stepIdMap = mutableMapOf<String, String>()
+        val copiedSteps = orig.actionSequence.map { step ->
+            val newId = UUID.randomUUID().toString()
+            stepIdMap[step.id] = newId
+            step.copy(id = newId)
+        }
+        val mappedCooldownStepId = orig.cooldownTargetStepId?.let { oldId -> stepIdMap[oldId] ?: oldId }
         val copyRule = orig.copy(
             id = UUID.randomUUID().toString(),
             triggerName = "${orig.triggerName} (Salinan)",
             accentColorHex = ChallengeColorPalette.nextUnusedColor(usedColors),
+            cooldownTargetStepId = mappedCooldownStepId,
             conditions = orig.conditions.map { it.copy(id = UUID.randomUUID().toString()) },
-            actionSequence = orig.actionSequence.map { it.copy(id = UUID.randomUUID().toString()) }
+            actionSequence = copiedSteps
         )
         current.add(idx + 1, copyRule)
         persistAndUpdateRules(current)
+        return copyRule
     }
 
     fun deleteRule(ruleId: String) {
@@ -1471,13 +1503,52 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         return newStep
     }
 
+    fun addCustomChoreographyStep(ruleId: String, step: UniversalActionStep) {
+        val current = _state.value.rules.toMutableList()
+        val idx = current.indexOfFirst { it.id == ruleId }
+        if (idx < 0) return
+        val rule = current[idx]
+        val updatedSeq = rule.actionSequence.toMutableList().apply { add(step) }
+        current[idx] = rule.copy(actionSequence = updatedSeq)
+        persistAndUpdateRules(current)
+    }
+
+    fun duplicateChoreographyStep(ruleId: String, stepId: String) {
+        val current = _state.value.rules.toMutableList()
+        val idx = current.indexOfFirst { it.id == ruleId }
+        if (idx < 0) return
+        val seq = current[idx].actionSequence.toMutableList()
+        val sIdx = seq.indexOfFirst { it.id == stepId }
+        if (sIdx < 0) return
+        val orig = seq[sIdx]
+        val isTouch = orig.actionType == ActionType.SIMULATED_CLICK || orig.actionType == ActionType.SIMULATED_SWIPE
+        val offsetX = if (isTouch && orig.posX != null) (orig.posX + 0.04f).coerceIn(0.05f, 0.95f) else orig.posX
+        val offsetY = if (isTouch && orig.posY != null) (orig.posY - 0.04f).coerceIn(0.05f, 0.95f) else orig.posY
+        val cloned = orig.copy(
+            id = UUID.randomUUID().toString(),
+            posX = offsetX,
+            posY = offsetY,
+            paramValue = if (orig.actionType == ActionType.SIMULATED_CLICK && offsetX != null && offsetY != null) {
+                String.format(Locale.US, "%.3f,%.3f", offsetX, offsetY)
+            } else {
+                orig.paramValue
+            }
+        )
+        seq.add(sIdx + 1, cloned)
+        current[idx] = current[idx].copy(actionSequence = seq)
+        persistAndUpdateRules(current)
+    }
+
     fun removeChoreographyStep(ruleId: String, stepId: String) {
         val current = _state.value.rules.toMutableList()
         val idx = current.indexOfFirst { it.id == ruleId }
         if (idx < 0) return
         val rule = current[idx]
         val updatedSeq = rule.actionSequence.filterNot { it.id == stepId }
-        current[idx] = rule.copy(actionSequence = updatedSeq)
+        current[idx] = rule.copy(
+            cooldownTargetStepId = if (rule.cooldownTargetStepId == stepId) null else rule.cooldownTargetStepId,
+            actionSequence = updatedSeq
+        )
         persistAndUpdateRules(current)
     }
 
@@ -1600,14 +1671,17 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         val idx = current.indexOfFirst { it.id == ruleId }
         if (idx < 0) return
         val rule = current[idx]
-        val existingIdx = rule.actionSequence.indexOfFirst { it.actionType == ActionType.CUSTOM_IMAGE }
+        val existingIdx = rule.actionSequence.indexOfFirst {
+            it.actionType == ActionType.MEME_OVERLAY || it.actionType == ActionType.CUSTOM_IMAGE
+        }
         val updatedSeq = rule.actionSequence.toMutableList()
         if (imageUri.isBlank()) {
-            updatedSeq.removeAll { it.actionType == ActionType.CUSTOM_IMAGE }
+            updatedSeq.removeAll { it.actionType == ActionType.MEME_OVERLAY || it.actionType == ActionType.CUSTOM_IMAGE }
         } else {
-            val nextStep = (if (existingIdx >= 0) updatedSeq[existingIdx] else UniversalActionStep(actionType = ActionType.CUSTOM_IMAGE)).copy(
+            val baseType = if (existingIdx >= 0) updatedSeq[existingIdx].actionType else ActionType.MEME_OVERLAY
+            val nextStep = (if (existingIdx >= 0) updatedSeq[existingIdx] else UniversalActionStep(actionType = baseType)).copy(
                 enabled = true,
-                actionType = ActionType.CUSTOM_IMAGE,
+                actionType = baseType,
                 paramValue = imageUri,
                 secondaryValue = caption ?: (if (existingIdx >= 0) updatedSeq[existingIdx].secondaryValue else ""),
                 posX = rule.overlayPosX,

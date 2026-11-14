@@ -117,6 +117,12 @@ object ScreenCoordinateMapper {
     }
 }
 
+sealed class ScreenCaptureResult {
+    data class Success(val bitmap: Bitmap) : ScreenCaptureResult()
+    data class RateLimited(val waitMs: Long) : ScreenCaptureResult()
+    data class Error(val reason: String) : ScreenCaptureResult()
+}
+
 /**
  * AccessibilityService resmi Android (API 24+) untuk mengeksekusi sentuhan nyata
  * (Tap, Hold, Multi-Tap, dan Swipe) langsung ke tombol game Mobile Legends di layar.
@@ -125,6 +131,7 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "MlbbGestureService"
+        private const val MIN_SCREENSHOT_INTERVAL_MS = 1050L
 
         @Volatile
         private var activeInstance: MlbbGestureAccessibilityService? = null
@@ -134,6 +141,9 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
 
         @Volatile
         var onPrepareScreenForTouch: ((hideForTouch: Boolean) -> Unit)? = null
+
+        @Volatile
+        var onPrepareScreenForScan: ((hideForScan: Boolean) -> Unit)? = null
 
         fun peekInstance(): MlbbGestureAccessibilityService? = activeInstance
 
@@ -171,6 +181,9 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
 
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private var cachedHomeLauncherPackage: String? = null
+
+    @Volatile
+    private var lastScreenshotRequestAtMs: Long = 0L
 
     @Volatile
     var lastForegroundAppPackage: String? = null
@@ -285,7 +298,7 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         val prepare = onPrepareScreenForTouch
         if (prepare != null) {
             mainHandler.post { prepare(true) }
-            delay(55L)
+            delay(85L)
         }
         try {
             for (i in 0 until repeats) {
@@ -341,7 +354,7 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         val prepare = onPrepareScreenForTouch
         if (prepare != null) {
             mainHandler.post { prepare(true) }
-            delay(55L)
+            delay(85L)
         }
         return try {
             val holdPath = Path().apply {
@@ -388,7 +401,7 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         val prepare = onPrepareScreenForTouch
         if (prepare != null) {
             mainHandler.post { prepare(true) }
-            delay(55L)
+            delay(85L)
         }
         return try {
             val path = Path().apply {
@@ -412,7 +425,27 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         widthRatio: Float,
         heightRatio: Float
     ): Bitmap? {
-        return withTimeoutOrNull(1800L) {
+        return when (val res = captureScreenRegionResult(centerNormX, centerNormY, widthRatio, heightRatio)) {
+            is ScreenCaptureResult.Success -> res.bitmap
+            else -> null
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    suspend fun captureScreenRegionResult(
+        centerNormX: Float,
+        centerNormY: Float,
+        widthRatio: Float,
+        heightRatio: Float
+    ): ScreenCaptureResult {
+        val now = System.currentTimeMillis()
+        val sinceLast = now - lastScreenshotRequestAtMs
+        if (lastScreenshotRequestAtMs > 0L && sinceLast < MIN_SCREENSHOT_INTERVAL_MS) {
+            return ScreenCaptureResult.RateLimited((MIN_SCREENSHOT_INTERVAL_MS - sinceLast).coerceAtLeast(180L))
+        }
+        lastScreenshotRequestAtMs = now
+
+        return withTimeoutOrNull(2200L) {
             suspendCancellableCoroutine { cont ->
                 try {
                     takeScreenshot(
@@ -459,21 +492,37 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
                                     try { hwBitmap?.recycle() } catch (_: Throwable) {}
                                     try { hb.close() } catch (_: Throwable) {}
                                 }
-                                if (cont.isActive) cont.resume(cropped)
+                                if (cont.isActive) {
+                                    if (cropped != null) {
+                                        cont.resume(ScreenCaptureResult.Success(cropped))
+                                    } else {
+                                        cont.resume(ScreenCaptureResult.Error("Gagal memproses gambar layar"))
+                                    }
+                                }
                             }
 
                             override fun onFailure(errorCode: Int) {
                                 Log.w(TAG, "takeScreenshot failed code=$errorCode")
-                                if (cont.isActive) cont.resume(null)
+                                val result = when (errorCode) {
+                                    ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT ->
+                                        ScreenCaptureResult.RateLimited(1100L)
+                                    ERROR_TAKE_SCREENSHOT_SECURE_WINDOW ->
+                                        ScreenCaptureResult.Error("Layar terproteksi (FLAG_SECURE)")
+                                    else ->
+                                        ScreenCaptureResult.Error("Gagal ambil screenshot (kode $errorCode)")
+                                }
+                                if (cont.isActive) cont.resume(result)
                             }
                         }
                     )
                 } catch (t: Throwable) {
                     Log.w(TAG, "takeScreenshot exception: ${t.message}")
-                    if (cont.isActive) cont.resume(null)
+                    if (cont.isActive) {
+                        cont.resume(ScreenCaptureResult.Error("Exception screenshot: ${t.message}"))
+                    }
                 }
             }
-        }
+        } ?: ScreenCaptureResult.Error("Timeout ambil screenshot layar")
     }
 
     private suspend fun dispatchGestureAsync(

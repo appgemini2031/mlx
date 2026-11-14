@@ -236,6 +236,7 @@ data class UniversalTriggerRule(
     val overlayScale: Float = 1.0f,
     // Baca Cooldown Skill ML secara Visual per Pin / Rule
     val enableVisualCooldownWait: Boolean = false,
+    val cooldownTargetStepId: String? = null,
     val cooldownAreaWidthRatio: Float = 0.085f,
     val cooldownAreaHeightRatio: Float = 0.14f,
     val cooldownAreaOffsetX: Float = 0f,
@@ -348,7 +349,7 @@ data class FloatingWindowConfig(
 data class UniversalEngineUiState(
     val isEngineEnabled: Boolean = true,
     val isMlbbMatchActive: Boolean = false,
-    val blockTouchDuringChallenge: Boolean = false,
+    val blockTouchDuringChallenge: Boolean = true,
     val isChallengeExecuting: Boolean = false,
     val cooldownStatusHint: String = "",
     val isEmergencyStopped: Boolean = false,
@@ -506,6 +507,7 @@ object UniversalInteractionJsonCodec {
         put("overlayPosY", rule.overlayPosY.toDouble())
         put("overlayScale", rule.overlayScale.toDouble())
         put("enableVisualCooldownWait", rule.enableVisualCooldownWait)
+        put("cooldownTargetStepId", rule.cooldownTargetStepId ?: "")
         put("cooldownAreaWidthRatio", rule.cooldownAreaWidthRatio.toDouble())
         put("cooldownAreaHeightRatio", rule.cooldownAreaHeightRatio.toDouble())
         put("cooldownAreaOffsetX", rule.cooldownAreaOffsetX.toDouble())
@@ -572,6 +574,7 @@ object UniversalInteractionJsonCodec {
             overlayPosY = obj.optDouble("overlayPosY", 0.5).toFloat().coerceIn(0.02f, 0.98f),
             overlayScale = obj.optDouble("overlayScale", 1.0).toFloat().coerceIn(0.35f, 3.0f),
             enableVisualCooldownWait = obj.optBoolean("enableVisualCooldownWait", false),
+            cooldownTargetStepId = obj.optString("cooldownTargetStepId", "").ifBlank { null },
             cooldownAreaWidthRatio = obj.optDouble("cooldownAreaWidthRatio", 0.085).toFloat().coerceIn(0.025f, 0.45f),
             cooldownAreaHeightRatio = obj.optDouble("cooldownAreaHeightRatio", 0.14).toFloat().coerceIn(0.025f, 0.55f),
             cooldownAreaOffsetX = obj.optDouble("cooldownAreaOffsetX", 0.0).toFloat().coerceIn(-0.25f, 0.25f),

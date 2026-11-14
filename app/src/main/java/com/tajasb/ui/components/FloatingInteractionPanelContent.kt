@@ -40,8 +40,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -256,6 +254,14 @@ fun FloatingInteractionPanelContent(
                                 onKeyboardFocusChanged(false)
                                 Toast.makeText(context, "✅ ${updated.triggerName} disimpan", Toast.LENGTH_SHORT).show()
                             },
+                            onDuplicateConcept = { updated ->
+                                engine.addOrUpdateRule(updated)
+                                val copy = engine.duplicateRule(updated.id)
+                                if (copy != null) {
+                                    editingRuleId = copy.id
+                                    Toast.makeText(context, "✅ Diduplikat: ${copy.triggerName}", Toast.LENGTH_SHORT).show()
+                                }
+                            },
                             onCancel = {
                                 editingRuleId = null
                                 onClearSelectedRuleToEdit()
@@ -308,10 +314,16 @@ fun FloatingInteractionPanelContent(
                                 engine.selectActivePin(it.id)
                                 editingRuleId = it.id
                             },
+                            onDuplicateRule = { rule ->
+                                val copy = engine.duplicateRule(rule.id)
+                                if (copy != null) {
+                                    Toast.makeText(context, "✅ Konsep diduplikat: ${copy.triggerName}", Toast.LENGTH_SHORT).show()
+                                }
+                            },
                             onTestRule = { rule ->
                                 engine.forceTestRuleNow(rule.id) { res ->
                                     android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                        Toast.makeText(context, res, Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "${rule.triggerName}: $res", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             },
@@ -328,6 +340,7 @@ fun FloatingInteractionPanelContent(
                     DropdownTestSection(
                         engine = engine,
                         rules = uiState.rules,
+                        activePinRuleId = uiState.activePinRuleId,
                         isEngineEnabled = uiState.isEngineEnabled && !uiState.isEmergencyStopped,
                         isA11yEnabled = isA11yEnabled,
                         history = uiState.history
@@ -358,22 +371,22 @@ private fun HorizontalSectionTab(
 ) {
     Box(
         modifier = modifier
-            .defaultMinSize(minHeight = 34.dp)
-            .clip(RoundedCornerShape(8.dp))
+            .defaultMinSize(minHeight = 30.dp)
+            .clip(RoundedCornerShape(7.dp))
             .background(if (selected) accent.copy(alpha = 0.2f) else DarkSurface)
             .border(
                 width = if (selected) 1.dp else 0.7.dp,
                 color = if (selected) accent else DarkCardBorder,
-                shape = RoundedCornerShape(8.dp)
+                shape = RoundedCornerShape(7.dp)
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 5.dp, vertical = 7.dp),
+            .padding(horizontal = 4.dp, vertical = 5.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
             color = if (selected) accent else Color(0xFFE2E8F0),
-            fontSize = 9.sp,
+            fontSize = 8.8.sp,
             fontWeight = if (selected) FontWeight.Black else FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
@@ -391,31 +404,32 @@ private fun DropdownConceptList(
     onSetAllEyes: (Boolean) -> Unit,
     onSelectActivePin: (UniversalTriggerRule) -> Unit,
     onEditRule: (UniversalTriggerRule) -> Unit,
+    onDuplicateRule: (UniversalTriggerRule) -> Unit,
     onTestRule: (UniversalTriggerRule) -> Unit,
     onDeleteRule: (UniversalTriggerRule) -> Unit,
     onShowPinsOutside: () -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(5.dp)
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Button(
                 onClick = onCreateEmptyConcept,
                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                modifier = Modifier.weight(1f).height(34.dp)
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                modifier = Modifier.weight(1f).height(30.dp)
             ) {
-                Icon(Icons.Default.Add, contentDescription = null, tint = Color.Black, modifier = Modifier.size(15.dp))
+                Icon(Icons.Default.Add, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
                 Spacer(modifier = Modifier.width(3.dp))
-                Text("+ Konsep Baru", color = Color.Black, fontSize = 10.sp, fontWeight = FontWeight.Black)
+                Text("+ Konsep Baru", color = Color.Black, fontSize = 9.5.sp, fontWeight = FontWeight.Black)
             }
             OutlinedButton(
                 onClick = onShowPinsOutside,
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                modifier = Modifier.height(34.dp)
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                modifier = Modifier.height(30.dp)
             ) {
-                Text("📍 D-Pad", color = NeonCyan, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text("📍 D-Pad", color = NeonCyan, fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
             }
         }
 
@@ -427,23 +441,23 @@ private fun DropdownConceptList(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Pin Tampil: $visibleCount/${rules.size}",
+                    text = "Pin: $visibleCount/${rules.size}",
                     color = Color(0xFF94A3B8),
-                    fontSize = 8.5.sp,
+                    fontSize = 8.sp,
                     fontWeight = FontWeight.SemiBold
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    SelectPill("👁 Buka Semua", visibleCount == rules.size) { onSetAllEyes(true) }
-                    SelectPill("🙈 Tutup Semua", visibleCount == 0) { onSetAllEyes(false) }
+                Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    SelectPill("👁 Buka", visibleCount == rules.size) { onSetAllEyes(true) }
+                    SelectPill("🙈 Tutup", visibleCount == 0) { onSetAllEyes(false) }
                 }
             }
         }
 
         if (rules.isEmpty()) {
             Text(
-                text = "Belum ada konsep. Ketuk '+ Konsep Baru' lalu tambahkan koreografi sesuai kebutuhan (Klik, Geser, Home→Game, Jeda, Overlay, atau Sound).",
+                text = "Belum ada konsep. Ketuk '+ Konsep Baru' lalu susun koreografi (Klik, Geser, Foto Meme, Foto Profil, Home→Game, Jeda, Sound).",
                 color = Color(0xFF94A3B8),
-                fontSize = 9.sp
+                fontSize = 8.5.sp
             )
         } else {
             rules.forEachIndexed { idx, rule ->
@@ -453,27 +467,27 @@ private fun DropdownConceptList(
                 val stepSummary = when {
                     activeSteps.isEmpty() -> "Kosong"
                     activeSteps.size == 1 -> shortStepLabel(activeSteps.first())
-                    else -> "${activeSteps.size} Koreografi: " + activeSteps.take(3).joinToString(" → ") { shortStepLabel(it) }
+                    else -> "${activeSteps.size}x: " + activeSteps.take(3).joinToString(" → ") { shortStepLabel(it) }
                 }
 
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(7.dp))
+                        .clip(RoundedCornerShape(6.dp))
                         .background(if (isSelected) ruleColor.copy(alpha = 0.12f) else DarkSurface)
                         .border(
-                            if (isSelected) 1.2.dp else 0.8.dp,
+                            if (isSelected) 1.2.dp else 0.7.dp,
                             if (rule.isPinVisible) ruleColor.copy(alpha = 0.8f) else DarkCardBorder,
-                            RoundedCornerShape(7.dp)
+                            RoundedCornerShape(6.dp)
                         )
                         .clickable { onEditRule(rule) }
-                        .padding(horizontal = 7.dp, vertical = 6.dp),
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(18.dp)
+                            .size(16.dp)
                             .clip(CircleShape)
                             .background(ruleColor)
                             .clickable { onSelectActivePin(rule) },
@@ -482,7 +496,7 @@ private fun DropdownConceptList(
                         Text(
                             text = "${idx + 1}",
                             color = Color.Black,
-                            fontSize = 9.sp,
+                            fontSize = 8.5.sp,
                             fontWeight = FontWeight.Black
                         )
                     }
@@ -490,39 +504,40 @@ private fun DropdownConceptList(
                         Text(
                             text = "${rule.triggerSource.displayName} → ${rule.triggerName}",
                             color = if (rule.enabled) Color.White else Color(0xFF64748B),
-                            fontSize = 9.8.sp,
+                            fontSize = 9.2.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = stepSummary + if (!rule.isPinVisible) " • Pin Tutup" else "",
+                            text = stepSummary + if (!rule.isPinVisible) " • Tutup" else "",
                             color = if (rule.isPinVisible) Color(0xFF94A3B8) else NeonOrange,
-                            fontSize = 8.sp,
+                            fontSize = 7.6.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
+                            .clip(RoundedCornerShape(5.dp))
                             .background(if (rule.isPinVisible) ruleColor.copy(alpha = 0.20f) else Color(0xFF334155))
-                            .border(0.7.dp, if (rule.isPinVisible) ruleColor else Color(0xFF475569), RoundedCornerShape(6.dp))
+                            .border(0.7.dp, if (rule.isPinVisible) ruleColor else Color(0xFF475569), RoundedCornerShape(5.dp))
                             .clickable { onTogglePinEye(rule) }
-                            .padding(horizontal = 5.dp, vertical = 5.dp),
+                            .padding(horizontal = 4.dp, vertical = 4.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = if (rule.isPinVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
                             contentDescription = if (rule.isPinVisible) "Tutup Mata Pin" else "Buka Mata Pin",
                             tint = if (rule.isPinVisible) ruleColor else Color(0xFF94A3B8),
-                            modifier = Modifier.size(13.dp)
+                            modifier = Modifier.size(12.dp)
                         )
                     }
                     ActionPillButton(if (rule.enabled) "ON" else "OFF", if (rule.enabled) EmeraldGreen else Color(0xFF64748B)) {
                         onToggleRule(rule)
                     }
                     ActionPillButton("▶", EmeraldGreen) { onTestRule(rule) }
+                    ActionPillButton("⧉", NeonPurple) { onDuplicateRule(rule) }
                     ActionPillButton("✎", NeonCyan) { onEditRule(rule) }
                     ConfirmDeleteActionPill(text = "✕") { onDeleteRule(rule) }
                 }
@@ -540,6 +555,7 @@ private fun DropdownConceptEditor(
     onSelectStepPin: (String?) -> Unit,
     onSaveDraftOnly: (UniversalTriggerRule) -> Unit,
     onSave: (UniversalTriggerRule) -> Unit,
+    onDuplicateConcept: (UniversalTriggerRule) -> Unit,
     onCancel: () -> Unit,
     onDragExternalStepPin: (UniversalTriggerRule, String?) -> Unit,
     onTestNow: (UniversalTriggerRule) -> Unit,
@@ -557,6 +573,7 @@ private fun DropdownConceptEditor(
     var fineNudge by remember { mutableStateOf(true) }
 
     var draftEnableVisualCooldown by remember(rule.id) { mutableStateOf(rule.enableVisualCooldownWait) }
+    var draftCooldownTargetStepId by remember(rule.id) { mutableStateOf(rule.cooldownTargetStepId) }
     var draftCooldownWidthRatio by remember(rule.id) { mutableStateOf(rule.cooldownAreaWidthRatio.coerceIn(0.025f, 0.45f)) }
     var draftCooldownHeightRatio by remember(rule.id) { mutableStateOf(rule.cooldownAreaHeightRatio.coerceIn(0.025f, 0.55f)) }
     var draftCooldownOffsetX by remember(rule.id) { mutableStateOf(rule.cooldownAreaOffsetX.coerceIn(-0.30f, 0.30f)) }
@@ -569,7 +586,7 @@ private fun DropdownConceptEditor(
         mutableStateOf(rule.actionSequence)
     }
 
-    // Sinkronkan perubahan pin/media eksternal (misal geser pin di layar atau hasil photo/audio picker)
+    // Sinkronkan perubahan pin/media eksternal (geser pin di layar atau hasil photo/audio picker)
     LaunchedEffect(rule.actionSequence) {
         val byId = rule.actionSequence.associateBy { it.id }
         draftSteps = draftSteps.map { local ->
@@ -581,6 +598,7 @@ private fun DropdownConceptEditor(
                     paramValue = if (
                         local.actionType == ActionType.SIMULATED_CLICK ||
                         local.actionType == ActionType.CUSTOM_IMAGE ||
+                        local.actionType == ActionType.MEME_OVERLAY ||
                         local.actionType == ActionType.PLAY_SOUND ||
                         local.actionType == ActionType.CUSTOM_BACKSOUND
                     ) {
@@ -602,6 +620,7 @@ private fun DropdownConceptEditor(
     var showColorDrop by remember { mutableStateOf(false) }
     var showConditionDrop by remember { mutableStateOf(false) }
     var showAddMenu by remember(rule.id) { mutableStateOf(isNewEmpty) }
+    var showMoreAddMenu by remember(rule.id) { mutableStateOf(false) }
 
     val buildRuleWithSteps: (List<UniversalActionStep>) -> UniversalTriggerRule = { list ->
         val normalized = list.map { s ->
@@ -690,6 +709,7 @@ private fun DropdownConceptEditor(
             enableCooldown = cd > 0L,
             cooldownMs = cd,
             enableVisualCooldownWait = draftEnableVisualCooldown,
+            cooldownTargetStepId = draftCooldownTargetStepId,
             cooldownAreaWidthRatio = draftCooldownWidthRatio.coerceIn(0.025f, 0.45f),
             cooldownAreaHeightRatio = draftCooldownHeightRatio.coerceIn(0.025f, 0.55f),
             cooldownAreaOffsetX = draftCooldownOffsetX.coerceIn(-0.30f, 0.30f),
@@ -755,6 +775,28 @@ private fun DropdownConceptEditor(
                 durationMs = 1500L,
                 executionMode = ExecutionMode.SEQUENTIAL
             )
+            ActionType.MEME_OVERLAY -> UniversalActionStep(
+                enabled = true,
+                stepName = "",
+                actionType = ActionType.MEME_OVERLAY,
+                paramValue = "",
+                secondaryValue = "MEME {user}!",
+                durationMs = 2500L,
+                posX = bx,
+                posY = by,
+                executionMode = ExecutionMode.PARALLEL
+            )
+            ActionType.PROFILE_OVERLAY -> UniversalActionStep(
+                enabled = true,
+                stepName = "",
+                actionType = ActionType.PROFILE_OVERLAY,
+                paramValue = "{user}",
+                secondaryValue = "Gift {gift} x{qty}",
+                durationMs = 2800L,
+                posX = 0.50f,
+                posY = 0.22f,
+                executionMode = ExecutionMode.PARALLEL
+            )
             ActionType.CUSTOM_IMAGE -> UniversalActionStep(
                 enabled = true,
                 stepName = "",
@@ -766,12 +808,75 @@ private fun DropdownConceptEditor(
                 posY = by,
                 executionMode = ExecutionMode.PARALLEL
             )
+            ActionType.TEXT_OVERLAY, ActionType.SHOW_OVERLAY -> UniversalActionStep(
+                enabled = true,
+                stepName = "",
+                actionType = type,
+                paramValue = "{user} • {gift} x{qty}",
+                secondaryValue = "{source}",
+                durationMs = 2500L,
+                posX = 0.50f,
+                posY = 0.25f,
+                executionMode = ExecutionMode.PARALLEL
+            )
+            ActionType.ANIMATION -> UniversalActionStep(
+                enabled = true,
+                stepName = "",
+                actionType = ActionType.ANIMATION,
+                paramValue = "BOUNCE",
+                secondaryValue = "{user}!",
+                durationMs = 2200L,
+                posX = 0.50f,
+                posY = 0.35f,
+                executionMode = ExecutionMode.PARALLEL
+            )
+            ActionType.TIER_OVERLAY -> UniversalActionStep(
+                enabled = true,
+                stepName = "",
+                actionType = ActionType.TIER_OVERLAY,
+                paramValue = "VIP • {user}",
+                secondaryValue = "{gift} ({coins} koin)",
+                durationMs = 2800L,
+                posX = 0.50f,
+                posY = 0.22f,
+                executionMode = ExecutionMode.PARALLEL
+            )
             ActionType.PLAY_SOUND -> UniversalActionStep(
                 enabled = true,
                 stepName = "",
                 actionType = ActionType.PLAY_SOUND,
                 paramValue = "CHIME",
                 executionMode = ExecutionMode.PARALLEL
+            )
+            ActionType.RANDOM_SELECTION -> UniversalActionStep(
+                enabled = true,
+                stepName = "",
+                actionType = ActionType.RANDOM_SELECTION,
+                paramValue = "Serang|Recall|Emote|Kabur",
+                durationMs = 2200L,
+                posX = 0.50f,
+                posY = 0.28f,
+                executionMode = ExecutionMode.SEQUENTIAL
+            )
+            ActionType.VOLUME_CONTROL -> UniversalActionStep(
+                enabled = true,
+                stepName = "",
+                actionType = ActionType.VOLUME_CONTROL,
+                paramValue = "80",
+                executionMode = ExecutionMode.SEQUENTIAL
+            )
+            ActionType.HIDE_OVERLAY -> UniversalActionStep(
+                enabled = true,
+                stepName = "",
+                actionType = ActionType.HIDE_OVERLAY,
+                paramValue = "ALL",
+                executionMode = ExecutionMode.SEQUENTIAL
+            )
+            ActionType.STOP_SOUND -> UniversalActionStep(
+                enabled = true,
+                stepName = "",
+                actionType = ActionType.STOP_SOUND,
+                executionMode = ExecutionMode.SEQUENTIAL
             )
             else -> UniversalActionStep(actionType = type, executionMode = ExecutionMode.SEQUENTIAL)
         }
@@ -780,13 +885,14 @@ private fun DropdownConceptEditor(
         draftSteps = next
         expandedStepId = newStep.id
         showAddMenu = false
+        showMoreAddMenu = false
         onSaveDraftOnly(buildRuleWithSteps(next))
         if (type == ActionType.SIMULATED_CLICK || type == ActionType.SIMULATED_SWIPE) {
             onSelectStepPin(newStep.id)
         }
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         // Header aksi cepat konsep
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -795,25 +901,26 @@ private fun DropdownConceptEditor(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.clickable { showColorDrop = !showColorDrop }
             ) {
                 Box(
                     modifier = Modifier
-                        .size(16.dp)
+                        .size(15.dp)
                         .clip(CircleShape)
                         .background(Color(draftColorHex))
                         .border(1.dp, Color.White.copy(alpha = 0.7f), CircleShape)
                 )
-                Text("Warna ▾", color = Color(0xFF94A3B8), fontSize = 8.5.sp, fontWeight = FontWeight.SemiBold)
+                Text("Warna ▾", color = Color(0xFF94A3B8), fontSize = 8.sp, fontWeight = FontWeight.SemiBold)
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                 TextChip(
                     label = if (draftPinVisible) "👁" else "🙈",
                     bg = if (draftPinVisible) Color(0xFF0E7490) else Color(0xFF475569),
                     fg = Color.White
                 ) { draftPinVisible = !draftPinVisible }
                 TextChip("▶ Tes", EmeraldGreen, Color.Black) { onTestNow(buildRule()) }
+                TextChip("⧉ Duplikat", NeonCyan, Color.Black) { onDuplicateConcept(buildRule()) }
                 if (hasTouchPins) {
                     TextChip("📍 Pin", NeonPurple, Color.White) {
                         val targetStep = draftSteps.firstOrNull {
@@ -1001,10 +1108,30 @@ private fun DropdownConceptEditor(
                                 onSaveDraftOnly(buildRuleWithSteps(next))
                             }
                         }
+                        ActionPillButton("⧉", NeonPurple) {
+                            val isTouch = step.actionType == ActionType.SIMULATED_CLICK || step.actionType == ActionType.SIMULATED_SWIPE
+                            val nx = if (isTouch && step.posX != null) (step.posX + 0.04f).coerceIn(0.05f, 0.95f) else step.posX
+                            val ny = if (isTouch && step.posY != null) (step.posY - 0.04f).coerceIn(0.05f, 0.95f) else step.posY
+                            val cloned = step.copy(
+                                id = java.util.UUID.randomUUID().toString(),
+                                posX = nx,
+                                posY = ny,
+                                paramValue = if (step.actionType == ActionType.SIMULATED_CLICK && nx != null && ny != null) {
+                                    String.format(Locale.US, "%.3f,%.3f", nx, ny)
+                                } else {
+                                    step.paramValue
+                                }
+                            )
+                            val next = draftSteps.toMutableList().apply { add(idx + 1, cloned) }
+                            draftSteps = next
+                            expandedStepId = cloned.id
+                            onSaveDraftOnly(buildRuleWithSteps(next))
+                        }
                         ConfirmDeleteActionPill(text = "✕") {
                             val next = draftSteps.filterNot { it.id == step.id }
                             draftSteps = next
                             if (expandedStepId == step.id) expandedStepId = next.firstOrNull()?.id
+                            if (draftCooldownTargetStepId == step.id) draftCooldownTargetStepId = null
                             onSaveDraftOnly(buildRuleWithSteps(next))
                         }
                     }
@@ -1014,12 +1141,34 @@ private fun DropdownConceptEditor(
                             draftSteps = draftSteps.map { if (it.id == step.id) transform(it) else it }
                         }
 
-                        ComfortableInput(
-                            label = "Nama Langkah (opsional, mis. Skill 1 / Ulti)",
-                            value = step.stepName,
-                            onValueChange = { raw -> updateCurrentStep { it.copy(stepName = raw) } },
-                            onFocusChange = onKeyboardFocusChanged
-                        )
+                        var stepDelayDraft by remember(step.id, step.delayMs) {
+                            mutableStateOf(step.delayMs.toString())
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            ComfortableInput(
+                                label = "Nama Langkah",
+                                value = step.stepName,
+                                onValueChange = { raw -> updateCurrentStep { it.copy(stepName = raw) } },
+                                onFocusChange = onKeyboardFocusChanged,
+                                modifier = Modifier.weight(1.35f)
+                            )
+                            if (step.actionType != ActionType.DELAY && step.actionType != ActionType.WAIT) {
+                                ComfortableInput(
+                                    label = "Delay(ms)",
+                                    value = stepDelayDraft,
+                                    onValueChange = { raw ->
+                                        val digits = raw.filter(Char::isDigit).take(5)
+                                        stepDelayDraft = digits
+                                        digits.toLongOrNull()?.let { v ->
+                                            updateCurrentStep { it.copy(delayMs = v.coerceIn(0L, 60_000L)) }
+                                        }
+                                    },
+                                    keyboardType = KeyboardType.Number,
+                                    onFocusChange = onKeyboardFocusChanged,
+                                    modifier = Modifier.weight(0.65f)
+                                )
+                            }
+                        }
 
                         when (step.actionType) {
                             ActionType.SIMULATED_CLICK, ActionType.SIMULATED_SWIPE -> {
@@ -1421,54 +1570,96 @@ private fun DropdownConceptEditor(
                                 }
                             }
 
-                            ActionType.CUSTOM_IMAGE, ActionType.SHOW_OVERLAY, ActionType.TEXT_OVERLAY -> {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    if (step.paramValue.startsWith("file://") || step.paramValue.startsWith("content://")) {
-                                        AsyncImage(
-                                            model = step.paramValue,
-                                            contentDescription = "Overlay Preview",
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier.size(32.dp).clip(RoundedCornerShape(6.dp)).border(0.8.dp, NeonCyan, RoundedCornerShape(6.dp))
-                                        )
-                                    }
-                                    Button(
-                                        onClick = {
-                                            onSaveDraftOnly(buildRule())
-                                            FloatingPickerBridge.launch(
-                                                context = context,
-                                                mode = FloatingPickerMode.PICK_IMAGE,
-                                                requestKey = "${FloatingPickerProxyActivity.PREFIX_RULE_IMAGE}${rule.id}::${step.id}"
-                                            )
-                                        },
-                                        colors = ButtonDefaults.buttonColors(containerColor = NeonPurple),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                                        modifier = Modifier.weight(1f).height(30.dp)
+                            ActionType.MEME_OVERLAY, ActionType.CUSTOM_IMAGE, ActionType.PROFILE_OVERLAY,
+                            ActionType.TEXT_OVERLAY, ActionType.SHOW_OVERLAY, ActionType.ANIMATION,
+                            ActionType.TIER_OVERLAY -> {
+                                val isMemeOrCustomImage = step.actionType == ActionType.MEME_OVERLAY ||
+                                    step.actionType == ActionType.CUSTOM_IMAGE
+                                val isProfileOverlay = step.actionType == ActionType.PROFILE_OVERLAY
+                                val isAnimation = step.actionType == ActionType.ANIMATION
+
+                                if (isMemeOrCustomImage) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(14.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(
-                                            if (step.paramValue.isBlank()) "Upload Gambar" else "Ganti Gambar",
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
+                                        if (step.paramValue.startsWith("file://") ||
+                                            step.paramValue.startsWith("content://") ||
+                                            step.paramValue.startsWith("http")
+                                        ) {
+                                            AsyncImage(
+                                                model = step.paramValue,
+                                                contentDescription = "Preview Foto Meme",
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier
+                                                    .size(28.dp)
+                                                    .clip(RoundedCornerShape(5.dp))
+                                                    .border(0.8.dp, NeonCyan, RoundedCornerShape(5.dp))
+                                            )
+                                        }
+                                        Button(
+                                            onClick = {
+                                                onSaveDraftOnly(buildRule())
+                                                FloatingPickerBridge.launch(
+                                                    context = context,
+                                                    mode = FloatingPickerMode.PICK_IMAGE,
+                                                    requestKey = "${FloatingPickerProxyActivity.PREFIX_RULE_IMAGE}${rule.id}::${step.id}"
+                                                )
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = NeonPurple),
+                                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                            modifier = Modifier.weight(1f).height(28.dp)
+                                        ) {
+                                            Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(13.dp))
+                                            Spacer(modifier = Modifier.width(3.dp))
+                                            Text(
+                                                if (step.paramValue.isBlank()) "Upload Foto Meme" else "Ganti Foto",
+                                                fontSize = 8.5.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                        if (step.paramValue.isNotBlank()) {
+                                            ConfirmDeleteTextChip(label = "Hapus") {
+                                                updateCurrentStep { it.copy(paramValue = "") }
+                                            }
+                                        }
                                     }
-                                    if (step.paramValue.isNotBlank()) {
-                                        ConfirmDeleteTextChip(label = "Hapus") {
-                                            updateCurrentStep { it.copy(paramValue = "") }
+                                } else if (isProfileOverlay) {
+                                    Text(
+                                        text = "👤 Menampilkan foto profil pengirim gift/interaksi otomatis (fallback inisial bila offline).",
+                                        color = NeonCyan,
+                                        fontSize = 7.6.sp
+                                    )
+                                } else if (isAnimation) {
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                                    ) {
+                                        listOf("BOUNCE", "SHAKE", "PULSE", "FLASH").forEach { anim ->
+                                            SelectPill(anim, step.paramValue.equals(anim, ignoreCase = true)) {
+                                                updateCurrentStep { it.copy(paramValue = anim) }
+                                            }
                                         }
                                     }
                                 }
+
                                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    if (!isMemeOrCustomImage && !isAnimation) {
+                                        ComfortableInput(
+                                            label = if (isProfileOverlay) "Judul ({user})" else "Teks ({user}/{gift})",
+                                            value = step.paramValue,
+                                            onValueChange = { raw -> updateCurrentStep { it.copy(paramValue = raw) } },
+                                            onFocusChange = onKeyboardFocusChanged,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
                                     ComfortableInput(
-                                        label = "Teks (opsional)",
+                                        label = if (isMemeOrCustomImage) "Caption (opsional)" else "Subjudul",
                                         value = step.secondaryValue,
                                         onValueChange = { raw -> updateCurrentStep { it.copy(secondaryValue = raw) } },
                                         onFocusChange = onKeyboardFocusChanged,
-                                        modifier = Modifier.weight(1.3f)
+                                        modifier = Modifier.weight(1f)
                                     )
                                     ComfortableInput(
                                         label = "Durasi(ms)",
@@ -1479,64 +1670,56 @@ private fun DropdownConceptEditor(
                                         },
                                         keyboardType = KeyboardType.Number,
                                         onFocusChange = onKeyboardFocusChanged,
-                                        modifier = Modifier.weight(0.7f)
+                                        modifier = Modifier.weight(0.65f)
                                     )
                                 }
-                                // Pengatur Ukuran Overlay Visual (40% .. 300%) + Posisi Cepat
+
                                 val curScale = step.overlayScale.coerceIn(0.35f, 3.0f)
+                                val curX = (step.posX ?: rule.overlayPosX).coerceIn(0.05f, 0.95f)
+                                val curY = (step.posY ?: rule.overlayPosY).coerceIn(0.05f, 0.95f)
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clip(RoundedCornerShape(6.dp))
+                                        .clip(RoundedCornerShape(5.dp))
                                         .background(DarkBackground.copy(alpha = 0.7f))
-                                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                                        .padding(horizontal = 5.dp, vertical = 3.dp),
                                     verticalArrangement = Arrangement.spacedBy(3.dp)
                                 ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = "Ukuran Overlay: ${(curScale * 100).roundToInt()}%",
-                                            color = NeonCyan,
-                                            fontSize = 8.5.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                                            SelectPill("Kecil", curScale < 0.75f) {
-                                                updateCurrentStep { it.copy(overlayScale = 0.55f) }
-                                            }
-                                            SelectPill("Sedang", curScale in 0.75f..1.3f) {
-                                                updateCurrentStep { it.copy(overlayScale = 1.0f) }
-                                            }
-                                            SelectPill("Besar", curScale > 1.3f && curScale < 2.1f) {
-                                                updateCurrentStep { it.copy(overlayScale = 1.65f) }
-                                            }
-                                            SelectPill("Jumbo", curScale >= 2.1f) {
-                                                updateCurrentStep { it.copy(overlayScale = 2.4f) }
-                                            }
-                                        }
-                                    }
-                                    Slider(
-                                        value = curScale,
-                                        onValueChange = { next ->
-                                            updateCurrentStep { it.copy(overlayScale = next.coerceIn(0.35f, 3.0f)) }
+                                    PrecisionStepperBar(
+                                        label = "Ukuran",
+                                        valueText = "${(curScale * 100).roundToInt()}%",
+                                        accent = NeonCyan,
+                                        onDecrementCoarse = {
+                                            updateCurrentStep { it.copy(overlayScale = (curScale - 0.25f).coerceIn(0.35f, 3.0f)) }
                                         },
-                                        valueRange = 0.35f..3.0f,
-                                        colors = SliderDefaults.colors(
-                                            thumbColor = NeonCyan,
-                                            activeTrackColor = NeonCyan
-                                        ),
-                                        modifier = Modifier.fillMaxWidth().height(22.dp)
+                                        onDecrement = {
+                                            updateCurrentStep { it.copy(overlayScale = (curScale - 0.05f).coerceIn(0.35f, 3.0f)) }
+                                        },
+                                        onIncrement = {
+                                            updateCurrentStep { it.copy(overlayScale = (curScale + 0.05f).coerceIn(0.35f, 3.0f)) }
+                                        },
+                                        onIncrementCoarse = {
+                                            updateCurrentStep { it.copy(overlayScale = (curScale + 0.25f).coerceIn(0.35f, 3.0f)) }
+                                        }
                                     )
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text("Posisi:", color = Color(0xFF94A3B8), fontSize = 8.sp)
-                                        val curY = step.posY ?: rule.overlayPosY
+                                        SelectPill("55%", curScale < 0.75f) {
+                                            updateCurrentStep { it.copy(overlayScale = 0.55f) }
+                                        }
+                                        SelectPill("100%", curScale in 0.75f..1.3f) {
+                                            updateCurrentStep { it.copy(overlayScale = 1.0f) }
+                                        }
+                                        SelectPill("165%", curScale > 1.3f && curScale < 2.1f) {
+                                            updateCurrentStep { it.copy(overlayScale = 1.65f) }
+                                        }
+                                        SelectPill("240%", curScale >= 2.1f) {
+                                            updateCurrentStep { it.copy(overlayScale = 2.4f) }
+                                        }
+                                        Spacer(modifier = Modifier.weight(1f))
                                         SelectPill("Atas", curY < 0.35f) {
                                             updateCurrentStep { it.copy(posX = 0.5f, posY = 0.22f) }
                                         }
@@ -1547,11 +1730,76 @@ private fun DropdownConceptEditor(
                                             updateCurrentStep { it.copy(posX = 0.5f, posY = 0.78f) }
                                         }
                                     }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        PrecisionStepperBar(
+                                            label = "X",
+                                            valueText = "${(curX * 100).roundToInt()}%",
+                                            accent = NeonOrange,
+                                            onDecrement = {
+                                                updateCurrentStep { it.copy(posX = (curX - 0.04f).coerceIn(0.05f, 0.95f)) }
+                                            },
+                                            onIncrement = {
+                                                updateCurrentStep { it.copy(posX = (curX + 0.04f).coerceIn(0.05f, 0.95f)) }
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        PrecisionStepperBar(
+                                            label = "Y",
+                                            valueText = "${(curY * 100).roundToInt()}%",
+                                            accent = NeonPurple,
+                                            onDecrement = {
+                                                updateCurrentStep { it.copy(posY = (curY - 0.04f).coerceIn(0.05f, 0.95f)) }
+                                            },
+                                            onIncrement = {
+                                                updateCurrentStep { it.copy(posY = (curY + 0.04f).coerceIn(0.05f, 0.95f)) }
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
                                 }
                             }
 
+                            ActionType.RANDOM_SELECTION -> {
+                                ComfortableInput(
+                                    label = "Pilihan Acak (pisahkan dengan | )",
+                                    value = step.paramValue,
+                                    onValueChange = { raw -> updateCurrentStep { it.copy(paramValue = raw) } },
+                                    onFocusChange = onKeyboardFocusChanged
+                                )
+                            }
+
+                            ActionType.VOLUME_CONTROL -> {
+                                val vol = step.paramValue.trim().toIntOrNull()?.coerceIn(0, 100) ?: 80
+                                PrecisionStepperBar(
+                                    label = "Volume SFX",
+                                    valueText = "$vol%",
+                                    accent = NeonCyan,
+                                    onDecrementCoarse = { updateCurrentStep { it.copy(paramValue = "${(vol - 20).coerceIn(0, 100)}") } },
+                                    onDecrement = { updateCurrentStep { it.copy(paramValue = "${(vol - 5).coerceIn(0, 100)}") } },
+                                    onIncrement = { updateCurrentStep { it.copy(paramValue = "${(vol + 5).coerceIn(0, 100)}") } },
+                                    onIncrementCoarse = { updateCurrentStep { it.copy(paramValue = "${(vol + 20).coerceIn(0, 100)}") } }
+                                )
+                            }
+
+                            ActionType.HIDE_OVERLAY -> {
+                                ComfortableInput(
+                                    label = "Filter Hapus Overlay (ALL = semua)",
+                                    value = step.paramValue,
+                                    onValueChange = { raw -> updateCurrentStep { it.copy(paramValue = raw) } },
+                                    onFocusChange = onKeyboardFocusChanged
+                                )
+                            }
+
+                            ActionType.STOP_SOUND -> {
+                                Text(
+                                    text = "🔇 Menghentikan sound effect yang sedang diputar sebelum langkah berikutnya.",
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 7.8.sp
+                                )
+                            }
+
                             ActionType.PLAY_SOUND, ActionType.CUSTOM_BACKSOUND -> {
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                     listOf("CHIME", "ALERT", "FANFARE", "BASS").forEach { preset ->
                                         SelectPill(preset, step.paramValue.equals(preset, ignoreCase = true)) {
                                             updateCurrentStep { it.copy(paramValue = preset) }
@@ -1559,7 +1807,7 @@ private fun DropdownConceptEditor(
                                         }
                                     }
                                 }
-                                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                     Button(
                                         onClick = {
                                             onSaveDraftOnly(buildRule())
@@ -1570,12 +1818,12 @@ private fun DropdownConceptEditor(
                                             )
                                         },
                                         colors = ButtonDefaults.buttonColors(containerColor = NeonCyan),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                                        modifier = Modifier.weight(1f).height(32.dp)
+                                        contentPadding = PaddingValues(horizontal = 7.dp, vertical = 2.dp),
+                                        modifier = Modifier.weight(1f).height(28.dp)
                                     ) {
-                                        Icon(Icons.Default.AudioFile, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Upload MP3/SFX", color = Color.Black, fontSize = 9.sp, fontWeight = FontWeight.Black)
+                                        Icon(Icons.Default.AudioFile, contentDescription = null, tint = Color.Black, modifier = Modifier.size(13.dp))
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                        Text("Upload MP3/SFX", color = Color.Black, fontSize = 8.5.sp, fontWeight = FontWeight.Black)
                                     }
                                     if (step.paramValue.isNotBlank()) {
                                         TextChip("🔊 Tes", EmeraldGreen, Color.Black) { onPreviewSound(step.paramValue) }
@@ -1583,12 +1831,19 @@ private fun DropdownConceptEditor(
                                 }
                             }
 
-                            else -> Unit
+                            else -> {
+                                ComfortableInput(
+                                    label = step.actionType.defaultParamHint.ifBlank { "Parameter" },
+                                    value = step.paramValue,
+                                    onValueChange = { raw -> updateCurrentStep { it.copy(paramValue = raw) } },
+                                    onFocusChange = onKeyboardFocusChanged
+                                )
+                            }
                         }
 
                         // Opsi urutan eksekusi langkah (Berurutan vs Bersamaan)
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             SelectPill("Berurutan", step.executionMode == ExecutionMode.SEQUENTIAL) {
@@ -1603,16 +1858,16 @@ private fun DropdownConceptEditor(
             }
         }
 
-        // Dropdown + Tambah Koreografi Dinamis
+        // Dropdown + Tambah Koreografi Dinamis (Bisa Klik/Geser/Foto Meme/Profil/Custom)
         OutlinedButton(
             onClick = { showAddMenu = !showAddMenu },
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-            modifier = Modifier.fillMaxWidth().height(34.dp)
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+            modifier = Modifier.fillMaxWidth().height(30.dp)
         ) {
             Text(
-                text = if (showAddMenu) "✕ Tutup Pilihan Koreografi" else "+ Tambah Koreografi (Klik / Geser / Home→Game / Lainnya)",
+                text = if (showAddMenu) "✕ Tutup Pilihan Koreografi" else "+ Tambah Koreografi (Klik / Geser / Meme / Profil / Lainnya)",
                 color = EmeraldGreen,
-                fontSize = 9.sp,
+                fontSize = 8.6.sp,
                 fontWeight = FontWeight.Black,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -1620,20 +1875,41 @@ private fun DropdownConceptEditor(
         }
 
         if (showAddMenu) {
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                TextChip("👆 Klik ML", EmeraldGreen, Color.Black) { appendDynamicStep(ActionType.SIMULATED_CLICK) }
-                TextChip("👉 Geser ML", NeonCyan, Color.Black) { appendDynamicStep(ActionType.SIMULATED_SWIPE) }
-                TextChip("⏱️ Jeda", Color(0xFF334155), Color.White) { appendDynamicStep(ActionType.DELAY) }
-                TextChip("🏠 Home→Game", NeonOrange, Color.Black) { appendDynamicStep(ActionType.HOME_BACK_GAME) }
-                TextChip("🖼️ Overlay", NeonPurple, Color.White) { appendDynamicStep(ActionType.CUSTOM_IMAGE) }
-                TextChip("🔊 Sound", Color(0xFF0E7490), Color.White) { appendDynamicStep(ActionType.PLAY_SOUND) }
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    TextChip("👆 Klik ML", EmeraldGreen, Color.Black) { appendDynamicStep(ActionType.SIMULATED_CLICK) }
+                    TextChip("👉 Geser ML", NeonCyan, Color.Black) { appendDynamicStep(ActionType.SIMULATED_SWIPE) }
+                    TextChip("⏱️ Jeda", Color(0xFF334155), Color.White) { appendDynamicStep(ActionType.DELAY) }
+                    TextChip("🏠 Home→Game", NeonOrange, Color.Black) { appendDynamicStep(ActionType.HOME_BACK_GAME) }
+                    TextChip("😂 Foto Meme", NeonPurple, Color.White) { appendDynamicStep(ActionType.MEME_OVERLAY) }
+                    TextChip("👤 Foto Profil", Color(0xFF0284C7), Color.White) { appendDynamicStep(ActionType.PROFILE_OVERLAY) }
+                    TextChip("🔊 Sound", Color(0xFF0E7490), Color.White) { appendDynamicStep(ActionType.PLAY_SOUND) }
+                    TextChip(if (showMoreAddMenu) "▲ Custom" else "+ Custom", Color(0xFF1E293B), Color.White) {
+                        showMoreAddMenu = !showMoreAddMenu
+                    }
+                }
+                if (showMoreAddMenu) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        TextChip("📝 Teks", Color(0xFF1E293B), NeonCyan) { appendDynamicStep(ActionType.TEXT_OVERLAY) }
+                        TextChip("✨ Animasi", Color(0xFF1E293B), EmeraldGreen) { appendDynamicStep(ActionType.ANIMATION) }
+                        TextChip("🏆 Tier VIP", Color(0xFF1E293B), NeonOrange) { appendDynamicStep(ActionType.TIER_OVERLAY) }
+                        TextChip("🖼️ Banner", Color(0xFF1E293B), Color.White) { appendDynamicStep(ActionType.SHOW_OVERLAY) }
+                        TextChip("🎲 Random", Color(0xFF1E293B), Color.White) { appendDynamicStep(ActionType.RANDOM_SELECTION) }
+                        TextChip("🎛️ Volume", Color(0xFF1E293B), Color.White) { appendDynamicStep(ActionType.VOLUME_CONTROL) }
+                        TextChip("🧹 Hide", Color(0xFF1E293B), Color.White) { appendDynamicStep(ActionType.HIDE_OVERLAY) }
+                        TextChip("🔇 Stop Sfx", Color(0xFF1E293B), Color.White) { appendDynamicStep(ActionType.STOP_SOUND) }
+                    }
+                }
             }
         }
 
-        // Dropdown Visual Skill Cooldown Reader MLBB (baca angka detik cooldown dari layar game)
+        // Dropdown Visual Skill Cooldown Reader MLBB (tombol presisi tanpa loading)
         SubDropdownHeader(
             title = "⏱️ Cooldown Skill ML: ${if (draftEnableVisualCooldown) "AUTO TUNGGU AKTIF" else "OFF"}",
             open = showCooldownScanSection
@@ -1645,15 +1921,15 @@ private fun DropdownConceptEditor(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(7.dp))
+                    .clip(RoundedCornerShape(6.dp))
                     .background(DarkSurface)
                     .border(
                         0.8.dp,
                         if (draftEnableVisualCooldown) NeonCyan.copy(alpha = 0.7f) else DarkCardBorder,
-                        RoundedCornerShape(7.dp)
+                        RoundedCornerShape(6.dp)
                     )
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(5.dp)
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1664,13 +1940,13 @@ private fun DropdownConceptEditor(
                         Text(
                             text = "Baca Angka Cooldown MLBB",
                             color = Color.White,
-                            fontSize = 9.5.sp,
+                            fontSize = 9.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Jika area tombol masih ada angka detik cooldown, antrian otomatis menunggu hingga skill aktif (kosong angka).",
+                            text = "Menunggu hingga angka detik cooldown di area skill hilang lalu mengeksekusi koreografi.",
                             color = Color(0xFF94A3B8),
-                            fontSize = 7.8.sp
+                            fontSize = 7.4.sp
                         )
                     }
                     Switch(
@@ -1684,63 +1960,94 @@ private fun DropdownConceptEditor(
                 }
 
                 if (draftEnableVisualCooldown) {
-                    Text(
-                        text = "Lebar Scan: ${(draftCooldownWidthRatio * 100).roundToInt()}%  •  Tinggi Scan: ${(draftCooldownHeightRatio * 100).roundToInt()}%",
-                        color = NeonCyan,
-                        fontSize = 8.4.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Slider(
-                            value = draftCooldownWidthRatio.coerceIn(0.025f, 0.35f),
-                            onValueChange = {
-                                draftCooldownWidthRatio = it.coerceIn(0.025f, 0.35f)
+                    val touchCandidates = draftSteps.filter {
+                        it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
+                    }
+                    if (touchCandidates.size > 1) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Pin Scan:", color = Color(0xFF94A3B8), fontSize = 7.8.sp)
+                            touchCandidates.forEachIndexed { tIdx, tStep ->
+                                val selected = draftCooldownTargetStepId == tStep.id ||
+                                    (draftCooldownTargetStepId.isNullOrBlank() && tIdx == 0)
+                                val label = tStep.stepName.trim().ifBlank { "#${tIdx + 1}" }
+                                SelectPill(label.take(10), selected) {
+                                    draftCooldownTargetStepId = tStep.id
+                                    onSaveDraftOnly(buildRule())
+                                }
+                            }
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        PrecisionStepperBar(
+                            label = "Lebar",
+                            valueText = "${(draftCooldownWidthRatio * 100).roundToInt()}%",
+                            accent = NeonCyan,
+                            onDecrement = {
+                                draftCooldownWidthRatio = (draftCooldownWidthRatio - 0.01f).coerceIn(0.025f, 0.35f)
                                 onSaveDraftOnly(buildRule())
                             },
-                            valueRange = 0.025f..0.35f,
-                            colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan),
-                            modifier = Modifier.weight(1f).height(20.dp)
+                            onIncrement = {
+                                draftCooldownWidthRatio = (draftCooldownWidthRatio + 0.01f).coerceIn(0.025f, 0.35f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            modifier = Modifier.weight(1f)
                         )
-                        Slider(
-                            value = draftCooldownHeightRatio.coerceIn(0.025f, 0.45f),
-                            onValueChange = {
-                                draftCooldownHeightRatio = it.coerceIn(0.025f, 0.45f)
+                        PrecisionStepperBar(
+                            label = "Tinggi",
+                            valueText = "${(draftCooldownHeightRatio * 100).roundToInt()}%",
+                            accent = EmeraldGreen,
+                            onDecrement = {
+                                draftCooldownHeightRatio = (draftCooldownHeightRatio - 0.01f).coerceIn(0.025f, 0.45f)
                                 onSaveDraftOnly(buildRule())
                             },
-                            valueRange = 0.025f..0.45f,
-                            colors = SliderDefaults.colors(thumbColor = EmeraldGreen, activeTrackColor = EmeraldGreen),
-                            modifier = Modifier.weight(1f).height(20.dp)
+                            onIncrement = {
+                                draftCooldownHeightRatio = (draftCooldownHeightRatio + 0.01f).coerceIn(0.025f, 0.45f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            modifier = Modifier.weight(1f)
                         )
                     }
-                    Text(
-                        text = "Geser Box X: ${(draftCooldownOffsetX * 100).roundToInt()}%  •  Geser Box Y: ${(draftCooldownOffsetY * 100).roundToInt()}%",
-                        color = Color(0xFFCBD5E1),
-                        fontSize = 8.2.sp
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Slider(
-                            value = draftCooldownOffsetX.coerceIn(-0.25f, 0.25f),
-                            onValueChange = {
-                                draftCooldownOffsetX = it.coerceIn(-0.25f, 0.25f)
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        PrecisionStepperBar(
+                            label = "Geser X",
+                            valueText = "${(draftCooldownOffsetX * 100).roundToInt()}%",
+                            accent = NeonOrange,
+                            decLabel = "◀",
+                            incLabel = "▶",
+                            onDecrement = {
+                                draftCooldownOffsetX = (draftCooldownOffsetX - 0.01f).coerceIn(-0.25f, 0.25f)
                                 onSaveDraftOnly(buildRule())
                             },
-                            valueRange = -0.25f..0.25f,
-                            colors = SliderDefaults.colors(thumbColor = NeonOrange, activeTrackColor = NeonOrange),
-                            modifier = Modifier.weight(1f).height(20.dp)
+                            onIncrement = {
+                                draftCooldownOffsetX = (draftCooldownOffsetX + 0.01f).coerceIn(-0.25f, 0.25f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            modifier = Modifier.weight(1f)
                         )
-                        Slider(
-                            value = draftCooldownOffsetY.coerceIn(-0.25f, 0.25f),
-                            onValueChange = {
-                                draftCooldownOffsetY = it.coerceIn(-0.25f, 0.25f)
+                        PrecisionStepperBar(
+                            label = "Geser Y",
+                            valueText = "${(draftCooldownOffsetY * 100).roundToInt()}%",
+                            accent = NeonPurple,
+                            decLabel = "▲",
+                            incLabel = "▼",
+                            onDecrement = {
+                                draftCooldownOffsetY = (draftCooldownOffsetY - 0.01f).coerceIn(-0.25f, 0.25f)
                                 onSaveDraftOnly(buildRule())
                             },
-                            valueRange = -0.25f..0.25f,
-                            colors = SliderDefaults.colors(thumbColor = NeonPurple, activeTrackColor = NeonPurple),
-                            modifier = Modifier.weight(1f).height(20.dp)
+                            onIncrement = {
+                                draftCooldownOffsetY = (draftCooldownOffsetY + 0.01f).coerceIn(-0.25f, 0.25f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            modifier = Modifier.weight(1f)
                         )
                     }
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         ComfortableInput(
@@ -1758,7 +2065,7 @@ private fun DropdownConceptEditor(
                             draftCooldownOffsetY = 0f
                             onSaveDraftOnly(buildRule())
                         }
-                        TextChip("🔍 Tes Scan", NeonCyan, Color.Black) {
+                        TextChip("🔍 Scan Sekali", NeonCyan, Color.Black) {
                             onInspectCooldown(buildRule()) { result ->
                                 cooldownScanTestMsg = result
                             }
@@ -1768,7 +2075,7 @@ private fun DropdownConceptEditor(
                         Text(
                             text = "Hasil Scan: $msg",
                             color = EmeraldGreen,
-                            fontSize = 8.4.sp,
+                            fontSize = 8.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -1776,21 +2083,21 @@ private fun DropdownConceptEditor(
             }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             OutlinedButton(
                 onClick = onCancel,
-                contentPadding = PaddingValues(vertical = 4.dp),
-                modifier = Modifier.weight(1f).height(34.dp)
+                contentPadding = PaddingValues(vertical = 2.dp),
+                modifier = Modifier.weight(1f).height(30.dp)
             ) {
-                Text("Tutup", fontSize = 10.sp, color = Color(0xFFCBD5E1))
+                Text("Tutup", fontSize = 9.5.sp, color = Color(0xFFCBD5E1))
             }
             Button(
                 onClick = { onSave(buildRule()) },
                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen),
-                contentPadding = PaddingValues(vertical = 4.dp),
-                modifier = Modifier.weight(1f).height(34.dp)
+                contentPadding = PaddingValues(vertical = 2.dp),
+                modifier = Modifier.weight(1f).height(30.dp)
             ) {
-                Text("Simpan", fontSize = 10.sp, color = Color.Black, fontWeight = FontWeight.Black)
+                Text("Simpan", fontSize = 9.5.sp, color = Color.Black, fontWeight = FontWeight.Black)
             }
         }
     }
@@ -1812,8 +2119,14 @@ private fun shortStepLabel(step: UniversalActionStep): String {
         }
         ActionType.DELAY, ActionType.WAIT -> "Jeda ${step.durationMs}ms"
         ActionType.HOME_BACK_GAME -> "Home ${step.durationMs}ms→Game"
-        ActionType.CUSTOM_IMAGE, ActionType.SHOW_OVERLAY -> "Overlay"
-        ActionType.PLAY_SOUND, ActionType.CUSTOM_BACKSOUND -> "Sound (${soundLabel(step.paramValue).take(10)})"
+        ActionType.MEME_OVERLAY -> "😂 Meme"
+        ActionType.PROFILE_OVERLAY -> "👤 Profil"
+        ActionType.CUSTOM_IMAGE, ActionType.SHOW_OVERLAY -> "🖼️ Overlay"
+        ActionType.TEXT_OVERLAY -> "📝 Teks"
+        ActionType.ANIMATION -> "✨ Animasi"
+        ActionType.TIER_OVERLAY -> "🏆 Tier VIP"
+        ActionType.RANDOM_SELECTION -> "🎲 Random"
+        ActionType.PLAY_SOUND, ActionType.CUSTOM_BACKSOUND -> "Sound (${soundLabel(step.paramValue).take(8)})"
         else -> step.actionType.displayName
     }
 }
@@ -1823,66 +2136,153 @@ private fun shortStepLabel(step: UniversalActionStep): String {
 private fun DropdownTestSection(
     engine: UniversalTriggerEngine,
     rules: List<UniversalTriggerRule>,
+    activePinRuleId: String?,
     isEngineEnabled: Boolean,
     isA11yEnabled: Boolean,
     history: List<TriggerExecutionRecord>
 ) {
     val context = LocalContext.current
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    var selectedTestRuleId by remember(rules, activePinRuleId) {
+        mutableStateOf(
+            activePinRuleId?.takeIf { id -> rules.any { it.id == id } }
+                ?: rules.firstOrNull()?.id
+        )
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Text(
             text = when {
-                rules.isEmpty() -> "⚠️ Belum ada konsep! Buat dulu di dropdown Konsep & Koreografi."
+                rules.isEmpty() -> "⚠️ Belum ada konsep! Buat dulu di tab Konsep."
                 !isEngineEnabled -> "⚠️ Engine dijeda (⏸) — ketuk ⚡ di menu horizontal atas."
                 !isA11yEnabled -> "⚠️ Aksesibilitas OFF — tap ML & Home→Game butuh Aksesibilitas ON."
-                else -> "Ketuk event untuk tes semua konsep terkait:"
+                else -> "Pilih 1 konsep untuk tes terisolasi, atau simulasi event live:"
             },
             color = if (rules.isEmpty() || !isEngineEnabled || !isA11yEnabled) NeonOrange else Color(0xFFCBD5E1),
-            fontSize = 9.sp
+            fontSize = 8.5.sp
         )
 
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp)
-        ) {
-            listOf(
-                UniversalTriggerSource.LIKE to "❤️ Like",
-                UniversalTriggerSource.GIFT to "🎁 Gift",
-                UniversalTriggerSource.CHAT to "💬 Chat",
-                UniversalTriggerSource.FOLLOW to "➕ Follow",
-                UniversalTriggerSource.SHARE to "↗️ Share",
-                UniversalTriggerSource.MEMBER_JOIN to "👋 Join"
-            ).forEach { (src, label) ->
-                TextChip(label, NeonCyan.copy(alpha = 0.25f), Color.White) {
-                    val matching = rules.filter { it.triggerSource == src }
-                    if (matching.isEmpty()) {
-                        Toast.makeText(context, "Belum ada konsep untuk ${src.displayName}", Toast.LENGTH_SHORT).show()
-                    } else {
-                        if (!isEngineEnabled) engine.setEngineEnabled(true)
-                        matching.forEachIndexed { idx, r ->
-                            engine.forceTestRuleNow(
-                                ruleId = r.id,
-                                customEvent = LiveInteractionEvent(
-                                    source = src,
-                                    senderName = "Tester",
-                                    quantity = if (r.enableMinimumQuantity) r.minimumQuantity else 1,
-                                    diamonds = 10,
-                                    giftName = "Rose",
-                                    text = "Tes ${src.displayName}"
-                                )
-                            ) { result ->
-                                if (idx == 0) {
-                                    android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                        Toast.makeText(context, "${r.triggerName}: $result", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            }
+        if (rules.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(DarkSurface)
+                    .border(0.7.dp, EmeraldGreen.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                    .padding(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "1️⃣ Tes 1 Konsep Spesifik (Hanya menjalankan konsep dipilih):",
+                    color = EmeraldGreen,
+                    fontSize = 8.2.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    rules.forEachIndexed { idx, r ->
+                        SelectPill(
+                            label = "#${idx + 1} ${r.triggerName.take(14)}",
+                            selected = selectedTestRuleId == r.id
+                        ) {
+                            selectedTestRuleId = r.id
                         }
                     }
                 }
+                val chosenRule = rules.firstOrNull { it.id == selectedTestRuleId } ?: rules.first()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(
+                        onClick = {
+                            engine.forceTestRuleNow(
+                                ruleId = chosenRule.id,
+                                customEvent = LiveInteractionEvent(
+                                    source = chosenRule.triggerSource,
+                                    senderName = "SultanTester",
+                                    quantity = if (chosenRule.enableMinimumQuantity) chosenRule.minimumQuantity else 1,
+                                    diamonds = 10,
+                                    giftName = "Rose",
+                                    text = "Tes ${chosenRule.triggerName}"
+                                )
+                            ) { result ->
+                                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                    Toast.makeText(context, "${chosenRule.triggerName}: $result", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        modifier = Modifier.weight(1f).height(28.dp)
+                    ) {
+                        Text(
+                            text = "▶ Tes \"${chosenRule.triggerName.take(18)}\"",
+                            color = Color.Black,
+                            fontSize = 8.8.sp,
+                            fontWeight = FontWeight.Black,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    TextChip("⏹ Stop", Color(0xFF991B1B), Color.White) {
+                        engine.emergencyStop()
+                        Toast.makeText(context, "⏹ Dihentikan", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
-            TextChip("⏹ Stop", Color(0xFF991B1B), Color.White) {
-                engine.emergencyStop()
-                Toast.makeText(context, "⏹ Dihentikan", Toast.LENGTH_SHORT).show()
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(DarkSurface)
+                .border(0.7.dp, NeonCyan.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                .padding(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = "2️⃣ Simulasi Event Live (Sesuai saklar ON/OFF & syarat):",
+                color = NeonCyan,
+                fontSize = 8.2.sp,
+                fontWeight = FontWeight.Bold
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                listOf(
+                    UniversalTriggerSource.LIKE to "❤️ Like",
+                    UniversalTriggerSource.GIFT to "🎁 Gift",
+                    UniversalTriggerSource.CHAT to "💬 Chat",
+                    UniversalTriggerSource.FOLLOW to "➕ Follow",
+                    UniversalTriggerSource.SHARE to "↗️ Share",
+                    UniversalTriggerSource.MEMBER_JOIN to "👋 Join"
+                ).forEach { (src, label) ->
+                    TextChip(label, NeonCyan.copy(alpha = 0.25f), Color.White) {
+                        if (!isEngineEnabled) engine.setEngineEnabled(true)
+                        val records = engine.dispatchEvent(
+                            LiveInteractionEvent(
+                                id = "sim_${src.name}_${System.currentTimeMillis()}",
+                                source = src,
+                                senderName = "PenontonSim",
+                                quantity = 1,
+                                diamonds = 10,
+                                giftName = "Rose",
+                                text = "Simulasi ${src.displayName}"
+                            )
+                        )
+                        val msg = if (records.isEmpty()) {
+                            "Tidak ada konsep aktif untuk ${src.displayName}"
+                        } else {
+                            "${src.displayName}: ${records.size} konsep diproses"
+                        }
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
         }
 
@@ -1892,8 +2292,8 @@ private fun DropdownTestSection(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(6.dp))
                     .background(DarkSurface)
-                    .padding(6.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp)
+                    .padding(5.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 history.take(4).forEach { rec ->
                     val col = when (rec.status) {
@@ -1904,7 +2304,7 @@ private fun DropdownTestSection(
                     Text(
                         text = "• ${rec.ruleName}: ${rec.detail}",
                         color = col,
-                        fontSize = 8.5.sp,
+                        fontSize = 8.sp,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -1930,22 +2330,22 @@ private fun DropdownLiveSettingsSection(
     val relayStatus by receiver.connectionStatus.collectAsState()
     var hostInput by remember(relayConfig.serverHost) { mutableStateOf(relayConfig.serverHost) }
 
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(7.dp))
+                .clip(RoundedCornerShape(6.dp))
                 .background(DarkSurface)
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 7.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("Aksesibilitas Tap MLBB", color = Color.White, fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
+                Text("Aksesibilitas Tap MLBB", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                 Text(
                     text = if (isA11yEnabled) "Aktif — siap sentuh & Home" else "Mati — ketuk Aktifkan",
                     color = if (isA11yEnabled) EmeraldGreen else NeonOrange,
-                    fontSize = 8.5.sp
+                    fontSize = 8.sp
                 )
             }
             if (!isA11yEnabled) {
@@ -1953,17 +2353,17 @@ private fun DropdownLiveSettingsSection(
                     MlbbGestureAccessibilityService.openAccessibilitySettings(context)
                 }
             } else {
-                Text("✓ ON", color = EmeraldGreen, fontSize = 9.5.sp, fontWeight = FontWeight.Black)
+                Text("✓ ON", color = EmeraldGreen, fontSize = 9.sp, fontWeight = FontWeight.Black)
             }
         }
 
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(7.dp))
+                .clip(RoundedCornerShape(6.dp))
                 .background(DarkSurface)
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp)
+                .padding(horizontal = 7.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             val isConn = relayStatus == ConnectionStatus.CONNECTED
             Row(
@@ -1974,7 +2374,7 @@ private fun DropdownLiveSettingsSection(
                 Text(
                     text = "Termux (${if (isConn) "Terhubung" else relayStatus.name})",
                     color = if (isConn) EmeraldGreen else Color(0xFFCBD5E1),
-                    fontSize = 9.5.sp,
+                    fontSize = 9.sp,
                     fontWeight = FontWeight.Bold
                 )
                 TextChip(
@@ -1989,7 +2389,7 @@ private fun DropdownLiveSettingsSection(
                 }
             }
             Row(
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 ComfortableInput(
@@ -2010,13 +2410,13 @@ private fun DropdownLiveSettingsSection(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(7.dp))
+                .clip(RoundedCornerShape(6.dp))
                 .background(DarkSurface)
-                .padding(horizontal = 8.dp, vertical = 5.dp),
+                .padding(horizontal = 7.dp, vertical = 3.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text("⏸️ Jeda Sentuhan Sementara", color = Color.White, fontSize = 9.5.sp, fontWeight = FontWeight.SemiBold)
+            Text("⏸️ Jeda Sentuhan Sementara", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
             Switch(
                 checked = uiState.isMlbbMatchActive,
                 onCheckedChange = { engine.setMlbbMatchActive(it) },
@@ -2027,18 +2427,23 @@ private fun DropdownLiveSettingsSection(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(7.dp))
+                .clip(RoundedCornerShape(6.dp))
                 .background(DarkSurface)
-                .padding(horizontal = 8.dp, vertical = 5.dp),
+                .border(
+                    0.7.dp,
+                    if (uiState.blockTouchDuringChallenge) Color(0xFFDC2626).copy(alpha = 0.7f) else DarkCardBorder,
+                    RoundedCornerShape(6.dp)
+                )
+                .padding(horizontal = 7.dp, vertical = 3.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("🔒 Blokir Sentuhan Layar Saat Challenge", color = Color.White, fontSize = 9.2.sp, fontWeight = FontWeight.Bold)
+                Text("🔒 Blokir Sentuhan Layar Saat Challenge", color = Color.White, fontSize = 8.8.sp, fontWeight = FontWeight.Bold)
                 Text(
-                    text = "Sentuhan manual diblokir selama challenge berjalan.",
+                    text = "Sentuhan manual terkunci penuh selama challenge & antrian aktif.",
                     color = Color(0xFF94A3B8),
-                    fontSize = 7.6.sp
+                    fontSize = 7.3.sp
                 )
             }
             Switch(
@@ -2048,14 +2453,14 @@ private fun DropdownLiveSettingsSection(
             )
         }
 
-        // Pengaturan Ukuran & Transparansi Overlay Floating
+        // Pengaturan Ukuran & Transparansi Overlay Floating (dengan Tombol Presisi)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(7.dp))
+                .clip(RoundedCornerShape(6.dp))
                 .background(DarkSurface)
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+                .padding(horizontal = 7.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
             val cfg = uiState.floatingConfig
             Row(
@@ -2064,12 +2469,12 @@ private fun DropdownLiveSettingsSection(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Ukuran HUD: ${(cfg.hudScale * 100).roundToInt()}%",
+                    text = "Preset HUD:",
                     color = NeonCyan,
-                    fontSize = 9.sp,
+                    fontSize = 8.5.sp,
                     fontWeight = FontWeight.Bold
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                     SelectPill("Mini", cfg.hudScale < 0.85f) {
                         engine.updateFloatingConfig { it.copy(hudScale = 0.72f, panelWidthRatio = 0.45f) }
                     }
@@ -2081,48 +2486,41 @@ private fun DropdownLiveSettingsSection(
                     }
                 }
             }
-            Slider(
-                value = cfg.hudScale.coerceIn(0.65f, 1.35f),
-                onValueChange = { next ->
-                    engine.updateFloatingConfig { it.copy(hudScale = next.coerceIn(0.65f, 1.35f)) }
+            PrecisionStepperBar(
+                label = "Ukuran HUD",
+                valueText = "${(cfg.hudScale * 100).roundToInt()}%",
+                accent = NeonCyan,
+                onDecrement = {
+                    engine.updateFloatingConfig { it.copy(hudScale = (it.hudScale - 0.05f).coerceIn(0.65f, 1.35f)) }
                 },
-                valueRange = 0.65f..1.35f,
-                colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan),
-                modifier = Modifier.fillMaxWidth().height(22.dp)
+                onIncrement = {
+                    engine.updateFloatingConfig { it.copy(hudScale = (it.hudScale + 0.05f).coerceIn(0.65f, 1.35f)) }
+                }
             )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Lebar Menu: ${(cfg.panelWidthRatio * 100).roundToInt()}%  •  Transparansi: ${(cfg.hudOpacity * 100).roundToInt()}%",
-                    color = Color(0xFFCBD5E1),
-                    fontSize = 8.2.sp
-                )
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Slider(
-                    value = cfg.panelWidthRatio.coerceIn(0.38f, 0.98f),
-                    onValueChange = { next ->
-                        engine.updateFloatingConfig { it.copy(panelWidthRatio = next.coerceIn(0.38f, 0.98f)) }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                PrecisionStepperBar(
+                    label = "Lebar",
+                    valueText = "${(cfg.panelWidthRatio * 100).roundToInt()}%",
+                    accent = EmeraldGreen,
+                    onDecrement = {
+                        engine.updateFloatingConfig { it.copy(panelWidthRatio = (it.panelWidthRatio - 0.04f).coerceIn(0.38f, 0.98f)) }
                     },
-                    valueRange = 0.38f..0.98f,
-                    colors = SliderDefaults.colors(thumbColor = EmeraldGreen, activeTrackColor = EmeraldGreen),
-                    modifier = Modifier.weight(1f).height(22.dp)
-                )
-                Slider(
-                    value = cfg.hudOpacity.coerceIn(0.35f, 1.0f),
-                    onValueChange = { next ->
-                        engine.updateFloatingConfig { it.copy(hudOpacity = next.coerceIn(0.35f, 1.0f)) }
+                    onIncrement = {
+                        engine.updateFloatingConfig { it.copy(panelWidthRatio = (it.panelWidthRatio + 0.04f).coerceIn(0.38f, 0.98f)) }
                     },
-                    valueRange = 0.35f..1.0f,
-                    colors = SliderDefaults.colors(thumbColor = NeonOrange, activeTrackColor = NeonOrange),
-                    modifier = Modifier.weight(1f).height(22.dp)
+                    modifier = Modifier.weight(1f)
+                )
+                PrecisionStepperBar(
+                    label = "Opacity",
+                    valueText = "${(cfg.hudOpacity * 100).roundToInt()}%",
+                    accent = NeonOrange,
+                    onDecrement = {
+                        engine.updateFloatingConfig { it.copy(hudOpacity = (it.hudOpacity - 0.05f).coerceIn(0.35f, 1.0f)) }
+                    },
+                    onIncrement = {
+                        engine.updateFloatingConfig { it.copy(hudOpacity = (it.hudOpacity + 0.05f).coerceIn(0.35f, 1.0f)) }
+                    },
+                    modifier = Modifier.weight(1f)
                 )
             }
         }
@@ -2130,14 +2528,14 @@ private fun DropdownLiveSettingsSection(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(7.dp))
+                .clip(RoundedCornerShape(6.dp))
                 .background(DarkSurface)
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 7.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("💾 Backup JSON Semua", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text("💾 Backup JSON Semua", color = Color.White, fontSize = 8.8.sp, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextChip("📤 Ekspor", EmeraldGreen, Color.Black) {
                     val json = FullAppBackupManager.exportFullBackupJson(context)
                     FloatingPickerBridge.launch(
@@ -2158,32 +2556,32 @@ private fun DropdownLiveSettingsSection(
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(5.dp)
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             OutlinedButton(
                 onClick = onResetHudPosition,
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-                modifier = Modifier.weight(1f).height(34.dp)
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                modifier = Modifier.weight(1f).height(30.dp)
             ) {
-                Text("↺ Reset", color = NeonCyan, fontSize = 9.2.sp, fontWeight = FontWeight.Bold)
+                Text("↺ Reset", color = NeonCyan, fontSize = 8.8.sp, fontWeight = FontWeight.Bold)
             }
             OutlinedButton(
                 onClick = {
                     engine.updateFloatingConfig { it.copy(hudCollapsed = true) }
                     onKeyboardFocusChanged(false)
                 },
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-                modifier = Modifier.weight(1f).height(34.dp)
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                modifier = Modifier.weight(1f).height(30.dp)
             ) {
-                Text("— Ciutkan", color = NeonOrange, fontSize = 9.2.sp, fontWeight = FontWeight.Bold)
+                Text("— Ciutkan", color = NeonOrange, fontSize = 8.8.sp, fontWeight = FontWeight.Bold)
             }
             Button(
                 onClick = onHideFloatingForLive,
                 colors = ButtonDefaults.buttonColors(containerColor = NeonPurple),
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-                modifier = Modifier.weight(1f).height(34.dp)
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                modifier = Modifier.weight(1f).height(30.dp)
             ) {
-                Text("👁️ Live Bersih", color = Color.White, fontSize = 9.2.sp, fontWeight = FontWeight.Black)
+                Text("👁️ Live Bersih", color = Color.White, fontSize = 8.8.sp, fontWeight = FontWeight.Black)
             }
         }
     }
@@ -2199,6 +2597,74 @@ private fun soundLabel(spec: String): String {
 }
 
 @Composable
+fun PrecisionStepperBar(
+    label: String,
+    valueText: String,
+    accent: Color = NeonCyan,
+    decLabel: String = "−",
+    incLabel: String = "+",
+    onDecrementCoarse: (() -> Unit)? = null,
+    onDecrement: () -> Unit,
+    onIncrement: () -> Unit,
+    onIncrementCoarse: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(5.dp))
+            .background(DarkBackground.copy(alpha = 0.8f))
+            .border(0.6.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(5.dp))
+            .padding(horizontal = 5.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Text(
+            text = "$label:",
+            color = Color(0xFF94A3B8),
+            fontSize = 7.6.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        if (onDecrementCoarse != null) {
+            StepperTinyButton("$decLabel$decLabel", accent, onDecrementCoarse)
+        }
+        StepperTinyButton(decLabel, accent, onDecrement)
+        Text(
+            text = valueText,
+            color = accent,
+            fontSize = 8.2.sp,
+            fontWeight = FontWeight.Black,
+            maxLines = 1
+        )
+        StepperTinyButton(incLabel, accent, onIncrement)
+        if (onIncrementCoarse != null) {
+            StepperTinyButton("$incLabel$incLabel", accent, onIncrementCoarse)
+        }
+    }
+}
+
+@Composable
+private fun StepperTinyButton(
+    symbol: String,
+    accent: Color,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .defaultMinSize(minWidth = 22.dp, minHeight = 22.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(accent.copy(alpha = 0.18f))
+            .border(0.6.dp, accent.copy(alpha = 0.7f), RoundedCornerShape(4.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 5.dp, vertical = 2.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(symbol, color = accent, fontSize = 9.sp, fontWeight = FontWeight.Black)
+    }
+}
+
+@Composable
 private fun SubDropdownHeader(title: String, open: Boolean, onClick: () -> Unit) {
     Row(
         modifier = Modifier
@@ -2207,14 +2673,14 @@ private fun SubDropdownHeader(title: String, open: Boolean, onClick: () -> Unit)
             .background(DarkSurface)
             .border(0.7.dp, if (open) NeonCyan.copy(alpha = 0.7f) else DarkCardBorder, RoundedCornerShape(6.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .padding(horizontal = 7.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = title,
             color = if (open) NeonCyan else Color(0xFFCBD5E1),
-            fontSize = 9.sp,
+            fontSize = 8.6.sp,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -2224,7 +2690,7 @@ private fun SubDropdownHeader(title: String, open: Boolean, onClick: () -> Unit)
             imageVector = if (open) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
             contentDescription = null,
             tint = if (open) NeonCyan else Color(0xFF94A3B8),
-            modifier = Modifier.size(15.dp)
+            modifier = Modifier.size(14.dp)
         )
     }
 }
@@ -2233,14 +2699,14 @@ private fun SubDropdownHeader(title: String, open: Boolean, onClick: () -> Unit)
 private fun ActionPillButton(text: String, tint: Color, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(5.dp))
             .background(tint.copy(alpha = 0.18f))
-            .border(0.7.dp, tint.copy(alpha = 0.7f), RoundedCornerShape(6.dp))
+            .border(0.7.dp, tint.copy(alpha = 0.7f), RoundedCornerShape(5.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 7.dp, vertical = 5.dp),
+            .padding(horizontal = 5.dp, vertical = 3.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text(text, color = tint, fontSize = 10.sp, fontWeight = FontWeight.Black)
+        Text(text, color = tint, fontSize = 9.2.sp, fontWeight = FontWeight.Black)
     }
 }
 
@@ -2253,13 +2719,13 @@ private fun TextChip(
 ) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(5.dp))
             .background(bg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 9.dp, vertical = 6.dp),
+            .padding(horizontal = 7.dp, vertical = 4.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text(label, color = fg, fontSize = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+        Text(label, color = fg, fontSize = 8.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
     }
 }
 
@@ -2267,14 +2733,14 @@ private fun TextChip(
 private fun SelectPill(label: String, selected: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(5.dp))
             .background(if (selected) NeonCyan.copy(alpha = 0.24f) else DarkSurface)
-            .border(0.7.dp, if (selected) NeonCyan else DarkCardBorder, RoundedCornerShape(6.dp))
+            .border(0.7.dp, if (selected) NeonCyan else DarkCardBorder, RoundedCornerShape(5.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 5.dp),
+            .padding(horizontal = 6.dp, vertical = 3.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text(label, color = if (selected) NeonCyan else Color(0xFFCBD5E1), fontSize = 8.8.sp, fontWeight = FontWeight.Bold)
+        Text(label, color = if (selected) NeonCyan else Color(0xFFCBD5E1), fontSize = 8.2.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -2292,22 +2758,22 @@ private fun ComfortableInput(
     val keyboardController = LocalSoftwareKeyboardController.current
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(5.dp))
             .background(DarkSurface)
-            .border(0.7.dp, DarkCardBorder, RoundedCornerShape(6.dp))
+            .border(0.7.dp, DarkCardBorder, RoundedCornerShape(5.dp))
             .clickable {
                 onFocusChange(true)
                 focusRequester.requestFocus()
                 keyboardController?.show()
             }
-            .padding(horizontal = 7.dp, vertical = 5.dp)
+            .padding(horizontal = 6.dp, vertical = 3.dp)
     ) {
-        Text(label, color = Color(0xFF94A3B8), fontSize = 7.5.sp, maxLines = 1)
+        Text(label, color = Color(0xFF94A3B8), fontSize = 7.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
             singleLine = true,
-            textStyle = TextStyle(color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold),
+            textStyle = TextStyle(color = Color.White, fontSize = 9.5.sp, fontWeight = FontWeight.Bold),
             cursorBrush = SolidColor(NeonCyan),
             keyboardOptions = KeyboardOptions(
                 keyboardType = keyboardType,
@@ -2322,7 +2788,7 @@ private fun ComfortableInput(
             ),
             modifier = Modifier
                 .fillMaxWidth()
-                .defaultMinSize(minHeight = 20.dp)
+                .defaultMinSize(minHeight = 16.dp)
                 .focusRequester(focusRequester)
                 .onFocusChanged {
                     onFocusChange(it.isFocused)

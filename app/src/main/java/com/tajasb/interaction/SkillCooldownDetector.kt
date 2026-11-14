@@ -16,6 +16,7 @@ import kotlin.coroutines.resume
 sealed class SkillCooldownScanResult {
     data object Ready : SkillCooldownScanResult()
     data class OnCooldown(val secondsRemaining: Double, val rawText: String) : SkillCooldownScanResult()
+    data class RateLimited(val retryAfterMs: Long) : SkillCooldownScanResult()
     data class Unavailable(val reason: String) : SkillCooldownScanResult()
 }
 
@@ -41,28 +42,56 @@ object SkillCooldownDetector {
 
         val adjX = (centerNormX + offsetX).coerceIn(0.02f, 0.98f)
         val adjY = (centerNormY + offsetY).coerceIn(0.02f, 0.98f)
-        val crop = svc.captureScreenRegionBitmap(
+        val capture = svc.captureScreenRegionResult(
             centerNormX = adjX,
             centerNormY = adjY,
             widthRatio = widthRatio,
             heightRatio = heightRatio
-        ) ?: return SkillCooldownScanResult.Unavailable("Gagal menangkap area layar skill")
+        )
+        val crop = when (capture) {
+            is ScreenCaptureResult.Success -> capture.bitmap
+            is ScreenCaptureResult.RateLimited -> return SkillCooldownScanResult.RateLimited(capture.waitMs)
+            is ScreenCaptureResult.Error -> return SkillCooldownScanResult.Unavailable(capture.reason)
+        }
 
         return try {
-            val upscaled = prepareHighContrastBitmap(crop)
+            // Pass 1: Isolasi angka terang (putih/kuning MLBB) jadi hitam pekat di atas latar putih dengan padding
+            val isolated = prepareBrightDigitsOnWhiteBitmap(crop)
             try {
-                val rawText = recognizeText(upscaled)
-                val sec = CooldownOcrParser.extractCooldownSeconds(rawText)
-                if (sec != null && sec > 0.05) {
-                    SkillCooldownScanResult.OnCooldown(sec, rawText.trim())
-                } else {
-                    SkillCooldownScanResult.Ready
+                val raw1 = recognizeText(isolated)
+                val sec1 = CooldownOcrParser.extractCooldownSeconds(raw1)
+                if (sec1 != null && sec1 > 0.05) {
+                    return SkillCooldownScanResult.OnCooldown(sec1, raw1.trim())
                 }
             } finally {
-                if (upscaled !== crop && !upscaled.isRecycled) {
-                    upscaled.recycle()
-                }
+                if (!isolated.isRecycled) isolated.recycle()
             }
+
+            // Pass 2: Upscaled high-contrast padded grayscale
+            val contrast = prepareHighContrastPaddedBitmap(crop)
+            try {
+                val raw2 = recognizeText(contrast)
+                val sec2 = CooldownOcrParser.extractCooldownSeconds(raw2)
+                if (sec2 != null && sec2 > 0.05) {
+                    return SkillCooldownScanResult.OnCooldown(sec2, raw2.trim())
+                }
+            } finally {
+                if (!contrast.isRecycled) contrast.recycle()
+            }
+
+            // Pass 3: Raw upscaled padded crop (tanpa filter berlebih, aman untuk angka tipis/berwarna)
+            val cleanPad = prepareRawPaddedBitmap(crop)
+            try {
+                val raw3 = recognizeText(cleanPad)
+                val sec3 = CooldownOcrParser.extractCooldownSeconds(raw3)
+                if (sec3 != null && sec3 > 0.05) {
+                    return SkillCooldownScanResult.OnCooldown(sec3, raw3.trim())
+                }
+            } finally {
+                if (!cleanPad.isRecycled) cleanPad.recycle()
+            }
+
+            SkillCooldownScanResult.Ready
         } catch (t: Throwable) {
             VcamDebugLogger.e("CooldownScan", "OCR scan failed: ${t.message}")
             SkillCooldownScanResult.Unavailable("Error OCR: ${t.message}")
@@ -71,17 +100,53 @@ object SkillCooldownDetector {
         }
     }
 
-    private fun prepareHighContrastBitmap(src: Bitmap): Bitmap {
-        val scale = if (src.width < 160 || src.height < 160) 3 else 2
-        val targetW = (src.width * scale).coerceAtLeast(120)
-        val targetH = (src.height * scale).coerceAtLeast(120)
-        val out = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+    /**
+     * Angka cooldown di Mobile Legends berwarna putih / kuning cerah di atas ikon skill yang digelapkan.
+     * Mengisolasi piksel terang menjadi hitam pekat di atas kanvas putih berpadding meningkatkan akurasi ML Kit drastis.
+     */
+    private fun prepareBrightDigitsOnWhiteBitmap(src: Bitmap): Bitmap {
+        val scale = if (src.width < 120 || src.height < 120) 4 else 3
+        val scaledW = (src.width * scale).coerceAtLeast(160)
+        val scaledH = (src.height * scale).coerceAtLeast(160)
+        val pad = 28
+        val scaled = Bitmap.createScaledBitmap(src, scaledW, scaledH, true)
+        val out = Bitmap.createBitmap(scaledW + pad * 2, scaledH + pad * 2, Bitmap.Config.ARGB_8888)
+        out.eraseColor(android.graphics.Color.WHITE)
+
+        val pixels = IntArray(scaledW * scaledH)
+        scaled.getPixels(pixels, 0, scaledW, 0, 0, scaledW, scaledH)
+        for (i in pixels.indices) {
+            val c = pixels[i]
+            val r = (c shr 16) and 0xFF
+            val g = (c shr 8) and 0xFF
+            val b = c and 0xFF
+            val luma = (r * 30 + g * 59 + b * 11) / 100
+            val isBrightWhite = luma >= 170
+            val isBrightGold = r >= 180 && g >= 145 && b <= 150
+            pixels[i] = if (isBrightWhite || isBrightGold) {
+                android.graphics.Color.BLACK
+            } else {
+                android.graphics.Color.WHITE
+            }
+        }
+        out.setPixels(pixels, 0, scaledW, pad, pad, scaledW, scaledH)
+        if (scaled !== src && !scaled.isRecycled) scaled.recycle()
+        return out
+    }
+
+    private fun prepareHighContrastPaddedBitmap(src: Bitmap): Bitmap {
+        val scale = if (src.width < 120 || src.height < 120) 3 else 2
+        val targetW = (src.width * scale).coerceAtLeast(140)
+        val targetH = (src.height * scale).coerceAtLeast(140)
+        val pad = 24
+        val out = Bitmap.createBitmap(targetW + pad * 2, targetH + pad * 2, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
+        canvas.drawColor(android.graphics.Color.BLACK)
         val cm = ColorMatrix(
             floatArrayOf(
-                1.6f, 0f, 0f, 0f, -45f,
-                0f, 1.6f, 0f, 0f, -45f,
-                0f, 0f, 1.6f, 0f, -45f,
+                1.5f, 0f, 0f, 0f, -30f,
+                0f, 1.5f, 0f, 0f, -30f,
+                0f, 0f, 1.5f, 0f, -30f,
                 0f, 0f, 0f, 1f, 0f
             )
         )
@@ -91,7 +156,25 @@ object SkillCooldownDetector {
         canvas.drawBitmap(
             src,
             android.graphics.Rect(0, 0, src.width, src.height),
-            android.graphics.Rect(0, 0, targetW, targetH),
+            android.graphics.Rect(pad, pad, pad + targetW, pad + targetH),
+            paint
+        )
+        return out
+    }
+
+    private fun prepareRawPaddedBitmap(src: Bitmap): Bitmap {
+        val scale = if (src.width < 120 || src.height < 120) 3 else 2
+        val targetW = (src.width * scale).coerceAtLeast(140)
+        val targetH = (src.height * scale).coerceAtLeast(140)
+        val pad = 24
+        val out = Bitmap.createBitmap(targetW + pad * 2, targetH + pad * 2, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(android.graphics.Color.DKGRAY)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        canvas.drawBitmap(
+            src,
+            android.graphics.Rect(0, 0, src.width, src.height),
+            android.graphics.Rect(pad, pad, pad + targetW, pad + targetH),
             paint
         )
         return out

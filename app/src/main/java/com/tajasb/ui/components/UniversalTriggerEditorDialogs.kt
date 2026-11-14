@@ -46,7 +46,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -293,29 +292,35 @@ fun FlexibleTriggerEditorOverlay(
                             }
                         }
                         Spacer(modifier = Modifier.height(4.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Slider(
-                                value = draft.overlayPosX,
-                                onValueChange = { updateDraftCoords(it, draft.overlayPosY) },
-                                valueRange = 0.05f..0.95f,
+                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                            PrecisionStepperBar(
+                                label = "X",
+                                valueText = "${(draft.overlayPosX * 100).roundToInt()}%",
+                                accent = NeonCyan,
+                                decLabel = "◀",
+                                incLabel = "▶",
+                                onDecrement = { updateDraftCoords(draft.overlayPosX - 0.03f, draft.overlayPosY) },
+                                onIncrement = { updateDraftCoords(draft.overlayPosX + 0.03f, draft.overlayPosY) },
                                 modifier = Modifier.weight(1f)
                             )
-                            Slider(
-                                value = draft.overlayPosY,
-                                onValueChange = { updateDraftCoords(draft.overlayPosX, it) },
-                                valueRange = 0.05f..0.95f,
+                            PrecisionStepperBar(
+                                label = "Y",
+                                valueText = "${(draft.overlayPosY * 100).roundToInt()}%",
+                                accent = NeonPurple,
+                                decLabel = "▲",
+                                incLabel = "▼",
+                                onDecrement = { updateDraftCoords(draft.overlayPosX, draft.overlayPosY - 0.03f) },
+                                onIncrement = { updateDraftCoords(draft.overlayPosX, draft.overlayPosY + 0.03f) },
                                 modifier = Modifier.weight(1f)
                             )
                         }
-                        Text(
-                            text = "Skala Overlay: ${String.format(java.util.Locale.US, "%.1fx", draft.overlayScale)}",
-                            color = Color.White,
-                            fontSize = 9.sp
-                        )
-                        Slider(
-                            value = draft.overlayScale,
-                            onValueChange = { draft = draft.copy(overlayScale = it.coerceIn(0.5f, 2.0f)) },
-                            valueRange = 0.5f..2.0f
+                        Spacer(modifier = Modifier.height(4.dp))
+                        PrecisionStepperBar(
+                            label = "Skala Overlay",
+                            valueText = String.format(java.util.Locale.US, "%.1fx", draft.overlayScale),
+                            accent = EmeraldGreen,
+                            onDecrement = { draft = draft.copy(overlayScale = (draft.overlayScale - 0.1f).coerceIn(0.5f, 2.0f)) },
+                            onIncrement = { draft = draft.copy(overlayScale = (draft.overlayScale + 0.1f).coerceIn(0.5f, 2.0f)) }
                         )
                     }
 
@@ -1145,13 +1150,13 @@ private fun ActionStepCard(
                 label = step.actionType.defaultParamHint,
                 modifier = Modifier.weight(1f)
             )
-            if (step.actionType == ActionType.CUSTOM_IMAGE) {
+            if (step.actionType == ActionType.CUSTOM_IMAGE || step.actionType == ActionType.MEME_OVERLAY) {
                 OutlinedButton(
                     onClick = onPickImage,
                     contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
                     modifier = Modifier.height(34.dp)
                 ) {
-                    Icon(Icons.Default.Image, contentDescription = "Pilih Gambar", modifier = Modifier.size(15.dp))
+                    Icon(Icons.Default.Image, contentDescription = "Pilih Foto Meme / Gambar", modifier = Modifier.size(15.dp))
                 }
             } else if (step.actionType == ActionType.PLAY_SOUND || step.actionType == ActionType.CUSTOM_BACKSOUND) {
                 OutlinedButton(
@@ -1162,6 +1167,14 @@ private fun ActionStepCard(
                     Icon(Icons.Default.AudioFile, contentDescription = "Pilih Audio", modifier = Modifier.size(15.dp))
                 }
             }
+        }
+
+        if (step.actionType == ActionType.PROFILE_OVERLAY) {
+            Text(
+                text = "👤 Otomatis menampilkan foto profil pengirim gift/interaksi (fallback inisial bila offline).",
+                color = NeonCyan,
+                fontSize = 7.8.sp
+            )
         }
 
         if (step.actionType.category == ActionCategory.VISUAL) {

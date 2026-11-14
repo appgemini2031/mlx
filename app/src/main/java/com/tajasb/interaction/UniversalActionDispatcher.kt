@@ -196,25 +196,37 @@ class UniversalActionDispatcher(
                 ActionType.CUSTOM_IMAGE,
                 ActionType.ANIMATION,
                 ActionType.TEXT_OVERLAY -> {
+                    val paramIsUri = isMediaUri(step.paramValue)
+                    val secondaryIsUri = isMediaUri(step.secondaryValue)
                     val titleText = when (step.actionType) {
                         ActionType.PROFILE_OVERLAY -> resolvedParam.ifBlank { "👤 ${event.senderName}" }
                         ActionType.TIER_OVERLAY -> resolvedParam.ifBlank { "🏅 TIER • ${event.senderName}" }
-                        ActionType.MEME_OVERLAY -> resolvedParam.ifBlank { "😂 MEME • ${event.senderName}" }
-                        ActionType.CUSTOM_IMAGE -> resolvedSecondary.trim()
+                        ActionType.MEME_OVERLAY -> if (paramIsUri) resolvedSecondary.trim() else resolvedParam.ifBlank { "😂 ${event.senderName}" }
+                        ActionType.CUSTOM_IMAGE -> if (paramIsUri) resolvedSecondary.trim() else resolvedParam.trim()
                         ActionType.ANIMATION -> resolvedParam.ifBlank { "✨ ANIMASI ${event.source.displayName.uppercase()}" }
                         else -> resolvedParam.ifBlank { "${event.senderName} (${event.source.displayName} x${event.quantity})" }
                     }
-                    val subText = if (step.actionType == ActionType.CUSTOM_IMAGE) {
-                        ""
-                    } else {
-                        resolvedSecondary.ifBlank { "${event.source.displayName} • x${event.quantity} • Total #$counterCount" }
+                    val subText = when (step.actionType) {
+                        ActionType.CUSTOM_IMAGE -> ""
+                        ActionType.MEME_OVERLAY -> if (paramIsUri || secondaryIsUri) "" else resolvedSecondary.ifBlank { "${event.source.displayName} • x${event.quantity}" }
+                        ActionType.PROFILE_OVERLAY -> resolvedSecondary.ifBlank { "${event.source.displayName} • x${event.quantity}" }
+                        else -> resolvedSecondary.ifBlank { "${event.source.displayName} • x${event.quantity} • Total #$counterCount" }
                     }
                     val anim = if (step.actionType == ActionType.ANIMATION) {
                         resolvedParam.uppercase().ifBlank { "PULSE" }
                     } else {
                         "PULSE"
                     }
-                    val imgUri = if (step.actionType == ActionType.CUSTOM_IMAGE) step.paramValue else event.avatarUrl
+                    val imgUri = when (step.actionType) {
+                        ActionType.CUSTOM_IMAGE -> step.paramValue.trim()
+                        ActionType.MEME_OVERLAY -> when {
+                            paramIsUri -> step.paramValue.trim()
+                            secondaryIsUri -> step.secondaryValue.trim()
+                            else -> ""
+                        }
+                        ActionType.PROFILE_OVERLAY -> event.avatarUrl.trim()
+                        else -> ""
+                    }
                     val targetX = (step.posX ?: rule.overlayPosX).coerceIn(0.05f, 0.95f)
                     val targetY = (step.posY ?: rule.overlayPosY).coerceIn(0.05f, 0.95f)
                     val targetScale = (if (step.overlayScale != 1.0f || rule.overlayScale == 1.0f) {
@@ -553,6 +565,14 @@ class UniversalActionDispatcher(
             .replace("{source}", event.source.displayName)
             .replace("{text}", event.text)
             .replace("{rule}", rule.triggerName)
+    }
+
+    private fun isMediaUri(raw: String): Boolean {
+        val clean = raw.trim().lowercase()
+        return clean.startsWith("content://") ||
+            clean.startsWith("file://") ||
+            clean.startsWith("http://") ||
+            clean.startsWith("https://")
     }
 
     private fun parseNormalizedCoords(

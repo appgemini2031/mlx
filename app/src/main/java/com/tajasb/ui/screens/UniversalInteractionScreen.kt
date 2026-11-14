@@ -33,6 +33,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AudioFile
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -40,10 +43,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -60,6 +62,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
@@ -70,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import coil.compose.AsyncImage
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardBorder
 import com.example.ui.theme.DarkSurface
@@ -79,6 +83,8 @@ import com.example.ui.theme.NeonOrange
 import com.example.ui.theme.NeonPurple
 import com.tajasb.interaction.ActionType
 import com.tajasb.interaction.ExecutionMode
+import com.tajasb.interaction.FloatingPickerBridge
+import com.tajasb.interaction.FloatingPickerMode
 import com.tajasb.interaction.FloatingTriggerOverlayService
 import com.tajasb.interaction.FullAppBackupManager
 import com.tajasb.interaction.InstalledAppInfo
@@ -89,9 +95,11 @@ import com.tajasb.interaction.UniversalTriggerEngine
 import com.tajasb.interaction.UniversalTriggerRule
 import com.tajasb.interaction.UniversalTriggerSource
 import com.tajasb.ui.components.ConfirmDeleteTextButton
+import com.tajasb.ui.components.PrecisionStepperBar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.roundToInt
 
 /**
@@ -495,24 +503,24 @@ fun UniversalInteractionScreen(
                                 .background(DarkBackground)
                                 .border(0.8.dp, accent.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
                                 .clickable { editingRuleInApp = rule }
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(22.dp)
+                                    .size(20.dp)
                                     .clip(CircleShape)
                                     .background(accent),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text("${idx + 1}", color = Color.Black, fontSize = 10.sp, fontWeight = FontWeight.Black)
+                                Text("${idx + 1}", color = Color.Black, fontSize = 9.5.sp, fontWeight = FontWeight.Black)
                             }
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = "${rule.triggerSource.displayName} → ${rule.triggerName}",
                                     color = Color.White,
-                                    fontSize = 11.sp,
+                                    fontSize = 10.5.sp,
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
@@ -520,23 +528,45 @@ fun UniversalInteractionScreen(
                                 Text(
                                     text = choreoSummary,
                                     color = Color(0xFF94A3B8),
-                                    fontSize = 9.sp,
+                                    fontSize = 8.5.sp,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
                             OutlinedButton(
-                                onClick = { editingRuleInApp = rule },
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                modifier = Modifier.testTag("edit_challenge_${rule.id}")
+                                onClick = {
+                                    engine.forceTestRuleNow(rule.id)
+                                    Toast.makeText(context, "▶ Menjalankan tes: ${rule.triggerName}", Toast.LENGTH_SHORT).show()
+                                },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                modifier = Modifier.height(30.dp).testTag("test_challenge_${rule.id}")
                             ) {
-                                Text("✎ Ubah", fontSize = 9.sp, color = NeonCyan, fontWeight = FontWeight.Bold)
+                                Text("▶", fontSize = 9.sp, color = EmeraldGreen, fontWeight = FontWeight.Black)
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    val copy = engine.duplicateRule(rule.id)
+                                    if (copy != null) {
+                                        Toast.makeText(context, "⧉ Duplikat dibuat: ${copy.triggerName}", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                modifier = Modifier.height(30.dp).testTag("duplicate_challenge_${rule.id}")
+                            ) {
+                                Text("⧉", fontSize = 9.sp, color = NeonPurple, fontWeight = FontWeight.Black)
+                            }
+                            OutlinedButton(
+                                onClick = { editingRuleInApp = rule },
+                                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 2.dp),
+                                modifier = Modifier.height(30.dp).testTag("edit_challenge_${rule.id}")
+                            ) {
+                                Text("✎", fontSize = 9.sp, color = NeonCyan, fontWeight = FontWeight.Bold)
                             }
                             ConfirmDeleteTextButton(
                                 label = "Hapus",
-                                fontSize = 9.sp,
-                                horizontalPadding = 8.dp,
-                                verticalPadding = 7.dp,
+                                fontSize = 8.5.sp,
+                                horizontalPadding = 7.dp,
+                                verticalPadding = 5.dp,
                                 modifier = Modifier.testTag("delete_challenge_${rule.id}")
                             ) {
                                 engine.deleteRule(rule.id)
@@ -698,6 +728,7 @@ fun UniversalInteractionScreen(
         editingRuleInApp?.let { targetRule ->
             EditChallengeAndChoreographyDialog(
                 rule = targetRule,
+                engine = engine,
                 onDismiss = { editingRuleInApp = null },
                 onSave = { updated ->
                     engine.addOrUpdateRule(updated)
@@ -715,16 +746,60 @@ fun UniversalInteractionScreen(
 @Composable
 private fun EditChallengeAndChoreographyDialog(
     rule: UniversalTriggerRule,
+    engine: UniversalTriggerEngine,
     onDismiss: () -> Unit,
     onSave: (UniversalTriggerRule) -> Unit
 ) {
+    val dlgContext = LocalContext.current
     var draftChallengeName by remember(rule.id) { mutableStateOf(rule.triggerName) }
     var draftSteps by remember(rule.id) { mutableStateOf(rule.actionSequence) }
     var draftEnableVisualCooldown by remember(rule.id) { mutableStateOf(rule.enableVisualCooldownWait) }
+    var draftCooldownTargetStepId by remember(rule.id) { mutableStateOf(rule.cooldownTargetStepId) }
     var draftCooldownWidth by remember(rule.id) { mutableStateOf(rule.cooldownAreaWidthRatio.coerceIn(0.025f, 0.45f)) }
     var draftCooldownHeight by remember(rule.id) { mutableStateOf(rule.cooldownAreaHeightRatio.coerceIn(0.025f, 0.55f)) }
     var draftCooldownOffsetX by remember(rule.id) { mutableStateOf(rule.cooldownAreaOffsetX.coerceIn(-0.30f, 0.30f)) }
     var draftCooldownOffsetY by remember(rule.id) { mutableStateOf(rule.cooldownAreaOffsetY.coerceIn(-0.30f, 0.30f)) }
+    var draftCooldownMaxWaitText by remember(rule.id) { mutableStateOf(rule.cooldownMaxWaitMs.toString()) }
+    var cooldownScanTestMsg by remember(rule.id) { mutableStateOf<String?>(null) }
+    var showMoreAddMenu by remember(rule.id) { mutableStateOf(false) }
+
+    val pickerResult by FloatingPickerBridge.result.collectAsState()
+    LaunchedEffect(pickerResult) {
+        val res = pickerResult ?: return@LaunchedEffect
+        when {
+            res.requestKey.startsWith("inapp_img_") -> {
+                val targetStepId = res.requestKey.removePrefix("inapp_img_")
+                draftSteps = draftSteps.map {
+                    if (it.id == targetStepId) it.copy(paramValue = res.uriString) else it
+                }
+                FloatingPickerBridge.consumeResult()
+            }
+            res.requestKey.startsWith("inapp_sfx_") -> {
+                val targetStepId = res.requestKey.removePrefix("inapp_sfx_")
+                draftSteps = draftSteps.map {
+                    if (it.id == targetStepId) it.copy(paramValue = res.uriString) else it
+                }
+                FloatingPickerBridge.consumeResult()
+            }
+        }
+    }
+
+    fun buildDraftRule(): UniversalTriggerRule {
+        val cleaned = draftSteps.map { it.copy(stepName = it.stepName.trim()) }
+        val maxWaitParsed = draftCooldownMaxWaitText.toLongOrNull()?.coerceIn(3_000L, 180_000L)
+            ?: rule.cooldownMaxWaitMs
+        return rule.copy(
+            triggerName = draftChallengeName.trim().ifBlank { "Konsep" },
+            enableVisualCooldownWait = draftEnableVisualCooldown,
+            cooldownTargetStepId = draftCooldownTargetStepId,
+            cooldownAreaWidthRatio = draftCooldownWidth.coerceIn(0.025f, 0.45f),
+            cooldownAreaHeightRatio = draftCooldownHeight.coerceIn(0.025f, 0.55f),
+            cooldownAreaOffsetX = draftCooldownOffsetX.coerceIn(-0.30f, 0.30f),
+            cooldownAreaOffsetY = draftCooldownOffsetY.coerceIn(-0.30f, 0.30f),
+            cooldownMaxWaitMs = maxWaitParsed,
+            actionSequence = cleaned
+        )
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -733,7 +808,7 @@ private fun EditChallengeAndChoreographyDialog(
             Text(
                 text = "Ubah Konsep & Koreografi",
                 color = NeonCyan,
-                fontSize = 14.sp,
+                fontSize = 13.5.sp,
                 fontWeight = FontWeight.Black
             )
         },
@@ -741,14 +816,14 @@ private fun EditChallengeAndChoreographyDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 420.dp)
+                    .heightIn(max = 440.dp)
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 OutlinedTextField(
                     value = draftChallengeName,
                     onValueChange = { draftChallengeName = it },
-                    label = { Text("Nama Konsep / Challenge", fontSize = 11.sp) },
+                    label = { Text("Nama Konsep / Challenge", fontSize = 10.sp) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("dialog_challenge_name_input")
                 )
@@ -756,7 +831,7 @@ private fun EditChallengeAndChoreographyDialog(
                 Text(
                     text = "Koreografi (${draftSteps.size} langkah):",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = 10.5.sp,
                     fontWeight = FontWeight.Bold
                 )
 
@@ -764,7 +839,7 @@ private fun EditChallengeAndChoreographyDialog(
                     Text(
                         text = "Kosong — tambahkan koreografi sesuai kebutuhan di bawah.",
                         color = Color(0xFF94A3B8),
-                        fontSize = 9.5.sp
+                        fontSize = 9.sp
                     )
                 }
 
@@ -778,8 +853,8 @@ private fun EditChallengeAndChoreographyDialog(
                             .clip(RoundedCornerShape(8.dp))
                             .background(DarkBackground)
                             .border(0.7.dp, DarkCardBorder, RoundedCornerShape(8.dp))
-                            .padding(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                            .padding(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -789,48 +864,90 @@ private fun EditChallengeAndChoreographyDialog(
                             Text(
                                 text = "#${idx + 1} ${step.actionType.displayName}",
                                 color = NeonCyan,
-                                fontSize = 10.sp,
+                                fontSize = 9.5.sp,
                                 fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f)
                             )
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 if (idx > 0) {
-                                    TextButton(onClick = {
-                                        val next = draftSteps.toMutableList()
-                                        val m = next.removeAt(idx)
-                                        next.add(idx - 1, m)
-                                        draftSteps = next
-                                    }) { Text("▲", fontSize = 11.sp, color = NeonCyan) }
+                                    TextButton(
+                                        onClick = {
+                                            val next = draftSteps.toMutableList()
+                                            val m = next.removeAt(idx)
+                                            next.add(idx - 1, m)
+                                            draftSteps = next
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 5.dp, vertical = 0.dp),
+                                        modifier = Modifier.height(26.dp)
+                                    ) { Text("▲", fontSize = 10.sp, color = NeonCyan) }
                                 }
                                 if (idx < draftSteps.lastIndex) {
-                                    TextButton(onClick = {
-                                        val next = draftSteps.toMutableList()
-                                        val m = next.removeAt(idx)
-                                        next.add(idx + 1, m)
-                                        draftSteps = next
-                                    }) { Text("▼", fontSize = 11.sp, color = NeonCyan) }
+                                    TextButton(
+                                        onClick = {
+                                            val next = draftSteps.toMutableList()
+                                            val m = next.removeAt(idx)
+                                            next.add(idx + 1, m)
+                                            draftSteps = next
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 5.dp, vertical = 0.dp),
+                                        modifier = Modifier.height(26.dp)
+                                    ) { Text("▼", fontSize = 10.sp, color = NeonCyan) }
                                 }
+                                TextButton(
+                                    onClick = {
+                                        val next = draftSteps.toMutableList()
+                                        next.add(
+                                            idx + 1,
+                                            step.copy(
+                                                id = UUID.randomUUID().toString(),
+                                                stepName = if (step.stepName.isBlank()) "" else "${step.stepName} Copy"
+                                            )
+                                        )
+                                        draftSteps = next
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 5.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(26.dp)
+                                ) { Text("⧉", fontSize = 10.sp, color = NeonPurple, fontWeight = FontWeight.Black) }
                                 ConfirmDeleteTextButton(
                                     label = "✕",
-                                    fontSize = 11.sp,
-                                    horizontalPadding = 10.dp,
-                                    verticalPadding = 5.dp
+                                    fontSize = 10.sp,
+                                    horizontalPadding = 8.dp,
+                                    verticalPadding = 4.dp
                                 ) {
                                     draftSteps = draftSteps.filterNot { it.id == step.id }
                                 }
                             }
                         }
 
-                        OutlinedTextField(
-                            value = step.stepName,
-                            onValueChange = { raw -> updateThisStep { it.copy(stepName = raw) } },
-                            label = { Text("Nama Koreografi #${idx + 1} (opsional)", fontSize = 10.sp) },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth().testTag("dialog_step_name_input_${idx + 1}")
-                        )
+                        var delayDraft by remember(step.id, step.delayMs) { mutableStateOf(step.delayMs.toString()) }
+                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                            OutlinedTextField(
+                                value = step.stepName,
+                                onValueChange = { raw -> updateThisStep { it.copy(stepName = raw) } },
+                                label = { Text("Nama Langkah #${idx + 1}", fontSize = 9.sp) },
+                                singleLine = true,
+                                modifier = Modifier.weight(1.35f).testTag("dialog_step_name_input_${idx + 1}")
+                            )
+                            OutlinedTextField(
+                                value = delayDraft,
+                                onValueChange = { raw ->
+                                    val digits = raw.filter(Char::isDigit).take(5)
+                                    delayDraft = digits
+                                    digits.toLongOrNull()?.let { d ->
+                                        updateThisStep { it.copy(delayMs = d.coerceIn(0L, 30_000L)) }
+                                    }
+                                },
+                                label = { Text("Delay(ms)", fontSize = 9.sp) },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                                modifier = Modifier.weight(0.65f)
+                            )
+                        }
 
                         if (step.actionType == ActionType.SIMULATED_CLICK || step.actionType == ActionType.SIMULATED_SWIPE) {
                             if (step.actionType == ActionType.SIMULATED_SWIPE) {
@@ -842,7 +959,7 @@ private fun EditChallengeAndChoreographyDialog(
                                         FilterChip(
                                             selected = step.paramValue.equals(dir, ignoreCase = true),
                                             onClick = { updateThisStep { it.copy(paramValue = dir) } },
-                                            label = { Text(if (dir == "RANDOM") "🎲 RANDOM" else dir, fontSize = 9.sp) },
+                                            label = { Text(if (dir == "RANDOM") "🎲 RANDOM" else dir, fontSize = 8.5.sp) },
                                             colors = FilterChipDefaults.filterChipColors(selectedContainerColor = NeonCyan.copy(alpha = 0.25f))
                                         )
                                     }
@@ -850,7 +967,7 @@ private fun EditChallengeAndChoreographyDialog(
                                 OutlinedTextField(
                                     value = step.paramValue,
                                     onValueChange = { raw -> updateThisStep { it.copy(paramValue = raw) } },
-                                    label = { Text("Arah Geser (LEFT/RIGHT/UP/DOWN/RANDOM/45°/X,Y)", fontSize = 9.5.sp) },
+                                    label = { Text("Arah Geser (LEFT/RIGHT/UP/DOWN/RANDOM/45°/X,Y)", fontSize = 9.sp) },
                                     singleLine = true,
                                     modifier = Modifier.fillMaxWidth()
                                 )
@@ -874,7 +991,7 @@ private fun EditChallengeAndChoreographyDialog(
                                 label = {
                                     Text(
                                         if (step.actionType == ActionType.SIMULATED_CLICK) "Tahan(ms, boleh 0)" else "Durasi Geser(ms)",
-                                        fontSize = 10.sp
+                                        fontSize = 9.sp
                                     )
                                 },
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -888,7 +1005,7 @@ private fun EditChallengeAndChoreographyDialog(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text("✊ Tahan + Geser → Lepas", color = Color.White, fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
+                                    Text("✊ Tahan + Geser → Lepas", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                                     Switch(
                                         checked = step.holdAndDrag,
                                         onCheckedChange = { checked -> updateThisStep { it.copy(holdAndDrag = checked) } }
@@ -903,18 +1020,18 @@ private fun EditChallengeAndChoreographyDialog(
                                             FilterChip(
                                                 selected = step.dragDirection.equals(dir, ignoreCase = true),
                                                 onClick = { updateThisStep { it.copy(dragDirection = dir) } },
-                                                label = { Text(if (dir == "RANDOM") "🎲 RANDOM" else dir, fontSize = 9.sp) }
+                                                label = { Text(if (dir == "RANDOM") "🎲 RANDOM" else dir, fontSize = 8.5.sp) }
                                             )
                                         }
                                     }
                                     var dragDurDraft by remember(step.id, step.dragDurationMs) {
                                         mutableStateOf(step.dragDurationMs.toString())
                                     }
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                                         OutlinedTextField(
                                             value = step.dragDirection,
                                             onValueChange = { raw -> updateThisStep { it.copy(dragDirection = raw) } },
-                                            label = { Text("Arah Geser (atau 45°/X,Y)", fontSize = 9.sp) },
+                                            label = { Text("Arah (45°/X,Y)", fontSize = 8.5.sp) },
                                             singleLine = true,
                                             modifier = Modifier.weight(1.2f)
                                         )
@@ -927,7 +1044,7 @@ private fun EditChallengeAndChoreographyDialog(
                                                     updateThisStep { it.copy(dragDurationMs = v.coerceIn(60L, 5000L)) }
                                                 }
                                             },
-                                            label = { Text("Geser(ms)", fontSize = 9.sp) },
+                                            label = { Text("Geser(ms)", fontSize = 8.5.sp) },
                                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                             singleLine = true,
                                             modifier = Modifier.weight(0.8f)
@@ -936,7 +1053,6 @@ private fun EditChallengeAndChoreographyDialog(
                                 }
                             }
                         } else if (step.actionType == ActionType.HOME_BACK_GAME) {
-                            val dlgContext = LocalContext.current
                             var appQuery by remember(step.id) { mutableStateOf("") }
                             var installedApps by remember { mutableStateOf<List<InstalledAppInfo>>(emptyList()) }
                             LaunchedEffect(step.id) {
@@ -953,13 +1069,13 @@ private fun EditChallengeAndChoreographyDialog(
                             Text(
                                 text = "Tujuan Back: $chosenLabel",
                                 color = NeonOrange,
-                                fontSize = 9.5.sp,
+                                fontSize = 9.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             OutlinedTextField(
                                 value = appQuery,
                                 onValueChange = { appQuery = it },
-                                label = { Text("🔍 Cari APK / Aplikasi tujuan back", fontSize = 10.sp) },
+                                label = { Text("🔍 Cari APK / Aplikasi tujuan back", fontSize = 9.sp) },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -967,14 +1083,14 @@ private fun EditChallengeAndChoreographyDialog(
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .heightIn(max = 110.dp)
+                                        .heightIn(max = 100.dp)
                                         .verticalScroll(rememberScrollState()),
                                     verticalArrangement = Arrangement.spacedBy(3.dp)
                                 ) {
                                     if (chosenPkg.isNotBlank()) {
                                         TextButton(onClick = {
                                             updateThisStep { it.copy(secondaryValue = "") }
-                                        }) { Text("↺ Pakai Auto (Aplikasi Terakhir)", fontSize = 9.5.sp, color = NeonCyan) }
+                                        }) { Text("↺ Pakai Auto (Aplikasi Terakhir)", fontSize = 9.sp, color = NeonCyan) }
                                     }
                                     filteredApps.forEach { app ->
                                         Row(
@@ -986,52 +1102,258 @@ private fun EditChallengeAndChoreographyDialog(
                                                     updateThisStep { it.copy(secondaryValue = app.packageName) }
                                                     appQuery = ""
                                                 }
-                                                .padding(horizontal = 8.dp, vertical = 5.dp),
+                                                .padding(horizontal = 8.dp, vertical = 4.dp),
                                             horizontalArrangement = Arrangement.SpaceBetween,
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Text(
                                                 text = "${app.appName} (${app.packageName})",
                                                 color = Color.White,
-                                                fontSize = 9.sp,
+                                                fontSize = 8.5.sp,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                                 modifier = Modifier.weight(1f)
                                             )
-                                            Text("Pilih", color = EmeraldGreen, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                            Text("Pilih", color = EmeraldGreen, fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
                                         }
                                     }
                                 }
                             }
-                        } else if (step.actionType == ActionType.CUSTOM_IMAGE || step.actionType == ActionType.SHOW_OVERLAY || step.actionType == ActionType.TEXT_OVERLAY) {
+                        } else if (
+                            step.actionType == ActionType.MEME_OVERLAY ||
+                            step.actionType == ActionType.CUSTOM_IMAGE ||
+                            step.actionType == ActionType.PROFILE_OVERLAY ||
+                            step.actionType == ActionType.SHOW_OVERLAY ||
+                            step.actionType == ActionType.TEXT_OVERLAY ||
+                            step.actionType == ActionType.ANIMATION ||
+                            step.actionType == ActionType.TIER_OVERLAY
+                        ) {
+                            val isMemeOrCustomImage = step.actionType == ActionType.MEME_OVERLAY ||
+                                step.actionType == ActionType.CUSTOM_IMAGE
+                            val isProfileOverlay = step.actionType == ActionType.PROFILE_OVERLAY
+                            val isAnimation = step.actionType == ActionType.ANIMATION
+
+                            if (isMemeOrCustomImage) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (step.paramValue.startsWith("file://") ||
+                                        step.paramValue.startsWith("content://") ||
+                                        step.paramValue.startsWith("http")
+                                    ) {
+                                        AsyncImage(
+                                            model = step.paramValue,
+                                            contentDescription = "Preview Foto Meme",
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier
+                                                .size(34.dp)
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .border(0.8.dp, NeonCyan, RoundedCornerShape(6.dp))
+                                        )
+                                    }
+                                    Button(
+                                        onClick = {
+                                            FloatingPickerBridge.launch(
+                                                context = dlgContext,
+                                                mode = FloatingPickerMode.PICK_IMAGE,
+                                                requestKey = "inapp_img_${step.id}"
+                                            )
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = NeonPurple),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                        modifier = Modifier.weight(1f).height(34.dp)
+                                    ) {
+                                        Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            if (step.paramValue.isBlank()) "Upload Foto Meme" else "Ganti Foto",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    if (step.paramValue.isNotBlank()) {
+                                        ConfirmDeleteTextButton(
+                                            label = "Hapus",
+                                            fontSize = 8.5.sp,
+                                            horizontalPadding = 7.dp,
+                                            verticalPadding = 6.dp
+                                        ) {
+                                            updateThisStep { it.copy(paramValue = "") }
+                                        }
+                                    }
+                                }
+                            } else if (isProfileOverlay) {
+                                Text(
+                                    text = "👤 Menampilkan foto profil pengirim gift otomatis (fallback inisial bila offline).",
+                                    color = NeonCyan,
+                                    fontSize = 8.5.sp
+                                )
+                            } else if (isAnimation) {
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    listOf("BOUNCE", "SHAKE", "PULSE", "FLASH").forEach { anim ->
+                                        FilterChip(
+                                            selected = step.paramValue.equals(anim, ignoreCase = true),
+                                            onClick = { updateThisStep { it.copy(paramValue = anim) } },
+                                            label = { Text(anim, fontSize = 8.5.sp) }
+                                        )
+                                    }
+                                }
+                            }
+
+                            var ovDurDraft by remember(step.id, step.durationMs) { mutableStateOf(step.durationMs.toString()) }
+                            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                if (!isMemeOrCustomImage && !isAnimation) {
+                                    OutlinedTextField(
+                                        value = step.paramValue,
+                                        onValueChange = { raw -> updateThisStep { it.copy(paramValue = raw) } },
+                                        label = { Text(if (isProfileOverlay) "Judul ({user})" else "Teks ({user}/{gift})", fontSize = 8.5.sp) },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                OutlinedTextField(
+                                    value = step.secondaryValue,
+                                    onValueChange = { raw -> updateThisStep { it.copy(secondaryValue = raw) } },
+                                    label = { Text(if (isMemeOrCustomImage) "Caption (opsional)" else "Subjudul", fontSize = 8.5.sp) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedTextField(
+                                    value = ovDurDraft,
+                                    onValueChange = { raw ->
+                                        val digits = raw.filter(Char::isDigit).take(5)
+                                        ovDurDraft = digits
+                                        digits.toLongOrNull()?.let { v ->
+                                            updateThisStep { it.copy(durationMs = v.coerceIn(300L, 30_000L)) }
+                                        }
+                                    },
+                                    label = { Text("Durasi(ms)", fontSize = 8.5.sp) },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    singleLine = true,
+                                    modifier = Modifier.weight(0.75f)
+                                )
+                            }
+
                             val sc = step.overlayScale.coerceIn(0.35f, 3.0f)
-                            Text(
-                                text = "Ukuran Overlay: ${(sc * 100).roundToInt()}%",
-                                color = NeonCyan,
-                                fontSize = 9.5.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Slider(
-                                value = sc,
-                                onValueChange = { next ->
-                                    updateThisStep { it.copy(overlayScale = next.coerceIn(0.35f, 3.0f)) }
+                            val curX = (step.posX ?: rule.overlayPosX).coerceIn(0.05f, 0.95f)
+                            val curY = (step.posY ?: rule.overlayPosY).coerceIn(0.05f, 0.95f)
+                            PrecisionStepperBar(
+                                label = "Ukuran Overlay",
+                                valueText = "${(sc * 100).roundToInt()}%",
+                                accent = NeonCyan,
+                                onDecrementCoarse = {
+                                    updateThisStep { it.copy(overlayScale = (sc - 0.25f).coerceIn(0.35f, 3.0f)) }
                                 },
-                                valueRange = 0.35f..3.0f,
-                                colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan),
-                                modifier = Modifier.fillMaxWidth().height(24.dp)
+                                onDecrement = {
+                                    updateThisStep { it.copy(overlayScale = (sc - 0.05f).coerceIn(0.35f, 3.0f)) }
+                                },
+                                onIncrement = {
+                                    updateThisStep { it.copy(overlayScale = (sc + 0.05f).coerceIn(0.35f, 3.0f)) }
+                                },
+                                onIncrementCoarse = {
+                                    updateThisStep { it.copy(overlayScale = (sc + 0.25f).coerceIn(0.35f, 3.0f)) }
+                                }
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                PrecisionStepperBar(
+                                    label = "Posisi X",
+                                    valueText = "${(curX * 100).roundToInt()}%",
+                                    accent = NeonOrange,
+                                    decLabel = "◀",
+                                    incLabel = "▶",
+                                    onDecrement = { updateThisStep { it.copy(posX = (curX - 0.04f).coerceIn(0.05f, 0.95f)) } },
+                                    onIncrement = { updateThisStep { it.copy(posX = (curX + 0.04f).coerceIn(0.05f, 0.95f)) } },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                PrecisionStepperBar(
+                                    label = "Posisi Y",
+                                    valueText = "${(curY * 100).roundToInt()}%",
+                                    accent = NeonPurple,
+                                    decLabel = "▲",
+                                    incLabel = "▼",
+                                    onDecrement = { updateThisStep { it.copy(posY = (curY - 0.04f).coerceIn(0.05f, 0.95f)) } },
+                                    onIncrement = { updateThisStep { it.copy(posY = (curY + 0.04f).coerceIn(0.05f, 0.95f)) } },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        } else if (step.actionType == ActionType.PLAY_SOUND || step.actionType == ActionType.CUSTOM_BACKSOUND) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                listOf("CHIME", "ALERT", "FANFARE", "BASS").forEach { preset ->
+                                    FilterChip(
+                                        selected = step.paramValue.equals(preset, ignoreCase = true),
+                                        onClick = { updateThisStep { it.copy(paramValue = preset) } },
+                                        label = { Text(preset, fontSize = 8.5.sp) }
+                                    )
+                                }
+                            }
+                            Button(
+                                onClick = {
+                                    FloatingPickerBridge.launch(
+                                        context = dlgContext,
+                                        mode = FloatingPickerMode.PICK_AUDIO,
+                                        requestKey = "inapp_sfx_${step.id}"
+                                    )
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = NeonCyan),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.fillMaxWidth().height(32.dp)
+                            ) {
+                                Icon(Icons.Default.AudioFile, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Upload File MP3 / SFX", color = Color.Black, fontSize = 9.sp, fontWeight = FontWeight.Black)
+                            }
+                        } else if (step.actionType == ActionType.VOLUME_CONTROL) {
+                            val vol = step.paramValue.trim().toIntOrNull()?.coerceIn(0, 100) ?: 80
+                            PrecisionStepperBar(
+                                label = "Volume SFX",
+                                valueText = "$vol%",
+                                accent = NeonCyan,
+                                onDecrementCoarse = { updateThisStep { it.copy(paramValue = "${(vol - 20).coerceIn(0, 100)}") } },
+                                onDecrement = { updateThisStep { it.copy(paramValue = "${(vol - 5).coerceIn(0, 100)}") } },
+                                onIncrement = { updateThisStep { it.copy(paramValue = "${(vol + 5).coerceIn(0, 100)}") } },
+                                onIncrementCoarse = { updateThisStep { it.copy(paramValue = "${(vol + 20).coerceIn(0, 100)}") } }
+                            )
+                        } else if (step.actionType != ActionType.STOP_SOUND) {
+                            OutlinedTextField(
+                                value = step.paramValue,
+                                onValueChange = { raw -> updateThisStep { it.copy(paramValue = raw) } },
+                                label = { Text(step.actionType.defaultParamHint.ifBlank { "Parameter" }, fontSize = 8.5.sp) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            FilterChip(
+                                selected = step.executionMode == ExecutionMode.SEQUENTIAL,
+                                onClick = { updateThisStep { it.copy(executionMode = ExecutionMode.SEQUENTIAL) } },
+                                label = { Text("Berurutan", fontSize = 8.sp) }
+                            )
+                            FilterChip(
+                                selected = step.executionMode == ExecutionMode.PARALLEL,
+                                onClick = { updateThisStep { it.copy(executionMode = ExecutionMode.PARALLEL) } },
+                                label = { Text("Bersamaan", fontSize = 8.sp) }
                             )
                         }
                     }
                 }
 
-                // Cooldown visual skill ML per pin
+                // Cooldown visual skill ML per pin (tombol presisi tanpa loading)
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
                         .background(DarkBackground)
                         .border(0.7.dp, if (draftEnableVisualCooldown) NeonCyan else DarkCardBorder, RoundedCornerShape(8.dp))
-                        .padding(8.dp),
+                        .padding(7.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Row(
@@ -1039,44 +1361,113 @@ private fun EditChallengeAndChoreographyDialog(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("⏱️ Baca Angka Cooldown Skill ML", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        Text("⏱️ Baca Angka Cooldown Skill ML", color = Color.White, fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
                         Switch(
                             checked = draftEnableVisualCooldown,
                             onCheckedChange = { draftEnableVisualCooldown = it }
                         )
                     }
                     if (draftEnableVisualCooldown) {
-                        Text(
-                            text = "Area Scan: ${(draftCooldownWidth * 100).roundToInt()}% × ${(draftCooldownHeight * 100).roundToInt()}% • Offset (${(draftCooldownOffsetX * 100).roundToInt()}%, ${(draftCooldownOffsetY * 100).roundToInt()}%)",
-                            color = NeonCyan,
-                            fontSize = 8.5.sp
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Slider(
-                                value = draftCooldownWidth,
-                                onValueChange = { draftCooldownWidth = it },
-                                valueRange = 0.025f..0.35f,
-                                modifier = Modifier.weight(1f).height(22.dp)
+                        val touchCandidates = draftSteps.filter {
+                            it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
+                        }
+                        if (touchCandidates.size > 1) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text("Pin Scan:", color = Color(0xFF94A3B8), fontSize = 8.5.sp, modifier = Modifier.align(Alignment.CenterVertically))
+                                touchCandidates.forEachIndexed { tIdx, tStep ->
+                                    val selected = draftCooldownTargetStepId == tStep.id ||
+                                        (draftCooldownTargetStepId.isNullOrBlank() && tIdx == 0)
+                                    val label = tStep.stepName.trim().ifBlank { "#${tIdx + 1}" }
+                                    FilterChip(
+                                        selected = selected,
+                                        onClick = { draftCooldownTargetStepId = tStep.id },
+                                        label = { Text(label.take(12), fontSize = 8.sp) }
+                                    )
+                                }
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            PrecisionStepperBar(
+                                label = "Lebar",
+                                valueText = "${(draftCooldownWidth * 100).roundToInt()}%",
+                                accent = NeonCyan,
+                                onDecrement = { draftCooldownWidth = (draftCooldownWidth - 0.01f).coerceIn(0.025f, 0.35f) },
+                                onIncrement = { draftCooldownWidth = (draftCooldownWidth + 0.01f).coerceIn(0.025f, 0.35f) },
+                                modifier = Modifier.weight(1f)
                             )
-                            Slider(
-                                value = draftCooldownHeight,
-                                onValueChange = { draftCooldownHeight = it },
-                                valueRange = 0.025f..0.45f,
-                                modifier = Modifier.weight(1f).height(22.dp)
+                            PrecisionStepperBar(
+                                label = "Tinggi",
+                                valueText = "${(draftCooldownHeight * 100).roundToInt()}%",
+                                accent = EmeraldGreen,
+                                onDecrement = { draftCooldownHeight = (draftCooldownHeight - 0.01f).coerceIn(0.025f, 0.45f) },
+                                onIncrement = { draftCooldownHeight = (draftCooldownHeight + 0.01f).coerceIn(0.025f, 0.45f) },
+                                modifier = Modifier.weight(1f)
                             )
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Slider(
-                                value = draftCooldownOffsetX,
-                                onValueChange = { draftCooldownOffsetX = it },
-                                valueRange = -0.25f..0.25f,
-                                modifier = Modifier.weight(1f).height(22.dp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            PrecisionStepperBar(
+                                label = "Geser X",
+                                valueText = "${(draftCooldownOffsetX * 100).roundToInt()}%",
+                                accent = NeonOrange,
+                                decLabel = "◀",
+                                incLabel = "▶",
+                                onDecrement = { draftCooldownOffsetX = (draftCooldownOffsetX - 0.01f).coerceIn(-0.25f, 0.25f) },
+                                onIncrement = { draftCooldownOffsetX = (draftCooldownOffsetX + 0.01f).coerceIn(-0.25f, 0.25f) },
+                                modifier = Modifier.weight(1f)
                             )
-                            Slider(
-                                value = draftCooldownOffsetY,
-                                onValueChange = { draftCooldownOffsetY = it },
-                                valueRange = -0.25f..0.25f,
-                                modifier = Modifier.weight(1f).height(22.dp)
+                            PrecisionStepperBar(
+                                label = "Geser Y",
+                                valueText = "${(draftCooldownOffsetY * 100).roundToInt()}%",
+                                accent = NeonPurple,
+                                decLabel = "▲",
+                                incLabel = "▼",
+                                onDecrement = { draftCooldownOffsetY = (draftCooldownOffsetY - 0.01f).coerceIn(-0.25f, 0.25f) },
+                                onIncrement = { draftCooldownOffsetY = (draftCooldownOffsetY + 0.01f).coerceIn(-0.25f, 0.25f) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = draftCooldownMaxWaitText,
+                                onValueChange = { draftCooldownMaxWaitText = it.filter(Char::isDigit).take(6) },
+                                label = { Text("Max Tunggu(ms)", fontSize = 8.5.sp) },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedButton(
+                                onClick = {
+                                    draftCooldownWidth = 0.075f
+                                    draftCooldownHeight = 0.12f
+                                    draftCooldownOffsetX = 0f
+                                    draftCooldownOffsetY = 0f
+                                },
+                                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp)
+                            ) { Text("Reset Box", fontSize = 8.5.sp, color = Color.White) }
+                            Button(
+                                onClick = {
+                                    val saved = buildDraftRule()
+                                    engine.addOrUpdateRule(saved)
+                                    engine.inspectRuleCooldownOnce(saved.id) { res ->
+                                        cooldownScanTestMsg = res
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = NeonCyan),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            ) { Text("🔍 Scan Sekali", color = Color.Black, fontSize = 8.5.sp, fontWeight = FontWeight.Black) }
+                        }
+                        cooldownScanTestMsg?.let { msg ->
+                            Text(
+                                text = "Hasil Scan: $msg",
+                                color = EmeraldGreen,
+                                fontSize = 8.5.sp,
+                                fontWeight = FontWeight.Bold
                             )
                         }
                     }
@@ -1085,20 +1476,18 @@ private fun EditChallengeAndChoreographyDialog(
                 Text(
                     text = "+ Tambah Koreografi:",
                     color = EmeraldGreen,
-                    fontSize = 10.sp,
+                    fontSize = 9.5.sp,
                     fontWeight = FontWeight.Bold
                 )
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    val lastPin = draftSteps.lastOrNull {
-                        it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
-                    }
-                    val nx = ((lastPin?.posX ?: rule.overlayPosX) + if (lastPin == null) 0f else 0.05f).coerceIn(0.05f, 0.95f)
-                    val ny = ((lastPin?.posY ?: rule.overlayPosY) - if (lastPin == null) 0f else 0.05f).coerceIn(0.05f, 0.95f)
-                    OutlinedButton(onClick = {
-                        draftSteps = draftSteps + UniversalActionStep(
+                val lastPin = draftSteps.lastOrNull {
+                    it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
+                }
+                val nx = ((lastPin?.posX ?: rule.overlayPosX) + if (lastPin == null) 0f else 0.05f).coerceIn(0.05f, 0.95f)
+                val ny = ((lastPin?.posY ?: rule.overlayPosY) - if (lastPin == null) 0f else 0.05f).coerceIn(0.05f, 0.95f)
+
+                fun addStep(type: ActionType) {
+                    val nextStep = when (type) {
+                        ActionType.SIMULATED_CLICK -> UniversalActionStep(
                             enabled = true,
                             actionType = ActionType.SIMULATED_CLICK,
                             paramValue = String.format(Locale.US, "%.3f,%.3f", nx, ny),
@@ -1108,10 +1497,7 @@ private fun EditChallengeAndChoreographyDialog(
                             posY = ny,
                             executionMode = ExecutionMode.SEQUENTIAL
                         )
-                    }) { Text("+ Klik ML", fontSize = 9.5.sp, color = EmeraldGreen) }
-
-                    OutlinedButton(onClick = {
-                        draftSteps = draftSteps + UniversalActionStep(
+                        ActionType.SIMULATED_SWIPE -> UniversalActionStep(
                             enabled = true,
                             actionType = ActionType.SIMULATED_SWIPE,
                             paramValue = "RIGHT",
@@ -1121,66 +1507,147 @@ private fun EditChallengeAndChoreographyDialog(
                             posY = ny,
                             executionMode = ExecutionMode.SEQUENTIAL
                         )
-                    }) { Text("+ Geser ML", fontSize = 9.5.sp, color = NeonCyan) }
-
-                    OutlinedButton(onClick = {
-                        draftSteps = draftSteps + UniversalActionStep(
+                        ActionType.DELAY -> UniversalActionStep(
                             enabled = true,
                             actionType = ActionType.DELAY,
                             paramValue = "500",
                             durationMs = 500L,
                             executionMode = ExecutionMode.SEQUENTIAL
                         )
-                    }) { Text("+ Jeda", fontSize = 9.5.sp, color = Color.White) }
-
-                    OutlinedButton(onClick = {
-                        draftSteps = draftSteps + UniversalActionStep(
+                        ActionType.HOME_BACK_GAME -> UniversalActionStep(
                             enabled = true,
                             actionType = ActionType.HOME_BACK_GAME,
                             paramValue = "1500",
                             durationMs = 1500L,
                             executionMode = ExecutionMode.SEQUENTIAL
                         )
-                    }) { Text("+ Home→Game", fontSize = 9.5.sp, color = NeonOrange) }
-
-                    OutlinedButton(onClick = {
-                        draftSteps = draftSteps + UniversalActionStep(
+                        ActionType.MEME_OVERLAY -> UniversalActionStep(
                             enabled = true,
-                            actionType = ActionType.CUSTOM_IMAGE,
+                            actionType = ActionType.MEME_OVERLAY,
+                            paramValue = "",
+                            secondaryValue = "{user}",
                             durationMs = 2500L,
                             posX = rule.overlayPosX,
                             posY = rule.overlayPosY,
                             executionMode = ExecutionMode.PARALLEL
                         )
-                    }) { Text("+ Overlay", fontSize = 9.5.sp, color = NeonPurple) }
-
-                    OutlinedButton(onClick = {
-                        draftSteps = draftSteps + UniversalActionStep(
+                        ActionType.PROFILE_OVERLAY -> UniversalActionStep(
+                            enabled = true,
+                            actionType = ActionType.PROFILE_OVERLAY,
+                            paramValue = "{user}",
+                            secondaryValue = "{gift}",
+                            durationMs = 2500L,
+                            posX = rule.overlayPosX,
+                            posY = rule.overlayPosY,
+                            executionMode = ExecutionMode.PARALLEL
+                        )
+                        ActionType.TEXT_OVERLAY -> UniversalActionStep(
+                            enabled = true,
+                            actionType = ActionType.TEXT_OVERLAY,
+                            paramValue = "{user} • {gift}",
+                            durationMs = 2500L,
+                            posX = rule.overlayPosX,
+                            posY = rule.overlayPosY,
+                            executionMode = ExecutionMode.PARALLEL
+                        )
+                        ActionType.ANIMATION -> UniversalActionStep(
+                            enabled = true,
+                            actionType = ActionType.ANIMATION,
+                            paramValue = "BOUNCE",
+                            durationMs = 2000L,
+                            posX = rule.overlayPosX,
+                            posY = rule.overlayPosY,
+                            executionMode = ExecutionMode.PARALLEL
+                        )
+                        ActionType.RANDOM_SELECTION -> UniversalActionStep(
+                            enabled = true,
+                            actionType = ActionType.RANDOM_SELECTION,
+                            paramValue = "Opsi A|Opsi B|Opsi C",
+                            executionMode = ExecutionMode.SEQUENTIAL
+                        )
+                        ActionType.HIDE_OVERLAY -> UniversalActionStep(
+                            enabled = true,
+                            actionType = ActionType.HIDE_OVERLAY,
+                            paramValue = "ALL",
+                            executionMode = ExecutionMode.SEQUENTIAL
+                        )
+                        ActionType.STOP_SOUND -> UniversalActionStep(
+                            enabled = true,
+                            actionType = ActionType.STOP_SOUND,
+                            executionMode = ExecutionMode.SEQUENTIAL
+                        )
+                        ActionType.PLAY_SOUND -> UniversalActionStep(
                             enabled = true,
                             actionType = ActionType.PLAY_SOUND,
                             paramValue = "CHIME",
                             executionMode = ExecutionMode.PARALLEL
                         )
-                    }) { Text("+ Sound", fontSize = 9.5.sp, color = NeonCyan) }
+                        else -> UniversalActionStep(
+                            enabled = true,
+                            actionType = type,
+                            executionMode = ExecutionMode.SEQUENTIAL
+                        )
+                    }
+                    draftSteps = draftSteps + nextStep
+                }
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+
+                    OutlinedButton(onClick = { addStep(ActionType.SIMULATED_CLICK) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                        Text("+ Klik ML", fontSize = 9.sp, color = EmeraldGreen)
+                    }
+                    OutlinedButton(onClick = { addStep(ActionType.SIMULATED_SWIPE) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                        Text("+ Geser ML", fontSize = 9.sp, color = NeonCyan)
+                    }
+                    OutlinedButton(onClick = { addStep(ActionType.DELAY) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                        Text("+ Jeda", fontSize = 9.sp, color = Color.White)
+                    }
+                    OutlinedButton(onClick = { addStep(ActionType.HOME_BACK_GAME) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                        Text("+ Home→Game", fontSize = 9.sp, color = NeonOrange)
+                    }
+                    OutlinedButton(onClick = { addStep(ActionType.MEME_OVERLAY) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                        Text("+ 😂 Foto Meme", fontSize = 9.sp, color = NeonPurple)
+                    }
+                    OutlinedButton(onClick = { addStep(ActionType.PROFILE_OVERLAY) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                        Text("+ 👤 Foto Profil", fontSize = 9.sp, color = NeonCyan)
+                    }
+                    OutlinedButton(onClick = { addStep(ActionType.PLAY_SOUND) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                        Text("+ Sound", fontSize = 9.sp, color = NeonCyan)
+                    }
+                    OutlinedButton(onClick = { showMoreAddMenu = !showMoreAddMenu }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                        Text(if (showMoreAddMenu) "▲ Custom" else "+ Custom", fontSize = 9.sp, color = Color.White)
+                    }
+                }
+                if (showMoreAddMenu) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        OutlinedButton(onClick = { addStep(ActionType.TEXT_OVERLAY) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                            Text("+ 📝 Teks", fontSize = 9.sp, color = NeonCyan)
+                        }
+                        OutlinedButton(onClick = { addStep(ActionType.ANIMATION) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                            Text("+ ✨ Animasi", fontSize = 9.sp, color = EmeraldGreen)
+                        }
+                        OutlinedButton(onClick = { addStep(ActionType.RANDOM_SELECTION) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                            Text("+ 🎲 Random", fontSize = 9.sp, color = Color.White)
+                        }
+                        OutlinedButton(onClick = { addStep(ActionType.HIDE_OVERLAY) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                            Text("+ 🧹 Hide", fontSize = 9.sp, color = Color.White)
+                        }
+                        OutlinedButton(onClick = { addStep(ActionType.STOP_SOUND) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                            Text("+ 🔇 Stop Sound", fontSize = 9.sp, color = Color.White)
+                        }
+                    }
                 }
             }
         },
         confirmButton = {
             Button(
-                onClick = {
-                    val cleaned = draftSteps.map { it.copy(stepName = it.stepName.trim()) }
-                    onSave(
-                        rule.copy(
-                            triggerName = draftChallengeName.trim().ifBlank { "Konsep" },
-                            enableVisualCooldownWait = draftEnableVisualCooldown,
-                            cooldownAreaWidthRatio = draftCooldownWidth.coerceIn(0.025f, 0.45f),
-                            cooldownAreaHeightRatio = draftCooldownHeight.coerceIn(0.025f, 0.55f),
-                            cooldownAreaOffsetX = draftCooldownOffsetX.coerceIn(-0.30f, 0.30f),
-                            cooldownAreaOffsetY = draftCooldownOffsetY.coerceIn(-0.30f, 0.30f),
-                            actionSequence = cleaned
-                        )
-                    )
-                },
+                onClick = { onSave(buildDraftRule()) },
                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen)
             ) {
                 Text("Simpan", color = Color.Black, fontWeight = FontWeight.Black)

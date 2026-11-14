@@ -11,9 +11,13 @@ import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapShader
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -24,6 +28,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.Log
+import android.util.LruCache
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -65,8 +70,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Collections
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 private class FloatingComposeOwner : LifecycleOwner, ViewModelStoreOwner, SavedStateRegistryOwner {
@@ -259,10 +269,20 @@ class FloatingTriggerOverlayService : Service() {
     private var hudTopRow: LinearLayout? = null
     private var hudTitleBtn: TextView? = null
     private var btnEngineTiny: TextView? = null
+    private var btnLockTiny: TextView? = null
     private var btnPinTiny: TextView? = null
     private var btnSubMenuTiny: TextView? = null
     private var btnMinTiny: TextView? = null
     private var btnCloseTiny: TextView? = null
+
+    @Volatile
+    private var isTemporarilyHiddenForAutomation = false
+
+    @Volatile
+    private var isTemporarilyHiddenForScan = false
+
+    private val overlayBitmapCache = object : LruCache<String, Bitmap>(24) {}
+    private val inFlightRemoteBitmaps = Collections.synchronizedSet(mutableSetOf<String>())
 
     // Precision Cursor Navigation Bar views
     private var dpadContainer: LinearLayout? = null
@@ -307,7 +327,12 @@ class FloatingTriggerOverlayService : Service() {
         }
 
         MlbbGestureAccessibilityService.onPrepareScreenForTouch = { hideForTouch ->
+            isTemporarilyHiddenForAutomation = hideForTouch
             setMarkerWindowsTemporaryHidden(hideForTouch)
+        }
+        MlbbGestureAccessibilityService.onPrepareScreenForScan = { hideForScan ->
+            isTemporarilyHiddenForScan = hideForScan
+            setAllFloatingWindowsHiddenForScan(hideForScan)
         }
 
         engine.setFloatingOverlayRunning(true)
@@ -411,6 +436,10 @@ class FloatingTriggerOverlayService : Service() {
         if (MlbbGestureAccessibilityService.onPrepareScreenForTouch != null) {
             MlbbGestureAccessibilityService.onPrepareScreenForTouch = null
         }
+        if (MlbbGestureAccessibilityService.onPrepareScreenForScan != null) {
+            MlbbGestureAccessibilityService.onPrepareScreenForScan = null
+        }
+        overlayBitmapCache.evictAll()
         serviceScope.cancel()
         removeAllMarkerWindows()
         subMenuComposeOwner?.onDetach()
@@ -438,17 +467,22 @@ class FloatingTriggerOverlayService : Service() {
                 val cfgRatioChanged = lastAppliedXRatio != st.floatingConfig.hudXRatio ||
                     lastAppliedYRatio != st.floatingConfig.hudYRatio
                 lastState = st
-                refreshSingleHudVisuals()
-                if (!isDraggingHud && !st.isFloatingHiddenForLive) {
-                    if (cfgRatioChanged) {
-                        applyHudPositionFromConfig(st.floatingConfig, forceApply = false)
-                    } else {
-                        clampHudIntoSafeBounds()
+                if (!isTemporarilyHiddenForScan) {
+                    refreshSingleHudVisuals()
+                    if (!isDraggingHud && !st.isFloatingHiddenForLive) {
+                        if (cfgRatioChanged) {
+                            applyHudPositionFromConfig(st.floatingConfig, forceApply = false)
+                        } else {
+                            clampHudIntoSafeBounds()
+                        }
                     }
+                    renderLiveStage(st)
+                    syncMarkerWindows(st)
                 }
-                updateTouchBlockerState(st, temporarilyHiddenForAutomation = false)
-                renderLiveStage(st)
-                syncMarkerWindows(st)
+                updateTouchBlockerState(
+                    st,
+                    temporarilyHiddenForAutomation = isTemporarilyHiddenForAutomation || isTemporarilyHiddenForScan
+                )
                 if (hiddenChanged) {
                     updateNotification(st.isFloatingHiddenForLive)
                 }
@@ -591,11 +625,14 @@ class FloatingTriggerOverlayService : Service() {
         if (hasScanAreas) {
             for (rule in st.rules) {
                 if (!rule.isPinVisible || !rule.enableVisualCooldownWait) continue
-                val firstTouch = rule.actionSequence.firstOrNull {
+                val touchSteps = rule.actionSequence.filter {
                     it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
                 }
-                val cxNorm = ((firstTouch?.posX ?: rule.overlayPosX) + rule.cooldownAreaOffsetX).coerceIn(0.02f, 0.98f)
-                val cyNorm = ((firstTouch?.posY ?: rule.overlayPosY) + rule.cooldownAreaOffsetY).coerceIn(0.02f, 0.98f)
+                val targetStep = rule.cooldownTargetStepId?.let { id ->
+                    touchSteps.firstOrNull { it.id == id }
+                } ?: touchSteps.firstOrNull()
+                val cxNorm = ((targetStep?.posX ?: rule.overlayPosX) + rule.cooldownAreaOffsetX).coerceIn(0.02f, 0.98f)
+                val cyNorm = ((targetStep?.posY ?: rule.overlayPosY) + rule.cooldownAreaOffsetY).coerceIn(0.02f, 0.98f)
                 val boxW = (screenW * rule.cooldownAreaWidthRatio.coerceIn(0.025f, 0.45f)).roundToInt().coerceAtLeast(dp(24))
                 val boxH = (screenH * rule.cooldownAreaHeightRatio.coerceIn(0.025f, 0.55f)).roundToInt().coerceAtLeast(dp(24))
                 val left = ((cxNorm * screenW) - boxW / 2f).roundToInt().coerceIn(0, (screenW - boxW).coerceAtLeast(0))
@@ -634,32 +671,69 @@ class FloatingTriggerOverlayService : Service() {
 
         for (ov in st.activeOverlays) {
             val scale = ov.scale.coerceIn(0.35f, 3.0f)
-            val isImageOverlay = ov.kind == ActionType.CUSTOM_IMAGE && ov.imageUri.isNotBlank()
+            val isProfileOverlay = ov.kind == ActionType.PROFILE_OVERLAY
+            val isMemeOrCustomImage = (ov.kind == ActionType.CUSTOM_IMAGE || ov.kind == ActionType.MEME_OVERLAY) && ov.imageUri.isNotBlank()
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_HORIZONTAL
-                if (isImageOverlay) {
+                if (isMemeOrCustomImage || isProfileOverlay) {
                     setPadding(0, 0, 0, 0)
                     setBackgroundColor(Color.TRANSPARENT)
                 } else {
                     setPadding(dp(9 * scale.coerceAtMost(1.3f)), dp(5 * scale.coerceAtMost(1.3f)), dp(9 * scale.coerceAtMost(1.3f)), dp(5 * scale.coerceAtMost(1.3f)))
                     background = roundedBoxBg(
-                        fillColor = Color.argb(188, 15, 23, 42),
-                        strokeColor = Color.argb(165, 34, 211, 238),
+                        fillColor = Color.argb(195, 15, 23, 42),
+                        strokeColor = Color.argb(175, 34, 211, 238),
                         strokePx = dp(0.9f),
                         radiusPx = dp(9).toFloat()
                     )
                 }
             }
-            if (isImageOverlay) {
-                val targetImgPx = dp(110f * scale)
-                decodeSafeScaledBitmap(ov.imageUri, targetImgPx)?.let { bmp ->
+            if (isProfileOverlay) {
+                val avatarPx = dp(76f * scale).coerceIn(dp(36), dp(220))
+                val avatarBmp = ov.imageUri.takeIf { it.isNotBlank() }?.let { uriStr ->
+                    resolveOverlayBitmapAsyncAware(uriStr, avatarPx)
+                }
+                if (avatarBmp != null) {
+                    val circleBmp = createCircularFramedBitmap(avatarBmp, avatarPx, Color.rgb(34, 211, 238), dp(2.5f).toFloat())
+                    val img = ImageView(this).apply {
+                        setImageBitmap(circleBmp)
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                    }
+                    card.addView(img, LinearLayout.LayoutParams(avatarPx, avatarPx))
+                } else {
+                    val cleanName = ov.title.replace("👤", "").trim().ifBlank { "P" }
+                    val initial = cleanName.firstOrNull()?.uppercaseChar()?.toString() ?: "P"
+                    val badge = TextView(this).apply {
+                        text = initial
+                        setTextColor(Color.WHITE)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, (22f * scale).coerceIn(13f, 44f))
+                        setTypeface(null, Typeface.BOLD)
+                        gravity = Gravity.CENTER
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.OVAL
+                            setColor(Color.argb(230, 14, 116, 144))
+                            setStroke(dp(2.5f), Color.rgb(34, 211, 238))
+                        }
+                    }
+                    card.addView(badge, LinearLayout.LayoutParams(avatarPx, avatarPx))
+                }
+            } else if (isMemeOrCustomImage) {
+                val targetImgPx = dp(120f * scale).coerceIn(dp(48), dp(360))
+                resolveOverlayBitmapAsyncAware(ov.imageUri, targetImgPx)?.let { bmp ->
                     val img = ImageView(this).apply {
                         setImageBitmap(bmp)
                         scaleType = ImageView.ScaleType.FIT_CENTER
                         adjustViewBounds = true
                         maxWidth = targetImgPx
                         maxHeight = targetImgPx
+                        setPadding(dp(2), dp(2), dp(2), dp(2))
+                        background = roundedBoxBg(
+                            fillColor = Color.argb(110, 15, 23, 42),
+                            strokeColor = Color.argb(160, 244, 114, 182),
+                            strokePx = dp(1.2f),
+                            radiusPx = dp(10).toFloat()
+                        )
                     }
                     card.addView(img, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
                 }
@@ -672,20 +746,42 @@ class FloatingTriggerOverlayService : Service() {
                     setTypeface(null, Typeface.BOLD)
                     gravity = Gravity.CENTER
                     maxLines = 2
-                    if (isImageOverlay) {
-                        setPadding(dp(7), dp(3), dp(7), dp(3))
+                    if (isMemeOrCustomImage || isProfileOverlay) {
+                        setPadding(dp(8), dp(3), dp(8), dp(3))
                         background = roundedBoxBg(
-                            fillColor = Color.argb(175, 15, 23, 42),
-                            strokeColor = Color.TRANSPARENT,
-                            strokePx = 0,
-                            radiusPx = dp(6).toFloat()
+                            fillColor = Color.argb(195, 15, 23, 42),
+                            strokeColor = if (isProfileOverlay) Color.argb(150, 34, 211, 238) else Color.TRANSPARENT,
+                            strokePx = if (isProfileOverlay) dp(0.8f) else 0,
+                            radiusPx = dp(8).toFloat()
                         )
                     }
                 }
                 card.addView(
                     titleTv,
                     LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                        if (isImageOverlay) topMargin = dp(3)
+                        if (isMemeOrCustomImage || isProfileOverlay) topMargin = dp(3)
+                    }
+                )
+            }
+            if (isProfileOverlay && ov.subtitle.isNotBlank()) {
+                val subTv = TextView(this).apply {
+                    text = ov.subtitle
+                    setTextColor(Color.rgb(165, 243, 252))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 8.5f * scale.coerceIn(0.75f, 1.3f))
+                    gravity = Gravity.CENTER
+                    maxLines = 1
+                    setPadding(dp(7), dp(2), dp(7), dp(2))
+                    background = roundedBoxBg(
+                        fillColor = Color.argb(180, 15, 23, 42),
+                        strokeColor = Color.TRANSPARENT,
+                        strokePx = 0,
+                        radiusPx = dp(6).toFloat()
+                    )
+                }
+                card.addView(
+                    subTv,
+                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        topMargin = dp(2)
                     }
                 )
             }
@@ -726,16 +822,17 @@ class FloatingTriggerOverlayService : Service() {
     // ==================== Layer 2: External Trigger Pins OUTSIDE Floating (Colored + Per-Challenge Eye) ====================
 
     private fun setMarkerWindowsTemporaryHidden(hide: Boolean) {
-        updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = hide)
-        liveStageView?.visibility = if (hide) View.INVISIBLE else View.VISIBLE
-        val targetVis = if (hide) View.INVISIBLE else View.VISIBLE
+        updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = hide || isTemporarilyHiddenForScan)
+        liveStageView?.visibility = if (hide || isTemporarilyHiddenForScan) View.INVISIBLE else View.VISIBLE
+        val targetVis = if (hide || isTemporarilyHiddenForScan) View.INVISIBLE else View.VISIBLE
         for (entry in markerWindows.values) {
             if (entry.root.visibility != targetVis) {
                 entry.root.visibility = targetVis
             }
+            val shouldBeNotTouchable = hide || isTemporarilyHiddenForScan
             val currentlyNotTouchable = (entry.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
-            if (currentlyNotTouchable != hide) {
-                entry.params.flags = if (hide) {
+            if (currentlyNotTouchable != shouldBeNotTouchable) {
+                entry.params.flags = if (shouldBeNotTouchable) {
                     entry.params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 } else {
                     entry.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
@@ -743,6 +840,29 @@ class FloatingTriggerOverlayService : Service() {
                 try {
                     windowManager.updateViewLayout(entry.root, entry.params)
                 } catch (_: Throwable) {}
+            }
+        }
+    }
+
+    private fun setAllFloatingWindowsHiddenForScan(hide: Boolean) {
+        setMarkerWindowsTemporaryHidden(hide || isTemporarilyHiddenForAutomation)
+        val hud = singleHudView
+        val hParams = singleHudParams
+        if (hud != null && hParams != null) {
+            if (hide) {
+                if (hud.visibility == View.VISIBLE) {
+                    hud.visibility = View.INVISIBLE
+                }
+                if ((hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0) {
+                    hParams.flags = hParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                    try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
+                }
+            } else {
+                if ((hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) {
+                    hParams.flags = hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                    try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
+                }
+                refreshSingleHudVisuals()
             }
         }
     }
@@ -1213,6 +1333,17 @@ class FloatingTriggerOverlayService : Service() {
         }
         btnEngineTiny = engineBtn
 
+        val lockBtn = makeHudButton("🔒", Color.rgb(153, 27, 27), Color.WHITE) {
+            val nextLock = !engine.state.value.blockTouchDuringChallenge
+            engine.setBlockTouchDuringChallenge(nextLock)
+            Toast.makeText(
+                this,
+                if (nextLock) "🔒 Kunci Sentuhan Saat Challenge: AKTIF" else "🔓 Kunci Sentuhan Saat Challenge: NONAKTIF",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+        btnLockTiny = lockBtn
+
         val pinBtn = makeHudButton("📍", Color.rgb(51, 65, 85), Color.WHITE) {
             val next = !engine.state.value.isPositionEditMode
             engine.setPositionEditMode(next)
@@ -1250,7 +1381,7 @@ class FloatingTriggerOverlayService : Service() {
         }
         btnCloseTiny = closeBtn
 
-        val gap = dp(3)
+        val gap = dp(2.5f)
         fun gapLp() = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
@@ -1258,6 +1389,7 @@ class FloatingTriggerOverlayService : Service() {
 
         topRow.addView(titleBtn, gapLp())
         topRow.addView(engineBtn, gapLp())
+        topRow.addView(lockBtn, gapLp())
         topRow.addView(pinBtn, gapLp())
         topRow.addView(menuBtn, gapLp())
         topRow.addView(minBtn, gapLp())
@@ -1746,6 +1878,7 @@ class FloatingTriggerOverlayService : Service() {
 
         val btnVis = if (collapsedBubble) View.GONE else View.VISIBLE
         btnEngineTiny?.visibility = btnVis
+        btnLockTiny?.visibility = btnVis
         btnPinTiny?.visibility = btnVis
         btnSubMenuTiny?.visibility = btnVis
         btnMinTiny?.visibility = btnVis
@@ -1764,17 +1897,17 @@ class FloatingTriggerOverlayService : Service() {
         hudTitleBtn?.apply {
             text = if (collapsedBubble) "⚔️" else "⠿"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (collapsedBubble) 14.5f else 11.5f) * s)
-            setPadding(dp(5.5f * s), dp(4f * s), dp(5.5f * s), dp(4f * s))
-            minimumWidth = dp(26 * s)
-            minimumHeight = dp(26 * s)
-            (layoutParams as? LinearLayout.LayoutParams)?.marginEnd = if (collapsedBubble) 0 else dp(3 * s)
+            setPadding(dp(5f * s), dp(4f * s), dp(5f * s), dp(4f * s))
+            minimumWidth = dp(25 * s)
+            minimumHeight = dp(25 * s)
+            (layoutParams as? LinearLayout.LayoutParams)?.marginEnd = if (collapsedBubble) 0 else dp(2.5f * s)
         }
 
-        val sp = 10.5f * s
-        val pH = dp(7 * s)
-        val pV = dp(4.5f * s)
-        val minW = dp(27 * s)
-        val minH = dp(27 * s)
+        val sp = 10f * s
+        val pH = dp(6.5f * s)
+        val pV = dp(4f * s)
+        val minW = dp(25 * s)
+        val minH = dp(25 * s)
 
         btnEngineTiny?.apply {
             val active = st.isEngineEnabled && !st.isEmergencyStopped
@@ -1785,6 +1918,21 @@ class FloatingTriggerOverlayService : Service() {
             minimumHeight = minH
             background = roundedBoxBg(
                 fillColor = if (active) Color.rgb(14, 116, 144) else Color.rgb(71, 85, 105),
+                strokeColor = Color.TRANSPARENT,
+                strokePx = 0,
+                radiusPx = dp(6 * s).toFloat()
+            )
+        }
+
+        btnLockTiny?.apply {
+            val lockOn = st.blockTouchDuringChallenge
+            text = if (lockOn) "🔒" else "🔓"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
+            setPadding(pH, pV, pH, pV)
+            minimumWidth = minW
+            minimumHeight = minH
+            background = roundedBoxBg(
+                fillColor = if (lockOn) Color.rgb(185, 28, 28) else Color.rgb(51, 65, 85),
                 strokeColor = Color.TRANSPARENT,
                 strokePx = 0,
                 radiusPx = dp(6 * s).toFloat()
@@ -1954,6 +2102,94 @@ class FloatingTriggerOverlayService : Service() {
             windowManager.defaultDisplay?.getRealMetrics(dm)
             dm.widthPixels.coerceAtLeast(1) to dm.heightPixels.coerceAtLeast(1)
         }
+    }
+
+    private fun resolveOverlayBitmapAsyncAware(uriStr: String, reqSizePx: Int): Bitmap? {
+        val clean = uriStr.trim()
+        if (clean.isEmpty()) return null
+        val key = "$clean::$reqSizePx"
+        overlayBitmapCache.get(key)?.let { cached ->
+            if (!cached.isRecycled) return cached
+        }
+        val lower = clean.lowercase()
+        if (lower.startsWith("http://") || lower.startsWith("https://")) {
+            if (inFlightRemoteBitmaps.add(key)) {
+                serviceScope.launch {
+                    val fetched = withContext(Dispatchers.IO) {
+                        downloadRemoteBitmap(clean, reqSizePx)
+                    }
+                    inFlightRemoteBitmaps.remove(key)
+                    if (fetched != null) {
+                        overlayBitmapCache.put(key, fetched)
+                        if (lastState.activeOverlays.isNotEmpty() && !isTemporarilyHiddenForAutomation && !isTemporarilyHiddenForScan) {
+                            renderLiveStage(lastState)
+                        }
+                    }
+                }
+            }
+            return null
+        }
+        val localBmp = decodeSafeScaledBitmap(clean, reqSizePx)
+        if (localBmp != null) {
+            overlayBitmapCache.put(key, localBmp)
+        }
+        return localBmp
+    }
+
+    private fun downloadRemoteBitmap(urlString: String, reqSizePx: Int): Bitmap? {
+        return try {
+            val conn = (URL(urlString).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 2500
+                readTimeout = 3500
+                instanceFollowRedirects = true
+                requestMethod = "GET"
+            }
+            val bytes = conn.inputStream.use { it.readBytes() }
+            conn.disconnect()
+            if (bytes.isEmpty()) return null
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOpts)
+            var sample = 1
+            val maxDim = maxOf(boundsOpts.outWidth, boundsOpts.outHeight)
+            val target = reqSizePx.coerceAtLeast(96)
+            while (maxDim / sample > target * 2) {
+                sample *= 2
+            }
+            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample.coerceAtLeast(1) }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun createCircularFramedBitmap(src: Bitmap, diameterPx: Int, ringColor: Int, ringWidthPx: Float): Bitmap {
+        val size = diameterPx.coerceAtLeast(24)
+        val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        val cropSide = min(src.width, src.height).coerceAtLeast(1)
+        val cropX = (src.width - cropSide) / 2
+        val cropY = (src.height - cropSide) / 2
+        val squareSrc = Bitmap.createBitmap(src, cropX, cropY, cropSide, cropSide)
+        val scaled = if (squareSrc.width == size) squareSrc else Bitmap.createScaledBitmap(squareSrc, size, size, true)
+        if (scaled !== squareSrc && !squareSrc.isRecycled) squareSrc.recycle()
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = BitmapShader(scaled, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        }
+        val radius = size / 2f
+        val innerR = (radius - ringWidthPx).coerceAtLeast(2f)
+        canvas.drawCircle(radius, radius, innerR, paint)
+
+        if (ringWidthPx > 0f) {
+            val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = ringWidthPx
+                color = ringColor
+            }
+            canvas.drawCircle(radius, radius, (radius - ringWidthPx / 2f).coerceAtLeast(2f), strokePaint)
+        }
+        if (scaled !== src && !scaled.isRecycled) scaled.recycle()
+        return out
     }
 
     private fun decodeSafeScaledBitmap(uriStr: String, reqSizePx: Int): Bitmap? {

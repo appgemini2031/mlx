@@ -426,6 +426,7 @@ internal object TriggerQueueManager {
     const val MAX_TOTAL_QUEUE = 40
     const val MAX_PENDING_PER_HIGH_PRIO_RULE = 10
     const val MAX_PENDING_PER_LOW_PRIO_RULE = 3
+    const val MAX_LOW_PRIO_QUEUE_AGE_MS = 12_000L
 
     fun isHighValueSource(source: UniversalTriggerSource): Boolean =
         source == UniversalTriggerSource.GIFT ||
@@ -434,6 +435,21 @@ internal object TriggerQueueManager {
 
     fun maxPendingForRule(source: UniversalTriggerSource): Int =
         if (isHighValueSource(source)) MAX_PENDING_PER_HIGH_PRIO_RULE else MAX_PENDING_PER_LOW_PRIO_RULE
+
+    fun isStaleLowPriorityTask(task: QueuedDispatchTask, nowMs: Long): Boolean {
+        if (isHighValueSource(task.event.source)) return false
+        if (task.enqueuedAtMs <= 0L) return false
+        return (nowMs - task.enqueuedAtMs) > MAX_LOW_PRIO_QUEUE_AGE_MS
+    }
+
+    fun shouldSkipDequeuedTaskForCooldown(
+        rule: UniversalTriggerRule,
+        lastCompletedAtMs: Long,
+        nowMs: Long
+    ): Boolean {
+        if (!rule.enableCooldown || rule.cooldownMs <= 0L || lastCompletedAtMs <= 0L) return false
+        return (nowMs - lastCompletedAtMs) < rule.cooldownMs
+    }
 
     private val queueComparator = compareByDescending<QueuedDispatchTask> { it.priority }
         .thenByDescending { isHighValueSource(it.event.source) }
@@ -542,6 +558,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
     private val isWorkerRunning = AtomicBoolean(false)
     private val isSingleTestRunningGuard = AtomicBoolean(false)
     private val activeChallengeCount = AtomicInteger(0)
+    private val ruleLastCompletedAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     private val recentEventIds = object : LinkedHashMap<String, Long>(256, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean = size > 300
@@ -1560,6 +1577,41 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                         continue
                     }
 
+                    val nowAtDequeue = System.currentTimeMillis()
+                    if (TriggerQueueManager.isStaleLowPriorityTask(nextTask, nowAtDequeue)) {
+                        appendHistory(
+                            TriggerExecutionRecord(
+                                timestampMs = nowAtDequeue,
+                                ruleId = liveRule.id,
+                                ruleName = liveRule.triggerName,
+                                source = nextTask.event.source,
+                                senderName = nextTask.event.senderName,
+                                quantity = nextTask.event.quantity,
+                                status = DispatchStatus.SKIPPED_CONDITION,
+                                detail = "Antrean spam lama dilewati (>12d)"
+                            )
+                        )
+                        continue
+                    }
+
+                    val prevCompletedAt = ruleLastCompletedAtMs[liveRule.id] ?: 0L
+                    if (TriggerQueueManager.shouldSkipDequeuedTaskForCooldown(liveRule, prevCompletedAt, nowAtDequeue)) {
+                        val rem = (liveRule.cooldownMs - (nowAtDequeue - prevCompletedAt)).coerceAtLeast(0L)
+                        appendHistory(
+                            TriggerExecutionRecord(
+                                timestampMs = nowAtDequeue,
+                                ruleId = liveRule.id,
+                                ruleName = liveRule.triggerName,
+                                source = nextTask.event.source,
+                                senderName = nextTask.event.senderName,
+                                quantity = nextTask.event.quantity,
+                                status = DispatchStatus.SKIPPED_COOLDOWN,
+                                detail = "Antrean dibatalkan cooldown pasca-aksi (sisa ${rem}ms)"
+                            )
+                        )
+                        continue
+                    }
+
                     val taskBudgetMs = ((if (liveRule.enableVisualCooldownWait) liveRule.cooldownMaxWaitMs else 0L) + 120_000L)
                         .coerceIn(30_000L, 320_000L)
 
@@ -1607,14 +1659,33 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                         }
                     }
 
+                    val finishedAtMs = System.currentTimeMillis()
                     val execStatus = if (_state.value.isEmergencyStopped) {
                         DispatchStatus.STOPPED_EMERGENCY
                     } else {
                         DispatchStatus.EXECUTED
                     }
+                    if (execStatus == DispatchStatus.EXECUTED &&
+                        liveRule.enableCooldown &&
+                        liveRule.cooldownMs > 0L
+                    ) {
+                        ruleLastCompletedAtMs[liveRule.id] = finishedAtMs
+                        synchronized(evalLock) {
+                            _state.update { st ->
+                                val curCounter = st.counters[liveRule.id]
+                                if (curCounter != null) {
+                                    val nextCounters = st.counters.toMutableMap()
+                                    nextCounters[liveRule.id] = curCounter.copy(lastExecutedAtMs = finishedAtMs)
+                                    st.copy(counters = nextCounters)
+                                } else {
+                                    st
+                                }
+                            }
+                        }
+                    }
                     appendHistory(
                         TriggerExecutionRecord(
-                            timestampMs = System.currentTimeMillis(),
+                            timestampMs = finishedAtMs,
                             ruleId = liveRule.id,
                             ruleName = liveRule.triggerName,
                             source = nextTask.event.source,

@@ -244,3 +244,53 @@ object GameCoverGeometry {
     }
 }
 
+enum class BlockerWindowMode {
+    DETACHED,
+    FULL_SCREEN,
+    HOLE_PUNCH
+}
+
+data class TouchBlockerPlan(
+    val mode: BlockerWindowMode,
+    val holePanels: List<PixelRect> = emptyList()
+)
+
+/**
+ * Pure JVM planner determining exact WindowManager attachment state for touch-blocker overlays.
+ * When unlocked, mode MUST be DETACHED so zero overlay InputWindowHandles remain over the game.
+ */
+object TouchBlockerLifecyclePlanner {
+
+    fun computePlan(
+        shouldLock: Boolean,
+        screenW: Int,
+        screenH: Int,
+        activeHole: PixelRect?
+    ): TouchBlockerPlan {
+        if (!shouldLock) {
+            return TouchBlockerPlan(mode = BlockerWindowMode.DETACHED, holePanels = emptyList())
+        }
+        if (activeHole == null) {
+            return TouchBlockerPlan(mode = BlockerWindowMode.FULL_SCREEN, holePanels = emptyList())
+        }
+        val panels = TouchBlockerHoleGeometry.computePanels(screenW, screenH, activeHole)
+        return TouchBlockerPlan(mode = BlockerWindowMode.HOLE_PUNCH, holePanels = panels)
+    }
+}
+
+/**
+ * Pure JVM planner determining whether the fullscreen liveStageView overlay should be attached.
+ * Detaching liveStageView when empty guarantees zero MATCH_PARENT overlay windows over MLBB.
+ */
+object LiveStageLifecyclePlanner {
+
+    fun shouldAttachStageWindow(
+        hasScanAreas: Boolean,
+        activeOverlayCount: Int,
+        hasSimEvent: Boolean,
+        hiddenForScan: Boolean
+    ): Boolean {
+        if (hiddenForScan) return false
+        return hasScanAreas || activeOverlayCount > 0 || hasSimEvent
+    }
+}

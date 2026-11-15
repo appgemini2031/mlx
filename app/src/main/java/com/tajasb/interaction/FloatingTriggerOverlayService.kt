@@ -258,6 +258,10 @@ class FloatingTriggerOverlayService : Service() {
     private var touchBlockerStatusPill: TextView? = null
     private val touchBlockerHolePanels = mutableListOf<FrameLayout>()
     private val touchBlockerHoleParams = mutableListOf<WindowManager.LayoutParams>()
+    private var currentBlockerMode: BlockerWindowMode = BlockerWindowMode.DETACHED
+    private var currentAppliedHole: PixelRect? = null
+    private var currentHolePanelRects: List<PixelRect> = emptyList()
+    private var lastTouchBlockerPillText: String = ""
     private var singleHudView: LinearLayout? = null
     private var singleHudParams: WindowManager.LayoutParams? = null
     private var subMenuComposeOwner: FloatingComposeOwner? = null
@@ -374,10 +378,10 @@ class FloatingTriggerOverlayService : Service() {
         }
         MlbbGestureAccessibilityService.onSyncTouchLockOverlay = { locked ->
             val engineExecuting = engine.state.value.isChallengeExecuting
-            syncedTouchLockOverride = if (locked || lastState.isChallengeExecuting || engineExecuting) {
-                locked
-            } else {
-                null
+            syncedTouchLockOverride = when {
+                locked -> true
+                lastState.isChallengeExecuting || engineExecuting -> false
+                else -> null
             }
             if (!locked) {
                 clearAutomationTouchHoleAndRestoreUi(refreshBlocker = false)
@@ -386,8 +390,6 @@ class FloatingTriggerOverlayService : Service() {
         }
 
         engine.setFloatingOverlayRunning(true)
-        attachLiveStageWindow()
-        attachTouchBlockerWindow()
         attachSingleFloatingHudWindow()
         observeEngineState()
     }
@@ -417,6 +419,7 @@ class FloatingTriggerOverlayService : Service() {
             }
             ACTION_HIDE_FLOATING -> {
                 isSubMenuExpanded = false
+                setHudFocusableForKeyboard(false)
                 engine.setFloatingHiddenForLive(true)
                 lastState = engine.state.value
                 refreshSingleHudVisuals()
@@ -445,6 +448,7 @@ class FloatingTriggerOverlayService : Service() {
             }
         } else if (hiddenLive) {
             isSubMenuExpanded = false
+            setHudFocusableForKeyboard(false)
             engine.setFloatingHiddenForLive(true)
             Toast.makeText(
                 this,
@@ -523,15 +527,15 @@ class FloatingTriggerOverlayService : Service() {
         removeAllCoverWindows()
         subMenuComposeOwner?.onDetach()
         subMenuComposeOwner = null
-        singleHudView?.let { safeRemoveView(it) }
+        singleHudView?.let { safeRemoveViewImmediate(it) }
         singleHudView = null
-        touchBlockerHolePanels.forEach { safeRemoveView(it) }
-        touchBlockerHolePanels.clear()
-        touchBlockerHoleParams.clear()
-        touchBlockerView?.let { safeRemoveView(it) }
-        touchBlockerView = null
-        liveStageView?.let { safeRemoveView(it) }
-        liveStageView = null
+        singleHudParams = null
+        detachAllHoleBlockerPanels()
+        detachTouchBlockerWindow()
+        detachLiveStageWindow()
+        currentBlockerMode = BlockerWindowMode.DETACHED
+        currentAppliedHole = null
+        lastTouchBlockerPillText = ""
         engine.setFloatingOverlayRunning(false)
     }
 
@@ -550,9 +554,11 @@ class FloatingTriggerOverlayService : Service() {
                 val isFirst = !initialized
                 initialized = true
 
-                // Jika baru menekan ▶ Tes 1 konsep, ciutkan dropdown & lepas fokus keyboard seketika agar tidak berkedip
-                if (st.isSingleTestRunning && !prev.isSingleTestRunning) {
-                    if (isSubMenuExpanded) {
+                // Jika baru menekan ▶ Tes 1 konsep atau aksi sentuh berjalan, lepas fokus keyboard seketika agar tidak menghalangi touch game
+                if ((st.isSingleTestRunning && !prev.isSingleTestRunning) ||
+                    (st.isChallengeExecuting && !prev.isChallengeExecuting)
+                ) {
+                    if (st.isSingleTestRunning && isSubMenuExpanded) {
                         isSubMenuExpanded = false
                     }
                     setHudFocusableForKeyboard(false)
@@ -562,10 +568,12 @@ class FloatingTriggerOverlayService : Service() {
                 val cfgRatioChanged = isFirst ||
                     lastAppliedXRatio != st.floatingConfig.hudXRatio ||
                     lastAppliedYRatio != st.floatingConfig.hudYRatio
-                val hudChanged = isFirst ||
+                val hudLayoutRelevantChanged = isFirst ||
                     prev.isFloatingHiddenForLive != st.isFloatingHiddenForLive ||
                     prev.floatingConfig != st.floatingConfig ||
-                    prev.isPositionEditMode != st.isPositionEditMode ||
+                    prev.isPositionEditMode != st.isPositionEditMode
+                val hudChanged = isFirst ||
+                    hudLayoutRelevantChanged ||
                     prev.isCoverEditMode != st.isCoverEditMode ||
                     prev.isEngineEnabled != st.isEngineEnabled ||
                     prev.isEmergencyStopped != st.isEmergencyStopped ||
@@ -590,7 +598,11 @@ class FloatingTriggerOverlayService : Service() {
                     prev.gameCoverAreas != st.gameCoverAreas ||
                     prev.isCoverEditMode != st.isCoverEditMode ||
                     prev.activeCoverAreaId != st.activeCoverAreaId
-                if (syncedTouchLockOverride != null && st.isChallengeExecuting == syncedTouchLockOverride) {
+
+                val overrideBeforeReset = syncedTouchLockOverride
+                if (overrideBeforeReset != null &&
+                    (st.isChallengeExecuting == overrideBeforeReset || !st.isChallengeExecuting)
+                ) {
                     syncedTouchLockOverride = null
                 }
 
@@ -601,7 +613,10 @@ class FloatingTriggerOverlayService : Service() {
                     prev.isEmergencyStopped != st.isEmergencyStopped ||
                     prev.cooldownStatusHint != st.cooldownStatusHint ||
                     prev.touchConflictHint != st.touchConflictHint ||
-                    syncedTouchLockOverride != null
+                    syncedTouchLockOverride != null ||
+                    (overrideBeforeReset != null &&
+                        syncedTouchLockOverride == null &&
+                        currentBlockerMode != BlockerWindowMode.DETACHED)
 
                 lastState = st
 
@@ -609,7 +624,7 @@ class FloatingTriggerOverlayService : Service() {
                     if (hudChanged) {
                         refreshSingleHudVisuals()
                     }
-                    if (!isDraggingHud && !st.isFloatingHiddenForLive && (hudChanged || cfgRatioChanged)) {
+                    if (!isDraggingHud && !st.isFloatingHiddenForLive && (hudLayoutRelevantChanged || cfgRatioChanged)) {
                         if (cfgRatioChanged) {
                             applyHudPositionFromConfig(st.floatingConfig, forceApply = false)
                         } else {
@@ -641,7 +656,8 @@ class FloatingTriggerOverlayService : Service() {
 
     // ==================== Layer 1: Non-Blocking Feedback & Uploaded Overlay Stage ====================
 
-    private fun attachLiveStageWindow() {
+    private fun attachLiveStageWindowIfNeeded(): FrameLayout? {
+        liveStageView?.let { return it }
         val container = FrameLayout(this)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -658,17 +674,45 @@ class FloatingTriggerOverlayService : Service() {
             y = 0
             applyCutoutMode(this)
         }
-        try {
+        return try {
             windowManager.addView(container, params)
             liveStageView = container
+            container
         } catch (t: Throwable) {
             Log.e(TAG, "Gagal pasang live stage overlay: ${t.message}")
+            null
         }
     }
 
-    private fun attachTouchBlockerWindow() {
+    private fun detachLiveStageWindow() {
+        val stage = liveStageView ?: return
+        stage.removeAllViews()
+        safeRemoveViewImmediate(stage)
+        liveStageView = null
+        scanHiddenStage = false
+    }
+
+    private fun ensureTouchBlockerWindowAttached(notTouchable: Boolean): FrameLayout? {
+        val existing = touchBlockerView
+        val existingParams = touchBlockerParams
+        if (existing != null && existingParams != null) {
+            val currentlyNotTouchable = (existingParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
+            if (currentlyNotTouchable != notTouchable) {
+                existingParams.flags = if (notTouchable) {
+                    existingParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                } else {
+                    existingParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                }
+                try { windowManager.updateViewLayout(existing, existingParams) } catch (_: Throwable) {}
+            }
+            if (existing.visibility != View.VISIBLE) {
+                existing.visibility = View.VISIBLE
+            }
+            return existing
+        }
+
         val blocker = FrameLayout(this).apply {
-            visibility = View.GONE
+            visibility = View.VISIBLE
             isClickable = true
             isFocusable = false
             background = GradientDrawable().apply {
@@ -679,7 +723,7 @@ class FloatingTriggerOverlayService : Service() {
             setOnTouchListener { _, _ -> true }
         }
         val pill = TextView(this).apply {
-            text = "🔒 Layar Terkunci — Challenge Sedang Berjalan"
+            text = "🔒 Layar Terkunci — Aksi ML Sedang Berjalan"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
             setTypeface(null, Typeface.BOLD)
@@ -692,6 +736,7 @@ class FloatingTriggerOverlayService : Service() {
             )
         }
         touchBlockerStatusPill = pill
+        lastTouchBlockerPillText = pill.text.toString()
         blocker.addView(
             pill,
             FrameLayout.LayoutParams(
@@ -703,14 +748,17 @@ class FloatingTriggerOverlayService : Service() {
             }
         )
 
+        var baseFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+        if (notTouchable) {
+            baseFlags = baseFlags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            baseFlags,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -719,45 +767,111 @@ class FloatingTriggerOverlayService : Service() {
             applyCutoutMode(this)
         }
         touchBlockerParams = params
-        try {
+        return try {
             windowManager.addView(blocker, params)
             touchBlockerView = blocker
+            blocker
         } catch (t: Throwable) {
             Log.e(TAG, "Gagal pasang touch blocker overlay: ${t.message}")
+            touchBlockerParams = null
+            touchBlockerStatusPill = null
+            null
+        }
+    }
+
+    private fun detachTouchBlockerWindow() {
+        touchBlockerView?.let { safeRemoveViewImmediate(it) }
+        touchBlockerView = null
+        touchBlockerParams = null
+        touchBlockerStatusPill = null
+        lastTouchBlockerPillText = ""
+        scanHiddenBlockerPill = false
+    }
+
+    private fun detachAllHoleBlockerPanels() {
+        if (touchBlockerHolePanels.isEmpty()) {
+            currentHolePanelRects = emptyList()
+            return
+        }
+        touchBlockerHolePanels.forEach { safeRemoveViewImmediate(it) }
+        touchBlockerHolePanels.clear()
+        touchBlockerHoleParams.clear()
+        currentHolePanelRects = emptyList()
+    }
+
+    private fun syncHoleBlockerPanels(rects: List<PixelRect>) {
+        // Lepas kelebihan panel segera agar tidak menyisakan window transparan di WindowManager
+        while (touchBlockerHolePanels.size > rects.size) {
+            val lastIdx = touchBlockerHolePanels.lastIndex
+            safeRemoveViewImmediate(touchBlockerHolePanels.removeAt(lastIdx))
+            touchBlockerHoleParams.removeAt(lastIdx)
         }
 
-        // 4 panel hole-punch untuk menyisakan lubang gesture Accessibility sambil tetap mengunci area layar lain
-        repeat(4) {
-            val strip = FrameLayout(this).apply {
-                visibility = View.GONE
-                isClickable = true
-                isFocusable = false
-                setBackgroundColor(Color.TRANSPARENT)
-                setOnTouchListener { _, _ -> true }
-            }
-            val stripParams = WindowManager.LayoutParams(
-                1,
-                1,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                PixelFormat.TRANSLUCENT
-            ).apply {
-                gravity = Gravity.TOP or Gravity.START
-                x = 0
-                y = 0
-                applyCutoutMode(this)
-            }
-            try {
-                windowManager.addView(strip, stripParams)
-                touchBlockerHolePanels += strip
-                touchBlockerHoleParams += stripParams
-            } catch (t: Throwable) {
-                Log.e(TAG, "Gagal pasang panel hole touch blocker: ${t.message}")
+        if (currentHolePanelRects == rects && touchBlockerHolePanels.size == rects.size) {
+            return
+        }
+
+        for (i in rects.indices) {
+            val r = rects[i]
+            val rw = (r.right - r.left).coerceAtLeast(1)
+            val rh = (r.bottom - r.top).coerceAtLeast(1)
+            if (i < touchBlockerHolePanels.size) {
+                val panel = touchBlockerHolePanels[i]
+                val pParams = touchBlockerHoleParams[i]
+                val posOrSizeChanged = pParams.x != r.left || pParams.y != r.top || pParams.width != rw || pParams.height != rh
+                val flagsChanged = (pParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
+                if (posOrSizeChanged || flagsChanged || panel.visibility != View.VISIBLE) {
+                    pParams.x = r.left
+                    pParams.y = r.top
+                    pParams.width = rw
+                    pParams.height = rh
+                    pParams.flags = pParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                    if (panel.visibility != View.VISIBLE) {
+                        panel.visibility = View.VISIBLE
+                    }
+                    try { windowManager.updateViewLayout(panel, pParams) } catch (_: Throwable) {}
+                }
+            } else {
+                val strip = FrameLayout(this).apply {
+                    visibility = View.VISIBLE
+                    isClickable = true
+                    isFocusable = false
+                    setBackgroundColor(Color.TRANSPARENT)
+                    setOnTouchListener { _, _ -> true }
+                }
+                val stripParams = WindowManager.LayoutParams(
+                    rw,
+                    rh,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.START
+                    x = r.left
+                    y = r.top
+                    applyCutoutMode(this)
+                }
+                try {
+                    windowManager.addView(strip, stripParams)
+                    touchBlockerHolePanels += strip
+                    touchBlockerHoleParams += stripParams
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Gagal pasang panel hole touch blocker: ${t.message}")
+                }
             }
         }
+        currentHolePanelRects = rects
+    }
+
+    private fun isTouchLockActuallyActive(st: UniversalEngineUiState): Boolean {
+        val isExecutingNow = syncedTouchLockOverride ?: st.isChallengeExecuting
+        return !isTemporarilyHiddenForScan &&
+            st.blockTouchDuringChallenge &&
+            isExecutingNow &&
+            !st.isPositionEditMode &&
+            !st.isEmergencyStopped
     }
 
     private fun clearAutomationTouchHoleAndRestoreUi(refreshBlocker: Boolean) {
@@ -768,7 +882,7 @@ class FloatingTriggerOverlayService : Service() {
             touchHiddenHudForHole = false
             val hud = singleHudView
             val hParams = singleHudParams
-            if (hud != null && hParams != null && !isTemporarilyHiddenForScan && !scanHiddenHud) {
+            if (hud != null && hParams != null && !isTemporarilyHiddenForScan && !scanHiddenHud && !lastState.isFloatingHiddenForLive) {
                 hud.alpha = lastState.floatingConfig.hudOpacity
                 if ((hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) {
                     hParams.flags = hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
@@ -776,19 +890,28 @@ class FloatingTriggerOverlayService : Service() {
                 }
             }
         }
-        if (hadAutomationUiState) {
+        if (hadAutomationUiState && markerWindows.isNotEmpty()) {
             setMarkerWindowsTemporaryHidden(false, skipTouchBlockerRefresh = true)
         }
-        if (refreshBlocker) {
+        if (refreshBlocker && (currentBlockerMode != BlockerWindowMode.DETACHED || isTouchLockActuallyActive(lastState))) {
             updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
         }
     }
 
     private fun setTouchHoleForAutomation(holeRect: PixelRect?, active: Boolean) {
         if (active) {
+            if (!isTouchLockActuallyActive(lastState)) {
+                activeTouchHolePx = null
+                if (currentBlockerMode != BlockerWindowMode.DETACHED) {
+                    updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
+                }
+                return
+            }
             isTemporarilyHiddenForAutomation = true
             activeTouchHolePx = holeRect
-            setMarkerWindowsTemporaryHidden(true, skipTouchBlockerRefresh = true)
+            if (markerWindows.isNotEmpty()) {
+                setMarkerWindowsTemporaryHidden(true, skipTouchBlockerRefresh = true)
+            }
 
             if (holeRect != null) {
                 val hud = singleHudView
@@ -811,22 +934,9 @@ class FloatingTriggerOverlayService : Service() {
             }
             updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
         } else {
-            clearAutomationTouchHoleAndRestoreUi(refreshBlocker = true)
-        }
-    }
-
-    private fun hideAllHoleBlockerPanels() {
-        for (i in touchBlockerHolePanels.indices) {
-            val panel = touchBlockerHolePanels[i]
-            val pParams = touchBlockerHoleParams[i]
-            if (panel.visibility != View.GONE) {
-                panel.visibility = View.GONE
-            }
-            val notTouchable = (pParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
-            if (!notTouchable) {
-                pParams.flags = pParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                try { windowManager.updateViewLayout(panel, pParams) } catch (_: Throwable) {}
-            }
+            clearAutomationTouchHoleAndRestoreUi(
+                refreshBlocker = currentBlockerMode != BlockerWindowMode.DETACHED || isTouchLockActuallyActive(lastState)
+            )
         }
     }
 
@@ -834,11 +944,9 @@ class FloatingTriggerOverlayService : Service() {
         st: UniversalEngineUiState,
         temporarilyHiddenForAutomation: Boolean
     ) {
-        val blocker = touchBlockerView ?: return
-        val params = touchBlockerParams ?: return
         // Saat scan OCR berlangsung (isTemporarilyHiddenForScan), blocker dilepas sementara agar OCR bersih.
         // Saat challenge menjalankan klik/tahan/geser (activeTouchHolePx != null), blocker TETAP MENGUNCI SENTUHAN USER
-        // melalui 4 panel di luar lubang gesture, sementara Accessibility gesture bebas menyentuh game MLBB.
+        // melalui panel di luar lubang gesture, sementara Accessibility gesture bebas menyentuh game MLBB.
         val isExecutingNow = syncedTouchLockOverride ?: st.isChallengeExecuting
         val shouldLock = !isTemporarilyHiddenForScan &&
             !temporarilyHiddenForAutomation &&
@@ -847,55 +955,58 @@ class FloatingTriggerOverlayService : Service() {
             !st.isPositionEditMode &&
             !st.isEmergencyStopped
 
-        if (!shouldLock) {
-            if (blocker.visibility != View.GONE) {
-                blocker.visibility = View.GONE
+        val (screenW, screenH) = if (shouldLock) getDisplaySizePx() else (1080 to 2400)
+        val hole = if (shouldLock) activeTouchHolePx else null
+        val plan = TouchBlockerLifecyclePlanner.computePlan(
+            shouldLock = shouldLock,
+            screenW = screenW,
+            screenH = screenH,
+            activeHole = hole
+        )
+
+        if (plan.mode == BlockerWindowMode.DETACHED) {
+            if (currentBlockerMode == BlockerWindowMode.DETACHED &&
+                touchBlockerView == null &&
+                touchBlockerHolePanels.isEmpty()
+            ) {
+                return
             }
-            if ((params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0) {
-                params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                try { windowManager.updateViewLayout(blocker, params) } catch (_: Throwable) {}
-            }
-            hideAllHoleBlockerPanels()
+            detachAllHoleBlockerPanels()
+            detachTouchBlockerWindow()
+            currentBlockerMode = BlockerWindowMode.DETACHED
+            currentAppliedHole = null
             return
         }
 
-        if (blocker.visibility != View.VISIBLE) {
-            blocker.visibility = View.VISIBLE
-        }
-        when {
-            st.touchConflictHint.isNotBlank() -> {
-                touchBlockerStatusPill?.text = st.touchConflictHint
-            }
-            st.cooldownStatusHint.isNotBlank() -> {
-                touchBlockerStatusPill?.text = "🔒 Layar Terkunci • ${st.cooldownStatusHint}"
-            }
-            else -> {
-                touchBlockerStatusPill?.text = "🔒 Layar Terkunci — Aksi ML Sedang Berjalan"
-            }
+        val desiredPillText = when {
+            st.touchConflictHint.isNotBlank() -> st.touchConflictHint
+            st.cooldownStatusHint.isNotBlank() -> "🔒 Layar Terkunci • ${st.cooldownStatusHint}"
+            else -> "🔒 Layar Terkunci — Aksi ML Sedang Berjalan"
         }
 
-        val hole = activeTouchHolePx
-        if (hole == null) {
-            // Kunci penuh seluruh layar (mis. selama Home->Game)
-            if (!scanHiddenBlockerPill && touchBlockerStatusPill?.visibility != View.VISIBLE) {
-                touchBlockerStatusPill?.visibility = View.VISIBLE
+        if (plan.mode == BlockerWindowMode.FULL_SCREEN) {
+            detachAllHoleBlockerPanels()
+            ensureTouchBlockerWindowAttached(notTouchable = false) ?: return
+            touchBlockerStatusPill?.let { pill ->
+                if (lastTouchBlockerPillText != desiredPillText) {
+                    pill.text = desiredPillText
+                    lastTouchBlockerPillText = desiredPillText
+                }
+                val targetPillVis = if (scanHiddenBlockerPill) View.INVISIBLE else View.VISIBLE
+                if (pill.visibility != targetPillVis) {
+                    pill.visibility = targetPillVis
+                }
             }
-            val currentlyNotTouchable = (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
-            if (currentlyNotTouchable) {
-                params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-                try { windowManager.updateViewLayout(blocker, params) } catch (_: Throwable) {}
-            }
-            hideAllHoleBlockerPanels()
+            currentBlockerMode = BlockerWindowMode.FULL_SCREEN
+            currentAppliedHole = null
         } else {
-            // Mode lubang gesture: visual merah tetap tampil NON-TOUCHABLE, sementara 4 panel strip mengunci area luar lubang
-            val currentlyNotTouchable = (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
-            if (!currentlyNotTouchable) {
-                params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                try { windowManager.updateViewLayout(blocker, params) } catch (_: Throwable) {}
-            }
-            val (screenW, screenH) = getDisplaySizePx()
-            val pill = touchBlockerStatusPill
-            if (pill != null) {
+            // Mode lubang gesture: visual merah non-touchable + panel strip presisi mengunci area luar lubang
+            ensureTouchBlockerWindowAttached(notTouchable = true) ?: return
+            touchBlockerStatusPill?.let { pill ->
+                if (lastTouchBlockerPillText != desiredPillText) {
+                    pill.text = desiredPillText
+                    lastTouchBlockerPillText = desiredPillText
+                }
                 if (pill.width <= 0 || pill.height <= 0) {
                     pill.measure(
                         View.MeasureSpec.makeMeasureSpec(screenW, View.MeasureSpec.AT_MOST),
@@ -908,49 +1019,33 @@ class FloatingTriggerOverlayService : Service() {
                 val pLeft = if (hasLayout) pill.left else ((screenW - pw) / 2).coerceAtLeast(0)
                 val pTop = if (hasLayout) pill.top else dp(24)
                 val pRect = PixelRect(pLeft, pTop, pLeft + pw, pTop + ph)
-                val overlapsPill = pw > 0 && ph > 0 && ScanRegionGeometry.rectsIntersect(pRect, hole)
-                pill.visibility = if (scanHiddenBlockerPill || overlapsPill) View.INVISIBLE else View.VISIBLE
-            }
-            val rects = TouchBlockerHoleGeometry.computePanels(screenW, screenH, hole)
-            for (i in touchBlockerHolePanels.indices) {
-                val panel = touchBlockerHolePanels[i]
-                val pParams = touchBlockerHoleParams[i]
-                if (i < rects.size) {
-                    val r = rects[i]
-                    val rw = (r.right - r.left).coerceAtLeast(1)
-                    val rh = (r.bottom - r.top).coerceAtLeast(1)
-                    val posOrSizeChanged = pParams.x != r.left || pParams.y != r.top || pParams.width != rw || pParams.height != rh
-                    val flagsChanged = (pParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
-                    pParams.x = r.left
-                    pParams.y = r.top
-                    pParams.width = rw
-                    pParams.height = rh
-                    pParams.flags = pParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-                    if (panel.visibility != View.VISIBLE) {
-                        panel.visibility = View.VISIBLE
-                    }
-                    if (posOrSizeChanged || flagsChanged) {
-                        try { windowManager.updateViewLayout(panel, pParams) } catch (_: Throwable) {}
-                    }
-                } else {
-                    if (panel.visibility != View.GONE) {
-                        panel.visibility = View.GONE
-                    }
-                    if ((pParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0) {
-                        pParams.flags = pParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                        try { windowManager.updateViewLayout(panel, pParams) } catch (_: Throwable) {}
-                    }
+                val overlapsPill = hole != null && pw > 0 && ph > 0 && ScanRegionGeometry.rectsIntersect(pRect, hole)
+                val targetPillVis = if (scanHiddenBlockerPill || overlapsPill) View.INVISIBLE else View.VISIBLE
+                if (pill.visibility != targetPillVis) {
+                    pill.visibility = targetPillVis
                 }
             }
+            syncHoleBlockerPanels(plan.holePanels)
+            currentBlockerMode = BlockerWindowMode.HOLE_PUNCH
+            currentAppliedHole = hole
         }
     }
 
     private fun renderLiveStage(st: UniversalEngineUiState) {
-        val stage = liveStageView ?: return
-        stage.removeAllViews()
         val hasScanAreas = st.isPositionEditMode && !st.isFloatingHiddenForLive &&
             st.rules.any { it.isPinVisible && it.enableVisualCooldownWait }
-        if (st.activeOverlays.isEmpty() && st.lastSimEvent == null && !hasScanAreas) return
+        val shouldAttach = LiveStageLifecyclePlanner.shouldAttachStageWindow(
+            hasScanAreas = hasScanAreas,
+            activeOverlayCount = st.activeOverlays.size,
+            hasSimEvent = st.lastSimEvent != null,
+            hiddenForScan = false
+        )
+        if (!shouldAttach) {
+            detachLiveStageWindow()
+            return
+        }
+        val stage = attachLiveStageWindowIfNeeded() ?: return
+        stage.removeAllViews()
 
         val (screenW, screenH) = getDisplaySizePx()
 
@@ -2689,6 +2784,7 @@ class FloatingTriggerOverlayService : Service() {
                 imm?.showSoftInput(target, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
             }
         } else {
+            hud.clearFocus()
             imm?.hideSoftInputFromWindow(hud.windowToken, 0)
         }
     }
@@ -2758,16 +2854,34 @@ class FloatingTriggerOverlayService : Service() {
         val st = lastState
         val cfg = st.floatingConfig
         val hud = singleHudView ?: return
+        val hParams = singleHudParams
 
         if (st.isFloatingHiddenForLive) {
-            hud.visibility = View.GONE
+            setHudFocusableForKeyboard(false)
+            if (hud.visibility != View.GONE) {
+                hud.visibility = View.GONE
+            }
+            if (hParams != null && (hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0) {
+                hParams.flags = hParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
+            }
             return
         }
         if (scanHiddenHud || isTemporarilyHiddenForScan) {
-            hud.visibility = View.INVISIBLE
+            if (hud.visibility != View.INVISIBLE) {
+                hud.visibility = View.INVISIBLE
+            }
             return
         }
-        hud.visibility = View.VISIBLE
+        if (hParams != null && !touchHiddenHudForHole &&
+            (hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
+        ) {
+            hParams.flags = hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
+        }
+        if (hud.visibility != View.VISIBLE) {
+            hud.visibility = View.VISIBLE
+        }
         if (touchHiddenHudForHole) {
             hud.alpha = 0.15f
             return
@@ -3203,6 +3317,14 @@ class FloatingTriggerOverlayService : Service() {
         try {
             windowManager.removeView(view)
         } catch (_: Throwable) {}
+    }
+
+    private fun safeRemoveViewImmediate(view: View) {
+        try {
+            windowManager.removeViewImmediate(view)
+        } catch (_: Throwable) {
+            safeRemoveView(view)
+        }
     }
 
     private fun dp(value: Number): Int {

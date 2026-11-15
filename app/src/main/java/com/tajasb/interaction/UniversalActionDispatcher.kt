@@ -338,12 +338,14 @@ class UniversalActionDispatcher(
         // Kunci layar HANYA selama aksi sentuh / navigasi nyata sedang dikerjakan (bukan saat delay/cooldown/tes 1 konsep)
         val acquiresTouchLock = !alreadySpanLocked && enableTouchLock && !isMlbbMatchActive &&
             TouchExecutionPlanner.isHardwareTouchAction(step.actionType)
+        var touchWindowReleasedInLoop = false
         if (acquiresTouchLock) {
             engageTouchLock()
         }
         try {
             for (r in 0 until repeats) {
                 if (isAborted(startEpoch)) break
+                touchWindowReleasedInLoop = false
                 val resolvedParam = resolveTemplate(step.paramValue, event, counterCount, rule)
                 val resolvedSecondary = resolveTemplate(step.secondaryValue, event, counterCount, rule)
 
@@ -586,6 +588,9 @@ class UniversalActionDispatcher(
                                     autoReleaseTouchWindow = false
                                 )
                             }
+                            if (releaseWindowOnFinish) {
+                                touchWindowReleasedInLoop = true
+                            }
                             summary = when {
                                 outcome == GestureOutcome.COMPLETED && tries > 1 ->
                                     "$modeLabel (${(px * 100).toInt()}%, ${(py * 100).toInt()}% • retry ${tries - 1}x)"
@@ -650,6 +655,9 @@ class UniversalActionDispatcher(
                                     durationMs = durMs,
                                     autoReleaseTouchWindow = false
                                 )
+                            }
+                            if (releaseWindowOnFinish) {
+                                touchWindowReleasedInLoop = true
                             }
                             summary = when {
                                 outcome == GestureOutcome.COMPLETED && tries > 1 ->
@@ -744,7 +752,10 @@ class UniversalActionDispatcher(
         } finally {
             if (acquiresTouchLock) {
                 releaseTouchLockAndWindow()
-            } else if (!alreadySpanLocked && TouchExecutionPlanner.isHardwareTouchAction(step.actionType)) {
+            } else if (!alreadySpanLocked &&
+                !touchWindowReleasedInLoop &&
+                TouchExecutionPlanner.isHardwareTouchAction(step.actionType)
+            ) {
                 MlbbGestureAccessibilityService.peekInstance()?.releaseTouchWindowAfterAction()
             }
         }

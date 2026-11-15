@@ -214,6 +214,9 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
     private var preparedHoleRect: PixelRect? = null
 
     @Volatile
+    private var hasActiveTouchPreparation: Boolean = false
+
+    @Volatile
     var lastForegroundAppPackage: String? = null
         private set
 
@@ -351,6 +354,7 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
     suspend fun syncTouchLockOverlayNow(locked: Boolean) {
         if (!locked) {
             preparedHoleRect = null
+            hasActiveTouchPreparation = false
         }
         val hook = onSyncTouchLockOverlay ?: return
         awaitMain { hook(locked) }
@@ -365,31 +369,33 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun prepareTouchWindow(holeRect: PixelRect?) {
-        if (holeRect != null && preparedHoleRect == holeRect) {
+        if (hasActiveTouchPreparation && holeRect != null && preparedHoleRect == holeRect) {
             return
         }
         val prepareRegion = onPrepareScreenForTouchRegion
         val prepareFallback = onPrepareScreenForTouch
         if (prepareRegion != null) {
             preparedHoleRect = holeRect
+            hasActiveTouchPreparation = true
             awaitMain { prepareRegion(holeRect, true) }
             delay(28L)
         } else if (prepareFallback != null) {
             preparedHoleRect = holeRect
+            hasActiveTouchPreparation = true
             awaitMain { prepareFallback(true) }
             delay(65L)
         }
     }
 
     private suspend fun releaseTouchWindow() {
-        val hadPrepared = preparedHoleRect != null
+        val wasPrepared = hasActiveTouchPreparation || preparedHoleRect != null
         preparedHoleRect = null
+        hasActiveTouchPreparation = false
+        if (!wasPrepared) return
         val prepareRegion = onPrepareScreenForTouchRegion
         val prepareFallback = onPrepareScreenForTouch
         if (prepareRegion != null) {
-            if (hadPrepared || onPrepareScreenForTouchRegion != null) {
-                awaitMain { prepareRegion(null, false) }
-            }
+            awaitMain { prepareRegion(null, false) }
         } else if (prepareFallback != null) {
             awaitMain { prepareFallback(false) }
         }

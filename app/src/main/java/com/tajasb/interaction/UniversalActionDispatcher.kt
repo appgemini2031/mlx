@@ -198,10 +198,10 @@ class UniversalActionDispatcher(
             if (isAborted(startEpoch)) return "${step.actionType.displayName} (Batal)"
         }
 
-        val effectiveDur = if (rule.enableDuration) {
-            rule.durationMs.coerceIn(0L, 60_000L)
-        } else {
-            step.durationMs.coerceIn(0L, 60_000L)
+        val effectiveDur = when {
+            !rule.enableDuration -> step.durationMs.coerceIn(0L, 60_000L)
+            step.durationMs != 2500L -> step.durationMs.coerceIn(0L, 60_000L)
+            else -> rule.durationMs.coerceIn(0L, 60_000L)
         }
         val repeats = step.repeatCount.coerceIn(1, 20)
         var summary = step.actionType.displayName

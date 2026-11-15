@@ -1504,16 +1504,20 @@ private fun EditChallengeAndChoreographyDialog(
                     s.copy(stepName = s.stepName.trim(), durationMs = ms, paramValue = ms.toString())
                 }
                 ActionType.SIMULATED_CLICK -> {
+                    val hold = s.durationMs.coerceIn(0L, 12_000L)
                     s.copy(
                         stepName = s.stepName.trim(),
-                        durationMs = s.durationMs.coerceIn(0L, 12_000L),
+                        secondaryValue = hold.toString(),
+                        durationMs = hold,
                         dragDurationMs = s.dragDurationMs.coerceIn(0L, 5000L)
                     )
                 }
                 ActionType.SIMULATED_SWIPE -> {
+                    val dur = s.durationMs.coerceIn(0L, 5000L)
                     s.copy(
                         stepName = s.stepName.trim(),
-                        durationMs = s.durationMs.coerceIn(0L, 5000L)
+                        secondaryValue = dur.toString(),
+                        durationMs = dur
                     )
                 }
                 else -> s.copy(
@@ -1688,16 +1692,16 @@ private fun EditChallengeAndChoreographyDialog(
                                     label = "Lebar",
                                     valueText = "${(draftCooldownWidth * 100).roundToInt()}%",
                                     accent = NeonCyan,
-                                    onDecrement = { draftCooldownWidth = (draftCooldownWidth - 0.01f).coerceIn(0.025f, 0.35f) },
-                                    onIncrement = { draftCooldownWidth = (draftCooldownWidth + 0.01f).coerceIn(0.025f, 0.35f) },
+                                    onDecrement = { draftCooldownWidth = (draftCooldownWidth - 0.01f).coerceIn(0.025f, 0.45f) },
+                                    onIncrement = { draftCooldownWidth = (draftCooldownWidth + 0.01f).coerceIn(0.025f, 0.45f) },
                                     modifier = Modifier.weight(1f)
                                 )
                                 PrecisionStepperBar(
                                     label = "Tinggi",
                                     valueText = "${(draftCooldownHeight * 100).roundToInt()}%",
                                     accent = EmeraldGreen,
-                                    onDecrement = { draftCooldownHeight = (draftCooldownHeight - 0.01f).coerceIn(0.025f, 0.45f) },
-                                    onIncrement = { draftCooldownHeight = (draftCooldownHeight + 0.01f).coerceIn(0.025f, 0.45f) },
+                                    onDecrement = { draftCooldownHeight = (draftCooldownHeight - 0.01f).coerceIn(0.025f, 0.55f) },
+                                    onIncrement = { draftCooldownHeight = (draftCooldownHeight + 0.01f).coerceIn(0.025f, 0.55f) },
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -1708,8 +1712,8 @@ private fun EditChallengeAndChoreographyDialog(
                                     accent = NeonOrange,
                                     decLabel = "◀",
                                     incLabel = "▶",
-                                    onDecrement = { draftCooldownOffsetX = (draftCooldownOffsetX - 0.01f).coerceIn(-0.25f, 0.25f) },
-                                    onIncrement = { draftCooldownOffsetX = (draftCooldownOffsetX + 0.01f).coerceIn(-0.25f, 0.25f) },
+                                    onDecrement = { draftCooldownOffsetX = (draftCooldownOffsetX - 0.01f).coerceIn(-0.30f, 0.30f) },
+                                    onIncrement = { draftCooldownOffsetX = (draftCooldownOffsetX + 0.01f).coerceIn(-0.30f, 0.30f) },
                                     modifier = Modifier.weight(1f)
                                 )
                                 PrecisionStepperBar(
@@ -1718,8 +1722,8 @@ private fun EditChallengeAndChoreographyDialog(
                                     accent = NeonPurple,
                                     decLabel = "▲",
                                     incLabel = "▼",
-                                    onDecrement = { draftCooldownOffsetY = (draftCooldownOffsetY - 0.01f).coerceIn(-0.25f, 0.25f) },
-                                    onIncrement = { draftCooldownOffsetY = (draftCooldownOffsetY + 0.01f).coerceIn(-0.25f, 0.25f) },
+                                    onDecrement = { draftCooldownOffsetY = (draftCooldownOffsetY - 0.01f).coerceIn(-0.30f, 0.30f) },
+                                    onIncrement = { draftCooldownOffsetY = (draftCooldownOffsetY + 0.01f).coerceIn(-0.30f, 0.30f) },
                                     modifier = Modifier.weight(1f)
                                 )
                             }

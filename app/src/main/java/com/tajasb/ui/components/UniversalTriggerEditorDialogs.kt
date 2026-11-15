@@ -1261,7 +1261,17 @@ private fun ActionStepCard(
                 minValue = 0L,
                 resetKey = step.id,
                 onValueChange = { raw ->
-                    raw.filter(Char::isDigit).toLongOrNull()?.let { v -> onUpdate(step.copy(durationMs = v.coerceAtLeast(0L))) }
+                    raw.filter(Char::isDigit).toLongOrNull()?.let { v ->
+                        val nextDur = v.coerceAtLeast(0L)
+                        val updatedStep = when (step.actionType) {
+                            ActionType.SIMULATED_CLICK, ActionType.SIMULATED_SWIPE ->
+                                step.copy(durationMs = nextDur, secondaryValue = nextDur.toString())
+                            ActionType.DELAY, ActionType.WAIT, ActionType.DURATION, ActionType.HOME_BACK_GAME ->
+                                step.copy(durationMs = nextDur, paramValue = nextDur.toString())
+                            else -> step.copy(durationMs = nextDur)
+                        }
+                        onUpdate(updatedStep)
+                    }
                 },
                 modifier = Modifier.weight(1f)
             )
@@ -1458,7 +1468,27 @@ fun UniversalPresetEditorOverlay(
             ActionLibraryPickerOverlay(
                 onDismiss = { showActionPicker = false },
                 onSelectAction = { type ->
-                    draft = draft.copy(actionSequence = draft.actionSequence + UniversalActionStep(actionType = type))
+                    val defaultDur = when (type) {
+                        ActionType.SIMULATED_CLICK -> 0L
+                        ActionType.SIMULATED_SWIPE -> 220L
+                        ActionType.DELAY, ActionType.WAIT, ActionType.DURATION -> 500L
+                        ActionType.HOME_BACK_GAME -> 1500L
+                        else -> 2500L
+                    }
+                    val newStep = UniversalActionStep(
+                        actionType = type,
+                        paramValue = when (type) {
+                            ActionType.SIMULATED_SWIPE -> "RIGHT"
+                            ActionType.DELAY, ActionType.WAIT, ActionType.DURATION, ActionType.HOME_BACK_GAME -> defaultDur.toString()
+                            else -> ""
+                        },
+                        secondaryValue = when (type) {
+                            ActionType.SIMULATED_CLICK, ActionType.SIMULATED_SWIPE -> defaultDur.toString()
+                            else -> ""
+                        },
+                        durationMs = defaultDur
+                    )
+                    draft = draft.copy(actionSequence = draft.actionSequence + newStep)
                     showActionPicker = false
                 }
             )

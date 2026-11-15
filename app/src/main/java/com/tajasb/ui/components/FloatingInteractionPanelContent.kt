@@ -147,7 +147,11 @@ fun FloatingInteractionPanelContent(
 
     val pickerResult by FloatingPickerBridge.result.collectAsState()
     LaunchedEffect(pickerResult) {
-        if (pickerResult != null) {
+        val res = pickerResult ?: return@LaunchedEffect
+        val belongsToFloating = res.requestKey.isBlank() ||
+            res.requestKey.startsWith(FloatingPickerProxyActivity.PREFIX_RULE_IMAGE) ||
+            res.requestKey.startsWith(FloatingPickerProxyActivity.PREFIX_RULE_SOUND)
+        if (belongsToFloating) {
             FloatingPickerBridge.consumeResult()
         }
     }
@@ -1439,11 +1443,11 @@ private fun DropdownConceptEditor(
                             valueText = "${(draftCooldownWidthRatio * 100).roundToInt()}%",
                             accent = NeonCyan,
                             onDecrement = {
-                                draftCooldownWidthRatio = (draftCooldownWidthRatio - 0.01f).coerceIn(0.025f, 0.35f)
+                                draftCooldownWidthRatio = (draftCooldownWidthRatio - 0.01f).coerceIn(0.025f, 0.45f)
                                 onSaveDraftOnly(buildRule())
                             },
                             onIncrement = {
-                                draftCooldownWidthRatio = (draftCooldownWidthRatio + 0.01f).coerceIn(0.025f, 0.35f)
+                                draftCooldownWidthRatio = (draftCooldownWidthRatio + 0.01f).coerceIn(0.025f, 0.45f)
                                 onSaveDraftOnly(buildRule())
                             },
                             modifier = Modifier.weight(1f)
@@ -1453,11 +1457,11 @@ private fun DropdownConceptEditor(
                             valueText = "${(draftCooldownHeightRatio * 100).roundToInt()}%",
                             accent = EmeraldGreen,
                             onDecrement = {
-                                draftCooldownHeightRatio = (draftCooldownHeightRatio - 0.01f).coerceIn(0.025f, 0.45f)
+                                draftCooldownHeightRatio = (draftCooldownHeightRatio - 0.01f).coerceIn(0.025f, 0.55f)
                                 onSaveDraftOnly(buildRule())
                             },
                             onIncrement = {
-                                draftCooldownHeightRatio = (draftCooldownHeightRatio + 0.01f).coerceIn(0.025f, 0.45f)
+                                draftCooldownHeightRatio = (draftCooldownHeightRatio + 0.01f).coerceIn(0.025f, 0.55f)
                                 onSaveDraftOnly(buildRule())
                             },
                             modifier = Modifier.weight(1f)
@@ -1471,11 +1475,11 @@ private fun DropdownConceptEditor(
                             decLabel = "◀",
                             incLabel = "▶",
                             onDecrement = {
-                                draftCooldownOffsetX = (draftCooldownOffsetX - 0.01f).coerceIn(-0.25f, 0.25f)
+                                draftCooldownOffsetX = (draftCooldownOffsetX - 0.01f).coerceIn(-0.30f, 0.30f)
                                 onSaveDraftOnly(buildRule())
                             },
                             onIncrement = {
-                                draftCooldownOffsetX = (draftCooldownOffsetX + 0.01f).coerceIn(-0.25f, 0.25f)
+                                draftCooldownOffsetX = (draftCooldownOffsetX + 0.01f).coerceIn(-0.30f, 0.30f)
                                 onSaveDraftOnly(buildRule())
                             },
                             modifier = Modifier.weight(1f)
@@ -1487,11 +1491,11 @@ private fun DropdownConceptEditor(
                             decLabel = "▲",
                             incLabel = "▼",
                             onDecrement = {
-                                draftCooldownOffsetY = (draftCooldownOffsetY - 0.01f).coerceIn(-0.25f, 0.25f)
+                                draftCooldownOffsetY = (draftCooldownOffsetY - 0.01f).coerceIn(-0.30f, 0.30f)
                                 onSaveDraftOnly(buildRule())
                             },
                             onIncrement = {
-                                draftCooldownOffsetY = (draftCooldownOffsetY + 0.01f).coerceIn(-0.25f, 0.25f)
+                                draftCooldownOffsetY = (draftCooldownOffsetY + 0.01f).coerceIn(-0.30f, 0.30f)
                                 onSaveDraftOnly(buildRule())
                             },
                             modifier = Modifier.weight(1f)

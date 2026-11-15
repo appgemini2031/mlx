@@ -205,6 +205,7 @@ class FloatingTriggerOverlayService : Service() {
         private const val EXTRA_START_EDIT_MODE = "extra_start_edit_mode"
         private const val EXTRA_OPEN_PANEL = "extra_open_panel"
         private const val EXTRA_HIDDEN_LIVE = "extra_hidden_live"
+        private const val EXTRA_SYNC_FROM_ENGINE = "extra_sync_from_engine"
         private const val ACTION_STOP_SERVICE = "com.tajasb.interaction.ACTION_STOP_FLOATING_HUD"
         private const val ACTION_SHOW_FLOATING = "com.tajasb.interaction.ACTION_SHOW_FLOATING_HUD"
         private const val ACTION_HIDE_FLOATING = "com.tajasb.interaction.ACTION_HIDE_FLOATING_HUD"
@@ -216,13 +217,15 @@ class FloatingTriggerOverlayService : Service() {
             context: Context,
             startInEditMode: Boolean = false,
             openSettingsPanel: Boolean = false,
-            hideFloatingForLive: Boolean = false
+            hideFloatingForLive: Boolean = false,
+            syncFromEngine: Boolean = false
         ): Boolean {
             if (!canDrawOverlays(context)) return false
             val intent = Intent(context, FloatingTriggerOverlayService::class.java).apply {
                 putExtra(EXTRA_START_EDIT_MODE, startInEditMode)
                 putExtra(EXTRA_OPEN_PANEL, openSettingsPanel)
                 putExtra(EXTRA_HIDDEN_LIVE, hideFloatingForLive)
+                putExtra(EXTRA_SYNC_FROM_ENGINE, syncFromEngine)
             }
             ContextCompat.startForegroundService(context, intent)
             return true
@@ -416,11 +419,16 @@ class FloatingTriggerOverlayService : Service() {
             }
         }
 
+        val syncFromEngine = intent?.getBooleanExtra(EXTRA_SYNC_FROM_ENGINE, false) == true
         val openEdit = intent?.getBooleanExtra(EXTRA_START_EDIT_MODE, false) == true
         val openPanel = intent?.getBooleanExtra(EXTRA_OPEN_PANEL, false) == true
         val hiddenLive = intent?.getBooleanExtra(EXTRA_HIDDEN_LIVE, false) == true
 
-        if (hiddenLive) {
+        if (syncFromEngine) {
+            if (engine.state.value.isFloatingHiddenForLive) {
+                isSubMenuExpanded = false
+            }
+        } else if (hiddenLive) {
             isSubMenuExpanded = false
             engine.setFloatingHiddenForLive(true)
             Toast.makeText(
@@ -843,15 +851,24 @@ class FloatingTriggerOverlayService : Service() {
                 params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 try { windowManager.updateViewLayout(blocker, params) } catch (_: Throwable) {}
             }
+            val (screenW, screenH) = getDisplaySizePx()
             val pill = touchBlockerStatusPill
             if (pill != null) {
-                val pw = pill.width.coerceAtLeast(pill.measuredWidth)
-                val ph = pill.height.coerceAtLeast(pill.measuredHeight)
-                val pRect = PixelRect(pill.left, pill.top, pill.left + pw, pill.top + ph)
+                if (pill.width <= 0 || pill.height <= 0) {
+                    pill.measure(
+                        View.MeasureSpec.makeMeasureSpec(screenW, View.MeasureSpec.AT_MOST),
+                        View.MeasureSpec.makeMeasureSpec(screenH, View.MeasureSpec.AT_MOST)
+                    )
+                }
+                val pw = pill.width.takeIf { it > 0 } ?: pill.measuredWidth
+                val ph = pill.height.takeIf { it > 0 } ?: pill.measuredHeight
+                val hasLayout = pill.width > 0 && pill.height > 0
+                val pLeft = if (hasLayout) pill.left else ((screenW - pw) / 2).coerceAtLeast(0)
+                val pTop = if (hasLayout) pill.top else dp(24)
+                val pRect = PixelRect(pLeft, pTop, pLeft + pw, pTop + ph)
                 val overlapsPill = pw > 0 && ph > 0 && ScanRegionGeometry.rectsIntersect(pRect, hole)
                 pill.visibility = if (scanHiddenBlockerPill || overlapsPill) View.INVISIBLE else View.VISIBLE
             }
-            val (screenW, screenH) = getDisplaySizePx()
             val rects = TouchBlockerHoleGeometry.computePanels(screenW, screenH, hole)
             for (i in touchBlockerHolePanels.indices) {
                 val panel = touchBlockerHolePanels[i]
@@ -1235,9 +1252,19 @@ class FloatingTriggerOverlayService : Service() {
             val blocker = touchBlockerView
             val pill = touchBlockerStatusPill
             if (blocker != null && blocker.visibility == View.VISIBLE && pill != null && pill.visibility == View.VISIBLE) {
-                val pw = pill.width.coerceAtLeast(pill.measuredWidth)
-                val ph = pill.height.coerceAtLeast(pill.measuredHeight)
-                val pRect = PixelRect(pill.left, pill.top, pill.left + pw, pill.top + ph)
+                val (screenW, screenH) = getDisplaySizePx()
+                if (pill.width <= 0 || pill.height <= 0) {
+                    pill.measure(
+                        View.MeasureSpec.makeMeasureSpec(screenW, View.MeasureSpec.AT_MOST),
+                        View.MeasureSpec.makeMeasureSpec(screenH, View.MeasureSpec.AT_MOST)
+                    )
+                }
+                val pw = pill.width.takeIf { it > 0 } ?: pill.measuredWidth
+                val ph = pill.height.takeIf { it > 0 } ?: pill.measuredHeight
+                val hasLayout = pill.width > 0 && pill.height > 0
+                val pLeft = if (hasLayout) pill.left else ((screenW - pw) / 2).coerceAtLeast(0)
+                val pTop = if (hasLayout) pill.top else dp(24)
+                val pRect = PixelRect(pLeft, pTop, pLeft + pw, pTop + ph)
                 if (pw > 0 && ph > 0 && ScanRegionGeometry.rectsIntersect(pRect, scanRect)) {
                     pill.visibility = View.INVISIBLE
                     scanHiddenBlockerPill = true
@@ -2485,15 +2512,7 @@ class FloatingTriggerOverlayService : Service() {
     ): TextView {
         val repeatHandler = Handler(Looper.getMainLooper())
         var holding = false
-        val stepRunner = object : Runnable {
-            override fun run() {
-                if (!holding) return
-                val step = if (isFinePrecisionStep) 0.0025f else 0.015f
-                onStep(step)
-                repeatHandler.postDelayed(this, 65L)
-            }
-        }
-        return TextView(this).apply {
+        val btn = TextView(this).apply {
             text = symbol
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
@@ -2503,29 +2522,49 @@ class FloatingTriggerOverlayService : Service() {
             minimumHeight = dp(32)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             background = roundedBoxBg(Color.rgb(30, 41, 59), Color.argb(140, 34, 211, 238), dp(1), dp(6).toFloat())
-            setOnTouchListener { v, event ->
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        v.parent?.requestDisallowInterceptTouchEvent(true)
-                        holding = true
-                        val step = if (isFinePrecisionStep) 0.0025f else 0.015f
-                        onStep(step)
-                        repeatHandler.removeCallbacks(stepRunner)
-                        repeatHandler.postDelayed(stepRunner, 260L)
-                        v.isPressed = true
-                        true
-                    }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        holding = false
-                        repeatHandler.removeCallbacks(stepRunner)
-                        v.isPressed = false
-                        v.parent?.requestDisallowInterceptTouchEvent(false)
-                        true
-                    }
-                    else -> false
+        }
+        val stepRunner = object : Runnable {
+            override fun run() {
+                if (!holding || !btn.isAttachedToWindow || !lastState.isPositionEditMode) {
+                    holding = false
+                    return
                 }
+                val step = if (isFinePrecisionStep) 0.0025f else 0.015f
+                onStep(step)
+                repeatHandler.postDelayed(this, 65L)
             }
         }
+        btn.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) = Unit
+            override fun onViewDetachedFromWindow(v: View) {
+                holding = false
+                repeatHandler.removeCallbacks(stepRunner)
+                v.isPressed = false
+            }
+        })
+        btn.setOnTouchListener { v, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                    holding = true
+                    val step = if (isFinePrecisionStep) 0.0025f else 0.015f
+                    onStep(step)
+                    repeatHandler.removeCallbacks(stepRunner)
+                    repeatHandler.postDelayed(stepRunner, 260L)
+                    v.isPressed = true
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    holding = false
+                    repeatHandler.removeCallbacks(stepRunner)
+                    v.isPressed = false
+                    v.parent?.requestDisallowInterceptTouchEvent(false)
+                    true
+                }
+                else -> false
+            }
+        }
+        return btn
     }
 
     private fun refreshPrecisionBarVisuals(st: UniversalEngineUiState) {

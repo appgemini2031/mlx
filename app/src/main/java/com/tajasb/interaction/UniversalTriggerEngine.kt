@@ -630,6 +630,13 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                 excludeCooldownRules = cmd.excludeCooldownRules
             )
             is MlbbControlCommand.SetLiveDisplayMode -> {
+                if (cmd.hiddenForLive == true) {
+                    setFloatingHiddenForLive(true)
+                } else {
+                    cmd.hiddenForLive?.let { setFloatingHiddenForLive(it) }
+                    cmd.positionEditMode?.let { setPositionEditMode(it) }
+                    cmd.coverEditMode?.let { setCoverEditMode(it) }
+                }
                 withContext(Dispatchers.Main) {
                     val runningNow = _state.value.isFloatingOverlayRunning
                     if (cmd.floatingRunning == false) {
@@ -638,16 +645,15 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                         (cmd.floatingRunning == true || !runningNow) &&
                         FloatingTriggerOverlayService.canDrawOverlays(appContext)
                     ) {
+                        val snapshot = _state.value
                         FloatingTriggerOverlayService.start(
                             context = appContext,
-                            startInEditMode = cmd.positionEditMode ?: _state.value.isPositionEditMode,
+                            startInEditMode = snapshot.isPositionEditMode,
                             openSettingsPanel = false,
-                            hideFloatingForLive = cmd.hiddenForLive ?: _state.value.isFloatingHiddenForLive
+                            hideFloatingForLive = snapshot.isFloatingHiddenForLive,
+                            syncFromEngine = true
                         )
                     }
-                    cmd.hiddenForLive?.let { setFloatingHiddenForLive(it) }
-                    cmd.positionEditMode?.let { setPositionEditMode(it) }
-                    cmd.coverEditMode?.let { setCoverEditMode(it) }
                 }
             }
             is MlbbControlCommand.UpsertRuleDetail -> {
@@ -1337,7 +1343,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
     private suspend fun waitForSkillCooldownIfNeeded(rule: UniversalTriggerRule): String? {
         if (!rule.enableVisualCooldownWait) return null
         val startedMs = System.currentTimeMillis()
-        val maxWait = rule.cooldownMaxWaitMs.coerceIn(2000L, 120_000L)
+        val maxWait = rule.cooldownMaxWaitMs.coerceIn(1500L, 180_000L)
         var maxCooldownSeenSec: Double? = null
         var lastCooldownSeenSec: Double? = null
         var reconfirmedReady = false
@@ -1622,9 +1628,9 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                 cooldownTargetStepId = if (updateTargetStep) targetStepId else rule.cooldownTargetStepId,
                 cooldownAreaWidthRatio = (widthRatio ?: rule.cooldownAreaWidthRatio).coerceIn(0.025f, 0.45f),
                 cooldownAreaHeightRatio = (heightRatio ?: rule.cooldownAreaHeightRatio).coerceIn(0.025f, 0.55f),
-                cooldownAreaOffsetX = (offsetX ?: rule.cooldownAreaOffsetX).coerceIn(-0.25f, 0.25f),
-                cooldownAreaOffsetY = (offsetY ?: rule.cooldownAreaOffsetY).coerceIn(-0.25f, 0.25f),
-                cooldownMaxWaitMs = (maxWaitMs ?: rule.cooldownMaxWaitMs).coerceIn(2000L, 120_000L)
+                cooldownAreaOffsetX = (offsetX ?: rule.cooldownAreaOffsetX).coerceIn(-0.30f, 0.30f),
+                cooldownAreaOffsetY = (offsetY ?: rule.cooldownAreaOffsetY).coerceIn(-0.30f, 0.30f),
+                cooldownMaxWaitMs = (maxWaitMs ?: rule.cooldownMaxWaitMs).coerceIn(1500L, 180_000L)
             )
         }
         persistAndUpdateRules(updated)
@@ -1754,12 +1760,20 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
     // ==================== Rule CRUD ====================
 
     fun addOrUpdateRule(rule: UniversalTriggerRule) {
+        val normalizedRule = rule.copy(
+            cooldownAreaWidthRatio = rule.cooldownAreaWidthRatio.coerceIn(0.025f, 0.45f),
+            cooldownAreaHeightRatio = rule.cooldownAreaHeightRatio.coerceIn(0.025f, 0.55f),
+            cooldownAreaOffsetX = rule.cooldownAreaOffsetX.coerceIn(-0.30f, 0.30f),
+            cooldownAreaOffsetY = rule.cooldownAreaOffsetY.coerceIn(-0.30f, 0.30f),
+            cooldownMaxWaitMs = rule.cooldownMaxWaitMs.coerceIn(1500L, 180_000L),
+            actionSequence = rule.actionSequence.map { UniversalInteractionJsonCodec.normalizeActionStep(it) }
+        )
         val current = _state.value.rules.toMutableList()
-        val idx = current.indexOfFirst { it.id == rule.id }
+        val idx = current.indexOfFirst { it.id == normalizedRule.id }
         if (idx >= 0) {
-            current[idx] = rule
+            current[idx] = normalizedRule
         } else {
-            current.add(rule)
+            current.add(normalizedRule)
         }
         persistAndUpdateRules(current)
     }
@@ -1919,7 +1933,8 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         _state.update {
             it.copy(
                 isFloatingHiddenForLive = hidden,
-                isPositionEditMode = if (hidden) false else it.isPositionEditMode
+                isPositionEditMode = if (hidden) false else it.isPositionEditMode,
+                isCoverEditMode = if (hidden) false else it.isCoverEditMode
             )
         }
     }

@@ -600,9 +600,9 @@ object UniversalInteractionJsonCodec {
             cooldownTargetStepId = obj.optString("cooldownTargetStepId", "").ifBlank { null },
             cooldownAreaWidthRatio = obj.optDouble("cooldownAreaWidthRatio", 0.085).toFloat().coerceIn(0.025f, 0.45f),
             cooldownAreaHeightRatio = obj.optDouble("cooldownAreaHeightRatio", 0.14).toFloat().coerceIn(0.025f, 0.55f),
-            cooldownAreaOffsetX = obj.optDouble("cooldownAreaOffsetX", 0.0).toFloat().coerceIn(-0.25f, 0.25f),
-            cooldownAreaOffsetY = obj.optDouble("cooldownAreaOffsetY", 0.0).toFloat().coerceIn(-0.25f, 0.25f),
-            cooldownMaxWaitMs = obj.optLong("cooldownMaxWaitMs", 35000L).coerceIn(2000L, 120000L)
+            cooldownAreaOffsetX = obj.optDouble("cooldownAreaOffsetX", 0.0).toFloat().coerceIn(-0.30f, 0.30f),
+            cooldownAreaOffsetY = obj.optDouble("cooldownAreaOffsetY", 0.0).toFloat().coerceIn(-0.30f, 0.30f),
+            cooldownMaxWaitMs = obj.optLong("cooldownMaxWaitMs", 35000L).coerceIn(1500L, 180_000L)
         )
     }
 
@@ -693,32 +693,111 @@ object UniversalInteractionJsonCodec {
         put("dragDurationMs", a.dragDurationMs)
     }
 
+    fun normalizeActionStep(step: UniversalActionStep): UniversalActionStep {
+        return when (step.actionType) {
+            ActionType.SIMULATED_CLICK -> {
+                val hold = step.durationMs.coerceIn(0L, 12_000L)
+                step.copy(
+                    durationMs = hold,
+                    secondaryValue = hold.toString(),
+                    delayMs = step.delayMs.coerceIn(0L, 60_000L),
+                    dragDurationMs = step.dragDurationMs.coerceIn(0L, 5000L),
+                    repeatCount = step.repeatCount.coerceIn(1, 30)
+                )
+            }
+            ActionType.SIMULATED_SWIPE -> {
+                val dur = step.durationMs.coerceIn(0L, 5000L)
+                step.copy(
+                    durationMs = dur,
+                    secondaryValue = dur.toString(),
+                    delayMs = step.delayMs.coerceIn(0L, 60_000L),
+                    repeatCount = step.repeatCount.coerceIn(1, 30)
+                )
+            }
+            ActionType.DELAY, ActionType.WAIT, ActionType.DURATION -> {
+                val ms = step.durationMs.coerceIn(0L, 60_000L)
+                val syncedParam = if (step.paramValue.isBlank() || step.paramValue.trim().toLongOrNull() != null) {
+                    ms.toString()
+                } else {
+                    step.paramValue
+                }
+                step.copy(
+                    durationMs = ms,
+                    paramValue = syncedParam,
+                    delayMs = step.delayMs.coerceIn(0L, 60_000L),
+                    repeatCount = step.repeatCount.coerceIn(1, 30)
+                )
+            }
+            ActionType.HOME_BACK_GAME -> {
+                val ms = step.durationMs.coerceIn(0L, 30_000L)
+                val syncedParam = if (step.paramValue.isBlank() || step.paramValue.trim().toLongOrNull() != null) {
+                    ms.toString()
+                } else {
+                    step.paramValue
+                }
+                step.copy(
+                    durationMs = ms,
+                    paramValue = syncedParam,
+                    delayMs = step.delayMs.coerceIn(0L, 60_000L),
+                    repeatCount = step.repeatCount.coerceIn(1, 30)
+                )
+            }
+            else -> step.copy(
+                durationMs = step.durationMs.coerceIn(0L, 60_000L),
+                delayMs = step.delayMs.coerceIn(0L, 60_000L),
+                repeatCount = step.repeatCount.coerceIn(1, 30)
+            )
+        }
+    }
+
     private fun jsonToAction(obj: JSONObject): UniversalActionStep {
         val type = enumOrDefault(obj.optString("actionType"), ActionType.TEXT_OVERLAY)
-        val defaultDur = if (type == ActionType.SIMULATED_CLICK) 0L else 2500L
-        val rawDur = obj.optLong("durationMs", defaultDur)
-        val safeDur = if (type == ActionType.SIMULATED_CLICK) {
-            rawDur.coerceIn(0L, 15000L)
-        } else {
-            rawDur.coerceAtLeast(0L)
+        val defaultDur = when (type) {
+            ActionType.SIMULATED_CLICK -> 0L
+            ActionType.SIMULATED_SWIPE -> 220L
+            ActionType.DELAY, ActionType.WAIT, ActionType.DURATION -> 500L
+            ActionType.HOME_BACK_GAME -> 1500L
+            else -> 2500L
         }
-        return UniversalActionStep(
-            id = obj.optString("id", "").ifBlank { UUID.randomUUID().toString() },
-            enabled = obj.optBoolean("enabled", true),
-            stepName = obj.optString("stepName", ""),
-            actionType = type,
-            paramValue = obj.optString("paramValue", ""),
-            secondaryValue = obj.optString("secondaryValue", ""),
-            durationMs = safeDur,
-            delayMs = obj.optLong("delayMs", 0L).coerceAtLeast(0L),
-            repeatCount = obj.optInt("repeatCount", 1).coerceIn(1, 30),
-            executionMode = enumOrDefault(obj.optString("executionMode"), ExecutionMode.SEQUENTIAL),
-            posX = if (obj.has("posX")) obj.optDouble("posX", 0.5).toFloat().coerceIn(0.02f, 0.98f) else null,
-            posY = if (obj.has("posY")) obj.optDouble("posY", 0.5).toFloat().coerceIn(0.02f, 0.98f) else null,
-            overlayScale = obj.optDouble("overlayScale", 1.0).toFloat().coerceIn(0.35f, 3.0f),
-            holdAndDrag = obj.optBoolean("holdAndDrag", false),
-            dragDirection = obj.optString("dragDirection", "RIGHT").ifBlank { "RIGHT" },
-            dragDurationMs = obj.optLong("dragDurationMs", 220L).coerceIn(0L, 5000L)
+        val rawParam = obj.optString("paramValue", "")
+        val rawSecondary = obj.optString("secondaryValue", "")
+        val hasExplicitDur = obj.has("durationMs")
+        val rawDur = if (hasExplicitDur) {
+            obj.optLong("durationMs", defaultDur)
+        } else {
+            when (type) {
+                ActionType.SIMULATED_CLICK, ActionType.SIMULATED_SWIPE ->
+                    rawSecondary.trim().filter { it.isDigit() }.toLongOrNull() ?: defaultDur
+                ActionType.DELAY, ActionType.WAIT, ActionType.DURATION, ActionType.HOME_BACK_GAME ->
+                    rawParam.trim().toLongOrNull() ?: defaultDur
+                else -> defaultDur
+            }
+        }
+        val safeDur = when (type) {
+            ActionType.SIMULATED_CLICK -> rawDur.coerceIn(0L, 12_000L)
+            ActionType.SIMULATED_SWIPE -> rawDur.coerceIn(0L, 5000L)
+            ActionType.HOME_BACK_GAME -> rawDur.coerceIn(0L, 30_000L)
+            else -> rawDur.coerceIn(0L, 60_000L)
+        }
+        return normalizeActionStep(
+            UniversalActionStep(
+                id = obj.optString("id", "").ifBlank { UUID.randomUUID().toString() },
+                enabled = obj.optBoolean("enabled", true),
+                stepName = obj.optString("stepName", ""),
+                actionType = type,
+                paramValue = rawParam,
+                secondaryValue = rawSecondary,
+                durationMs = safeDur,
+                delayMs = obj.optLong("delayMs", 0L).coerceAtLeast(0L),
+                repeatCount = obj.optInt("repeatCount", 1).coerceIn(1, 30),
+                executionMode = enumOrDefault(obj.optString("executionMode"), ExecutionMode.SEQUENTIAL),
+                posX = if (obj.has("posX") && !obj.isNull("posX")) obj.optDouble("posX", 0.5).toFloat().coerceIn(0.02f, 0.98f) else null,
+                posY = if (obj.has("posY") && !obj.isNull("posY")) obj.optDouble("posY", 0.5).toFloat().coerceIn(0.02f, 0.98f) else null,
+                overlayScale = obj.optDouble("overlayScale", 1.0).toFloat().coerceIn(0.35f, 3.0f),
+                holdAndDrag = obj.optBoolean("holdAndDrag", false),
+                dragDirection = obj.optString("dragDirection", "RIGHT").ifBlank { "RIGHT" },
+                dragDurationMs = obj.optLong("dragDurationMs", 220L).coerceIn(0L, 5000L)
+            )
         )
     }
 

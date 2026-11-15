@@ -1593,13 +1593,17 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                     } catch (t: Throwable) {
                         "Error eksekusi: ${t.message}"
                     } finally {
-                        activeChallengeCount.set(0)
+                        val hadLeftoverLock = activeChallengeCount.getAndSet(0) > 0 || _state.value.isChallengeExecuting
                         _state.update {
                             it.copy(
                                 isChallengeExecuting = false,
                                 cooldownStatusHint = "",
                                 touchConflictHint = ""
                             )
+                        }
+                        if (hadLeftoverLock) {
+                            ensureTouchLockSynchronized(false)
+                            MlbbGestureAccessibilityService.peekInstance()?.releaseTouchWindowAfterAction()
                         }
                     }
 
@@ -1623,7 +1627,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                 }
             } finally {
                 isWorkerRunning.set(false)
-                activeChallengeCount.set(0)
+                val hadLeftoverLock = activeChallengeCount.getAndSet(0) > 0 || _state.value.isChallengeExecuting
                 _state.update {
                     it.copy(
                         isChallengeExecuting = false,
@@ -1631,6 +1635,12 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                         touchConflictHint = "",
                         queueSize = synchronized(queueLock) { pendingQueue.size }
                     )
+                }
+                if (hadLeftoverLock) {
+                    scope.launch(Dispatchers.Main) {
+                        try { MlbbGestureAccessibilityService.onSyncTouchLockOverlay?.invoke(false) } catch (_: Throwable) {}
+                        try { MlbbGestureAccessibilityService.onPrepareScreenForTouchRegion?.invoke(null, false) } catch (_: Throwable) {}
+                    }
                 }
                 val hasMore = synchronized(queueLock) {
                     pendingQueue.isNotEmpty() && !_state.value.isEmergencyStopped && _state.value.isEngineEnabled

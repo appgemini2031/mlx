@@ -291,7 +291,7 @@ class FloatingTriggerOverlayService : Service() {
     private var isTemporarilyHiddenForScan = false
 
     @Volatile
-    private var forceTouchLockActive = false
+    private var syncedTouchLockOverride: Boolean? = null
 
     private var scanHiddenHud = false
     private var scanHiddenStage = false
@@ -373,7 +373,15 @@ class FloatingTriggerOverlayService : Service() {
             setFloatingWindowsHiddenForScanRegion(region, hideForScan)
         }
         MlbbGestureAccessibilityService.onSyncTouchLockOverlay = { locked ->
-            forceTouchLockActive = locked
+            val engineExecuting = engine.state.value.isChallengeExecuting
+            syncedTouchLockOverride = if (locked || lastState.isChallengeExecuting || engineExecuting) {
+                locked
+            } else {
+                null
+            }
+            if (!locked) {
+                clearAutomationTouchHoleAndRestoreUi(refreshBlocker = false)
+            }
             updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
         }
 
@@ -508,7 +516,7 @@ class FloatingTriggerOverlayService : Service() {
         if (MlbbGestureAccessibilityService.onSyncTouchLockOverlay != null) {
             MlbbGestureAccessibilityService.onSyncTouchLockOverlay = null
         }
-        forceTouchLockActive = false
+        syncedTouchLockOverride = null
         overlayBitmapCache.evictAll()
         serviceScope.cancel()
         removeAllMarkerWindows()
@@ -582,13 +590,18 @@ class FloatingTriggerOverlayService : Service() {
                     prev.gameCoverAreas != st.gameCoverAreas ||
                     prev.isCoverEditMode != st.isCoverEditMode ||
                     prev.activeCoverAreaId != st.activeCoverAreaId
+                if (syncedTouchLockOverride != null && st.isChallengeExecuting == syncedTouchLockOverride) {
+                    syncedTouchLockOverride = null
+                }
+
                 val blockerChanged = isFirst ||
                     prev.blockTouchDuringChallenge != st.blockTouchDuringChallenge ||
                     prev.isChallengeExecuting != st.isChallengeExecuting ||
                     prev.isPositionEditMode != st.isPositionEditMode ||
                     prev.isEmergencyStopped != st.isEmergencyStopped ||
                     prev.cooldownStatusHint != st.cooldownStatusHint ||
-                    prev.touchConflictHint != st.touchConflictHint
+                    prev.touchConflictHint != st.touchConflictHint ||
+                    syncedTouchLockOverride != null
 
                 lastState = st
 
@@ -747,11 +760,35 @@ class FloatingTriggerOverlayService : Service() {
         }
     }
 
+    private fun clearAutomationTouchHoleAndRestoreUi(refreshBlocker: Boolean) {
+        val hadAutomationUiState = isTemporarilyHiddenForAutomation || activeTouchHolePx != null || touchHiddenHudForHole
+        isTemporarilyHiddenForAutomation = false
+        activeTouchHolePx = null
+        if (touchHiddenHudForHole) {
+            touchHiddenHudForHole = false
+            val hud = singleHudView
+            val hParams = singleHudParams
+            if (hud != null && hParams != null && !isTemporarilyHiddenForScan && !scanHiddenHud) {
+                hud.alpha = lastState.floatingConfig.hudOpacity
+                if ((hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) {
+                    hParams.flags = hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                    try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
+                }
+            }
+        }
+        if (hadAutomationUiState) {
+            setMarkerWindowsTemporaryHidden(false, skipTouchBlockerRefresh = true)
+        }
+        if (refreshBlocker) {
+            updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
+        }
+    }
+
     private fun setTouchHoleForAutomation(holeRect: PixelRect?, active: Boolean) {
         if (active) {
             isTemporarilyHiddenForAutomation = true
             activeTouchHolePx = holeRect
-            setMarkerWindowsTemporaryHidden(true)
+            setMarkerWindowsTemporaryHidden(true, skipTouchBlockerRefresh = true)
 
             if (holeRect != null) {
                 val hud = singleHudView
@@ -772,24 +809,10 @@ class FloatingTriggerOverlayService : Service() {
                     }
                 }
             }
+            updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
         } else {
-            isTemporarilyHiddenForAutomation = false
-            activeTouchHolePx = null
-            if (touchHiddenHudForHole) {
-                touchHiddenHudForHole = false
-                val hud = singleHudView
-                val hParams = singleHudParams
-                if (hud != null && hParams != null && !isTemporarilyHiddenForScan && !scanHiddenHud) {
-                    hud.alpha = lastState.floatingConfig.hudOpacity
-                    if ((hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) {
-                        hParams.flags = hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-                        try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
-                    }
-                }
-            }
-            setMarkerWindowsTemporaryHidden(false)
+            clearAutomationTouchHoleAndRestoreUi(refreshBlocker = true)
         }
-        updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
     }
 
     private fun hideAllHoleBlockerPanels() {
@@ -816,7 +839,7 @@ class FloatingTriggerOverlayService : Service() {
         // Saat scan OCR berlangsung (isTemporarilyHiddenForScan), blocker dilepas sementara agar OCR bersih.
         // Saat challenge menjalankan klik/tahan/geser (activeTouchHolePx != null), blocker TETAP MENGUNCI SENTUHAN USER
         // melalui 4 panel di luar lubang gesture, sementara Accessibility gesture bebas menyentuh game MLBB.
-        val isExecutingNow = st.isChallengeExecuting || forceTouchLockActive
+        val isExecutingNow = syncedTouchLockOverride ?: st.isChallengeExecuting
         val shouldLock = !isTemporarilyHiddenForScan &&
             !temporarilyHiddenForAutomation &&
             st.blockTouchDuringChallenge &&
@@ -1146,8 +1169,10 @@ class FloatingTriggerOverlayService : Service() {
 
     // ==================== Layer 2: External Trigger Pins OUTSIDE Floating (Colored + Per-Challenge Eye) ====================
 
-    private fun setMarkerWindowsTemporaryHidden(hide: Boolean) {
-        updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
+    private fun setMarkerWindowsTemporaryHidden(hide: Boolean, skipTouchBlockerRefresh: Boolean = false) {
+        if (!skipTouchBlockerRefresh) {
+            updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
+        }
         // liveStageView sudah memiliki FLAG_NOT_TOUCHABLE sehingga tidak pernah memblokir sentuhan;
         // hanya sembunyikan saat OCR visual scan aktif agar tidak berkedip saat tes/klik berjalan.
         val stageTargetVis = if (isTemporarilyHiddenForScan) View.INVISIBLE else View.VISIBLE

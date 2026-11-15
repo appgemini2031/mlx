@@ -211,6 +211,9 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
     private var lastScreenshotRequestAtMs: Long = 0L
 
     @Volatile
+    private var preparedHoleRect: PixelRect? = null
+
+    @Volatile
     var lastForegroundAppPackage: String? = null
         private set
 
@@ -346,6 +349,9 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
     }
 
     suspend fun syncTouchLockOverlayNow(locked: Boolean) {
+        if (!locked) {
+            preparedHoleRect = null
+        }
         val hook = onSyncTouchLockOverlay ?: return
         awaitMain { hook(locked) }
         if (locked) {
@@ -354,23 +360,36 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         }
     }
 
+    suspend fun releaseTouchWindowAfterAction() {
+        releaseTouchWindow()
+    }
+
     private suspend fun prepareTouchWindow(holeRect: PixelRect?) {
+        if (holeRect != null && preparedHoleRect == holeRect) {
+            return
+        }
         val prepareRegion = onPrepareScreenForTouchRegion
         val prepareFallback = onPrepareScreenForTouch
         if (prepareRegion != null) {
+            preparedHoleRect = holeRect
             awaitMain { prepareRegion(holeRect, true) }
             delay(28L)
         } else if (prepareFallback != null) {
+            preparedHoleRect = holeRect
             awaitMain { prepareFallback(true) }
             delay(65L)
         }
     }
 
     private suspend fun releaseTouchWindow() {
+        val hadPrepared = preparedHoleRect != null
+        preparedHoleRect = null
         val prepareRegion = onPrepareScreenForTouchRegion
         val prepareFallback = onPrepareScreenForTouch
         if (prepareRegion != null) {
-            awaitMain { prepareRegion(null, false) }
+            if (hadPrepared || onPrepareScreenForTouchRegion != null) {
+                awaitMain { prepareRegion(null, false) }
+            }
         } else if (prepareFallback != null) {
             awaitMain { prepareFallback(false) }
         }
@@ -387,7 +406,8 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         normX: Float,
         normY: Float,
         holdMs: Long = 0L,
-        tapCount: Int = 1
+        tapCount: Int = 1,
+        autoReleaseTouchWindow: Boolean = true
     ): GestureOutcome {
         val (screenW, screenH) = getRealScreenSizePx()
         val (px, py) = ScreenCoordinateMapper.toScreenPx(normX, normY, screenW, screenH)
@@ -414,7 +434,9 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
                 if (i < repeats - 1) delay(60L)
             }
         } finally {
-            releaseTouchWindow()
+            if (autoReleaseTouchWindow) {
+                releaseTouchWindow()
+            }
         }
         return lastOutcome
     }
@@ -445,13 +467,26 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         holdMs: Long,
         holdAndDrag: Boolean,
         dragSpec: String,
-        dragDurationMs: Long = 220L
+        dragDurationMs: Long = 220L,
+        autoReleaseTouchWindow: Boolean = true
     ): GestureOutcome {
         if (!holdAndDrag) {
-            return dispatchTapOutcome(normX, normY, holdMs = holdMs, tapCount = 1)
+            return dispatchTapOutcome(
+                normX,
+                normY,
+                holdMs = holdMs,
+                tapCount = 1,
+                autoReleaseTouchWindow = autoReleaseTouchWindow
+            )
         }
         if (holdMs <= 0L) {
-            return dispatchSwipeOutcome(normX, normY, dragSpec, durationMs = dragDurationMs)
+            return dispatchSwipeOutcome(
+                normX,
+                normY,
+                dragSpec,
+                durationMs = dragDurationMs,
+                autoReleaseTouchWindow = autoReleaseTouchWindow
+            )
         }
 
         val (screenW, screenH) = getRealScreenSizePx()
@@ -531,7 +566,9 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
                 }
             } ?: GestureOutcome.FAILED
         } finally {
-            releaseTouchWindow()
+            if (autoReleaseTouchWindow) {
+                releaseTouchWindow()
+            }
         }
     }
 
@@ -546,7 +583,8 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         startNormX: Float,
         startNormY: Float,
         spec: String,
-        durationMs: Long = 220L
+        durationMs: Long = 220L,
+        autoReleaseTouchWindow: Boolean = true
     ): GestureOutcome {
         val (screenW, screenH) = getRealScreenSizePx()
         val (start, end) = ScreenCoordinateMapper.resolveSwipePoints(
@@ -569,7 +607,9 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
             val gesture = GestureDescription.Builder().addStroke(stroke).build()
             dispatchGestureOutcomeAsync(gesture, safeDur + 900L)
         } finally {
-            releaseTouchWindow()
+            if (autoReleaseTouchWindow) {
+                releaseTouchWindow()
+            }
         }
     }
 

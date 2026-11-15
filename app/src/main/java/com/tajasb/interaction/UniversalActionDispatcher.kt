@@ -201,12 +201,10 @@ class UniversalActionDispatcher(
 
                     val shouldKeepLockedHere = enableTouchLock && !isMlbbMatchActive && (i in lockedStepIndices)
                     if (shouldKeepLockedHere && !isSpanTouchLocked) {
-                        sink.onTouchLockChanged(true)
-                        sink.ensureTouchLockSynchronized(true)
+                        engageTouchLock()
                         isSpanTouchLocked = true
                     } else if (!shouldKeepLockedHere && isSpanTouchLocked) {
-                        sink.ensureTouchLockSynchronized(false)
-                        sink.onTouchLockChanged(false)
+                        releaseTouchLockAndWindow()
                         isSpanTouchLocked = false
                     }
 
@@ -221,10 +219,11 @@ class UniversalActionDispatcher(
                         val groupTouchesScreen = enableTouchLock && !isMlbbMatchActive &&
                             (groupStartIdx until i).any { it in lockedStepIndices }
                         if (groupTouchesScreen && !isSpanTouchLocked) {
-                            sink.onTouchLockChanged(true)
-                            sink.ensureTouchLockSynchronized(true)
+                            engageTouchLock()
                             isSpanTouchLocked = true
                         }
+                        val nextShouldLockAfterGroup = enableTouchLock && !isMlbbMatchActive && (i in lockedStepIndices)
+                        val willUnlockAfterGroup = isSpanTouchLocked && !nextShouldLockAfterGroup
                         coroutineScope {
                             val jobs = mutableListOf<Job>()
                             for (pStep in parallelGroup) {
@@ -237,14 +236,22 @@ class UniversalActionDispatcher(
                                         isMlbbMatchActive = isMlbbMatchActive,
                                         startEpoch = startEpoch,
                                         enableTouchLock = enableTouchLock,
-                                        alreadySpanLocked = isSpanTouchLocked
+                                        alreadySpanLocked = isSpanTouchLocked,
+                                        keepTouchWindowUntilSpanUnlock = willUnlockAfterGroup
                                     )
                                     synchronized(executedLabels) { executedLabels.add(label) }
                                 }
                             }
                             jobs.forEach { it.join() }
                         }
+                        if (willUnlockAfterGroup && isSpanTouchLocked) {
+                            releaseTouchLockAndWindow()
+                            isSpanTouchLocked = false
+                        }
                     } else {
+                        val nextIdx = i + 1
+                        val nextShouldLock = enableTouchLock && !isMlbbMatchActive && (nextIdx in lockedStepIndices)
+                        val willUnlockAfterStep = isSpanTouchLocked && !nextShouldLock
                         val label = executeSingleStep(
                             rule = rule,
                             step = step,
@@ -253,18 +260,15 @@ class UniversalActionDispatcher(
                             isMlbbMatchActive = isMlbbMatchActive,
                             startEpoch = startEpoch,
                             enableTouchLock = enableTouchLock,
-                            alreadySpanLocked = isSpanTouchLocked
+                            alreadySpanLocked = isSpanTouchLocked,
+                            keepTouchWindowUntilSpanUnlock = willUnlockAfterStep
                         )
                         executedLabels.add(label)
-                        i++
-                    }
-
-                    // Lepas kunci layar bila langkah berikutnya tidak berada dalam blok sentuh kontinu
-                    val nextShouldLock = enableTouchLock && !isMlbbMatchActive && (i in lockedStepIndices)
-                    if (isSpanTouchLocked && !nextShouldLock) {
-                        sink.ensureTouchLockSynchronized(false)
-                        sink.onTouchLockChanged(false)
-                        isSpanTouchLocked = false
+                        i = nextIdx
+                        if (willUnlockAfterStep && isSpanTouchLocked) {
+                            releaseTouchLockAndWindow()
+                            isSpanTouchLocked = false
+                        }
                     }
 
                     if (intervalMs > 0L && i < stepsToRun.size) {
@@ -273,8 +277,7 @@ class UniversalActionDispatcher(
                 }
             } finally {
                 if (isSpanTouchLocked) {
-                    sink.ensureTouchLockSynchronized(false)
-                    sink.onTouchLockChanged(false)
+                    releaseTouchLockAndWindow()
                     isSpanTouchLocked = false
                 }
                 sink.onTouchConflictChanged("")
@@ -295,6 +298,17 @@ class UniversalActionDispatcher(
         return executedLabels.joinToString(" → ").ifBlank { "Selesai" }
     }
 
+    private suspend fun engageTouchLock() {
+        sink.onTouchLockChanged(true)
+        sink.ensureTouchLockSynchronized(true)
+    }
+
+    private suspend fun releaseTouchLockAndWindow() {
+        sink.onTouchLockChanged(false)
+        sink.ensureTouchLockSynchronized(false)
+        MlbbGestureAccessibilityService.peekInstance()?.releaseTouchWindowAfterAction()
+    }
+
     private suspend fun executeSingleStep(
         rule: UniversalTriggerRule,
         step: UniversalActionStep,
@@ -303,7 +317,8 @@ class UniversalActionDispatcher(
         isMlbbMatchActive: Boolean,
         startEpoch: Long,
         enableTouchLock: Boolean = true,
-        alreadySpanLocked: Boolean = false
+        alreadySpanLocked: Boolean = false,
+        keepTouchWindowUntilSpanUnlock: Boolean = false
     ): String {
         if (isAborted(startEpoch)) return "${step.actionType.displayName} (Batal)"
 
@@ -324,8 +339,7 @@ class UniversalActionDispatcher(
         val acquiresTouchLock = !alreadySpanLocked && enableTouchLock && !isMlbbMatchActive &&
             TouchExecutionPlanner.isHardwareTouchAction(step.actionType)
         if (acquiresTouchLock) {
-            sink.onTouchLockChanged(true)
-            sink.ensureTouchLockSynchronized(true)
+            engageTouchLock()
         }
         try {
             for (r in 0 until repeats) {
@@ -553,10 +567,14 @@ class UniversalActionDispatcher(
                         )
                         val svc = MlbbGestureAccessibilityService.peekInstance()
                         if (svc != null) {
+                            val isFinalRepeat = (r == repeats - 1)
+                            val deferTouchWindowRelease = isFinalRepeat && (keepTouchWindowUntilSpanUnlock || acquiresTouchLock)
+                            val releaseWindowOnFinish = isFinalRepeat && !deferTouchWindowRelease
                             val (outcome, tries) = dispatchWithTouchRetry(
                                 startEpoch = startEpoch,
                                 allowRetry = true,
-                                enableLockOnConflict = enableTouchLock && !isMlbbMatchActive
+                                enableLockOnConflict = enableTouchLock && !isMlbbMatchActive && !alreadySpanLocked && !acquiresTouchLock,
+                                releaseTouchWindowOnFinish = releaseWindowOnFinish
                             ) {
                                 svc.dispatchHoldAndDragOutcome(
                                     normX = px,
@@ -564,7 +582,8 @@ class UniversalActionDispatcher(
                                     holdMs = holdMs,
                                     holdAndDrag = step.holdAndDrag,
                                     dragSpec = step.dragDirection,
-                                    dragDurationMs = step.dragDurationMs
+                                    dragDurationMs = step.dragDurationMs,
+                                    autoReleaseTouchWindow = false
                                 )
                             }
                             summary = when {
@@ -615,12 +634,22 @@ class UniversalActionDispatcher(
                         )
                         val svc = MlbbGestureAccessibilityService.peekInstance()
                         if (svc != null) {
+                            val isFinalRepeat = (r == repeats - 1)
+                            val deferTouchWindowRelease = isFinalRepeat && (keepTouchWindowUntilSpanUnlock || acquiresTouchLock)
+                            val releaseWindowOnFinish = isFinalRepeat && !deferTouchWindowRelease
                             val (outcome, tries) = dispatchWithTouchRetry(
                                 startEpoch = startEpoch,
                                 allowRetry = true,
-                                enableLockOnConflict = enableTouchLock && !isMlbbMatchActive
+                                enableLockOnConflict = enableTouchLock && !isMlbbMatchActive && !alreadySpanLocked && !acquiresTouchLock,
+                                releaseTouchWindowOnFinish = releaseWindowOnFinish
                             ) {
-                                svc.dispatchSwipeOutcome(startX, startY, swipeSpec, durationMs = durMs)
+                                svc.dispatchSwipeOutcome(
+                                    startNormX = startX,
+                                    startNormY = startY,
+                                    spec = swipeSpec,
+                                    durationMs = durMs,
+                                    autoReleaseTouchWindow = false
+                                )
                             }
                             summary = when {
                                 outcome == GestureOutcome.COMPLETED && tries > 1 ->
@@ -714,8 +743,9 @@ class UniversalActionDispatcher(
         }
         } finally {
             if (acquiresTouchLock) {
-                sink.ensureTouchLockSynchronized(false)
-                sink.onTouchLockChanged(false)
+                releaseTouchLockAndWindow()
+            } else if (!alreadySpanLocked && TouchExecutionPlanner.isHardwareTouchAction(step.actionType)) {
+                MlbbGestureAccessibilityService.peekInstance()?.releaseTouchWindowAfterAction()
             }
         }
         return summary
@@ -725,6 +755,7 @@ class UniversalActionDispatcher(
         startEpoch: Long,
         allowRetry: Boolean,
         enableLockOnConflict: Boolean,
+        releaseTouchWindowOnFinish: Boolean = true,
         dispatchCall: suspend () -> GestureOutcome
     ): Pair<GestureOutcome, Int> = hardwareTouchMutex.withLock {
         var attempt = 0
@@ -749,8 +780,7 @@ class UniversalActionDispatcher(
                 }
                 // Pastikan layar tetap terkunci penuh & cepat tangkap celah milidetik berikutnya untuk eksekusi konsep
                 if (enableLockOnConflict && !conflictLockAcquired) {
-                    sink.onTouchLockChanged(true)
-                    sink.ensureTouchLockSynchronized(true)
+                    engageTouchLock()
                     conflictLockAcquired = true
                 }
                 sink.onTouchConflictChanged("🔒 Layar Terkunci • Mengambil alih kontrol (${attempt + 1})...")
@@ -761,8 +791,9 @@ class UniversalActionDispatcher(
         } finally {
             sink.onTouchConflictChanged("")
             if (conflictLockAcquired) {
-                sink.ensureTouchLockSynchronized(false)
-                sink.onTouchLockChanged(false)
+                releaseTouchLockAndWindow()
+            } else if (releaseTouchWindowOnFinish) {
+                MlbbGestureAccessibilityService.peekInstance()?.releaseTouchWindowAfterAction()
             }
         }
     }

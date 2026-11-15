@@ -123,6 +123,13 @@ sealed class ScreenCaptureResult {
     data class Error(val reason: String) : ScreenCaptureResult()
 }
 
+data class ScanRegionSpec(
+    val centerNormX: Float,
+    val centerNormY: Float,
+    val widthRatio: Float,
+    val heightRatio: Float
+)
+
 /**
  * AccessibilityService resmi Android (API 24+) untuk mengeksekusi sentuhan nyata
  * (Tap, Hold, Multi-Tap, dan Swipe) langsung ke tombol game Mobile Legends di layar.
@@ -144,6 +151,9 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
 
         @Volatile
         var onPrepareScreenForScan: ((hideForScan: Boolean) -> Unit)? = null
+
+        @Volatile
+        var onPrepareScreenForScanRegion: ((region: ScanRegionSpec?, hideForScan: Boolean) -> Boolean)? = null
 
         fun peekInstance(): MlbbGestureAccessibilityService? = activeInstance
 

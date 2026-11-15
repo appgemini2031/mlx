@@ -61,6 +61,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -198,6 +199,16 @@ fun FlexibleTriggerEditorOverlay(
                             selected = draft.triggerSource,
                             onSelected = { draft = draft.copy(triggerSource = it) }
                         )
+                        if (draft.triggerSource == UniversalTriggerSource.GIFT ||
+                            draft.triggerSource == UniversalTriggerSource.GIFT_QUANTITY
+                        ) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            GiftNameCatalogPicker(
+                                giftName = draft.targetGiftName,
+                                onGiftNameChange = { draft = draft.copy(targetGiftName = it) },
+                                onQuickPicked = { draft = draft.copy(targetGiftName = it) }
+                            )
+                        }
                         if (!draft.triggerSource.isAvailableInRelay) {
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
@@ -875,6 +886,8 @@ fun ActionLibraryPickerOverlay(
 ) {
     var selectedCat by remember { mutableStateOf(ActionCategory.VISUAL) }
 
+    val pickerCfg = LocalConfiguration.current
+    val pickerMaxH = (pickerCfg.screenHeightDp * 0.72f).coerceIn(200f, 460f).dp
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -886,7 +899,7 @@ fun ActionLibraryPickerOverlay(
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 460.dp),
+                .heightIn(max = pickerMaxH),
             shape = RoundedCornerShape(12.dp),
             colors = CardDefaults.cardColors(containerColor = DarkSurface),
             border = BorderStroke(1.dp, NeonPurple.copy(alpha = 0.75f))

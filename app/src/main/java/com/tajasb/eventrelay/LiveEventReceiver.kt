@@ -193,6 +193,7 @@ class LiveEventReceiver private constructor(private val context: Context) {
             for (entry in sortedGiftEntries) {
                 if (clean.contains(entry.key)) return entry.value
             }
+            com.tajasb.interaction.GiftCoinCatalog.resolveCoinCost(giftName, "TIKTOK")?.let { return it }
             return 1
         }
 
@@ -255,6 +256,7 @@ class LiveEventReceiver private constructor(private val context: Context) {
             for (entry in sortedBigoGiftEntries) {
                 if (clean.contains(entry.key)) return entry.value
             }
+            com.tajasb.interaction.GiftCoinCatalog.resolveCoinCost(giftName, "BIGO")?.let { return it }
             if (rawBeans > 1) return rawBeans
             return 1
         }

@@ -27,7 +27,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.tajasb.pro.ilrtzg"
+        applicationId = "com.tajasb.pro.zpjesm"
         minSdk = 26
         targetSdk = 35
         versionCode = vCode

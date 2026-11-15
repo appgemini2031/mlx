@@ -281,6 +281,11 @@ class FloatingTriggerOverlayService : Service() {
     @Volatile
     private var isTemporarilyHiddenForScan = false
 
+    private var scanHiddenHud = false
+    private var scanHiddenStage = false
+    private var scanHiddenBlockerPill = false
+    private val scanHiddenMarkerKeys = mutableSetOf<String>()
+
     private val overlayBitmapCache = object : LruCache<String, Bitmap>(24) {}
     private val inFlightRemoteBitmaps = Collections.synchronizedSet(mutableSetOf<String>())
 
@@ -295,12 +300,14 @@ class FloatingTriggerOverlayService : Service() {
     private var dpadHiddenBannerRow: LinearLayout? = null
 
     private data class MarkerWindowEntry(
-        val root: LinearLayout,
+        val root: FrameLayout,
         val crosshairView: TextView,
         val badgeLabel: TextView,
         val quickActionsRow: LinearLayout,
         val params: WindowManager.LayoutParams,
-        var isActionsOpen: Boolean = false
+        var isActionsOpen: Boolean = false,
+        var lastCrosshairLeft: Int = 0,
+        var lastCrosshairTop: Int = 0
     )
 
     private val markerWindows = linkedMapOf<String, MarkerWindowEntry>()
@@ -331,8 +338,10 @@ class FloatingTriggerOverlayService : Service() {
             setMarkerWindowsTemporaryHidden(hideForTouch)
         }
         MlbbGestureAccessibilityService.onPrepareScreenForScan = { hideForScan ->
-            isTemporarilyHiddenForScan = hideForScan
-            setAllFloatingWindowsHiddenForScan(hideForScan)
+            setFloatingWindowsHiddenForScanRegion(null, hideForScan)
+        }
+        MlbbGestureAccessibilityService.onPrepareScreenForScanRegion = { region, hideForScan ->
+            setFloatingWindowsHiddenForScanRegion(region, hideForScan)
         }
 
         engine.setFloatingOverlayRunning(true)
@@ -424,11 +433,22 @@ class FloatingTriggerOverlayService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        renderLiveStage(lastState)
-        applyHudPositionFromConfig(lastState.floatingConfig, forceApply = true)
-        if (lastState.isPositionEditMode) {
-            syncMarkerWindows(lastState)
+        draggingRuleId = null
+        isDraggingHud = false
+        val relayoutAll = {
+            if (!isTemporarilyHiddenForScan) {
+                refreshSingleHudVisuals()
+                if (!lastState.isFloatingHiddenForLive) {
+                    applyHudPositionFromConfig(lastState.floatingConfig, forceApply = true)
+                    clampHudIntoSafeBounds()
+                }
+                renderLiveStage(lastState)
+                syncMarkerWindows(lastState)
+            }
         }
+        relayoutAll()
+        // Beberapa device memperbarui WindowMetrics / insets 1-2 frame setelah onConfigurationChanged
+        singleHudView?.postDelayed({ relayoutAll() }, 120L)
     }
 
     override fun onDestroy() {
@@ -438,6 +458,9 @@ class FloatingTriggerOverlayService : Service() {
         }
         if (MlbbGestureAccessibilityService.onPrepareScreenForScan != null) {
             MlbbGestureAccessibilityService.onPrepareScreenForScan = null
+        }
+        if (MlbbGestureAccessibilityService.onPrepareScreenForScanRegion != null) {
+            MlbbGestureAccessibilityService.onPrepareScreenForScanRegion = null
         }
         overlayBitmapCache.evictAll()
         serviceScope.cancel()
@@ -593,6 +616,9 @@ class FloatingTriggerOverlayService : Service() {
         val desiredVis = if (shouldLock) View.VISIBLE else View.GONE
         if (blocker.visibility != desiredVis) {
             blocker.visibility = desiredVis
+        }
+        if (!scanHiddenBlockerPill && touchBlockerStatusPill?.visibility != View.VISIBLE) {
+            touchBlockerStatusPill?.visibility = View.VISIBLE
         }
         if (shouldLock && st.cooldownStatusHint.isNotBlank()) {
             touchBlockerStatusPill?.text = "🔒 Layar Terkunci • ${st.cooldownStatusHint}"
@@ -844,7 +870,145 @@ class FloatingTriggerOverlayService : Service() {
         }
     }
 
+    private fun setFloatingWindowsHiddenForScanRegion(region: ScanRegionSpec?, hide: Boolean): Boolean {
+        if (region == null) {
+            isTemporarilyHiddenForScan = hide
+            setAllFloatingWindowsHiddenForScan(hide)
+            return hide
+        }
+
+        val (screenW, screenH) = getDisplaySizePx()
+        val scanRect = ScanRegionGeometry.computeScanRectPx(
+            centerNormX = region.centerNormX,
+            centerNormY = region.centerNormY,
+            widthRatio = region.widthRatio,
+            heightRatio = region.heightRatio,
+            screenW = screenW,
+            screenH = screenH,
+            minBoxPx = dp(24),
+            paddingPx = dp(12)
+        )
+
+        if (hide) {
+            scanHiddenHud = false
+            scanHiddenStage = false
+            scanHiddenBlockerPill = false
+            scanHiddenMarkerKeys.clear()
+
+            val hud = singleHudView
+            val hParams = singleHudParams
+            if (hud != null && hParams != null && hud.visibility == View.VISIBLE) {
+                val hw = hud.width.coerceAtLeast(hud.measuredWidth)
+                val hh = hud.height.coerceAtLeast(hud.measuredHeight)
+                val hudRect = PixelRect(hParams.x, hParams.y, hParams.x + hw, hParams.y + hh)
+                if (hw > 0 && hh > 0 && ScanRegionGeometry.rectsIntersect(hudRect, scanRect)) {
+                    hud.visibility = View.INVISIBLE
+                    if ((hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0) {
+                        hParams.flags = hParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
+                    }
+                    scanHiddenHud = true
+                }
+            }
+
+            val stage = liveStageView
+            if (stage != null && stage.visibility == View.VISIBLE && stage.childCount > 0) {
+                var stageOverlaps = false
+                for (i in 0 until stage.childCount) {
+                    val child = stage.getChildAt(i) ?: continue
+                    if (child.visibility != View.VISIBLE) continue
+                    val lp = child.layoutParams as? FrameLayout.LayoutParams
+                    val cl = if (child.width > 0) child.left else (lp?.leftMargin ?: 0)
+                    val ct = if (child.height > 0) child.top else (lp?.topMargin ?: 0)
+                    val cw = child.width.coerceAtLeast(child.measuredWidth)
+                    val ch = child.height.coerceAtLeast(child.measuredHeight)
+                    if (cw > 0 && ch > 0 && ScanRegionGeometry.rectsIntersect(PixelRect(cl, ct, cl + cw, ct + ch), scanRect)) {
+                        stageOverlaps = true
+                        break
+                    }
+                }
+                if (stageOverlaps) {
+                    stage.visibility = View.INVISIBLE
+                    scanHiddenStage = true
+                }
+            }
+
+            for ((key, entry) in markerWindows) {
+                if (entry.root.visibility != View.VISIBLE) continue
+                val mw = entry.root.width.coerceAtLeast(entry.root.measuredWidth)
+                val mh = entry.root.height.coerceAtLeast(entry.root.measuredHeight)
+                val mRect = PixelRect(entry.params.x, entry.params.y, entry.params.x + mw, entry.params.y + mh)
+                if (mw > 0 && mh > 0 && ScanRegionGeometry.rectsIntersect(mRect, scanRect)) {
+                    entry.root.visibility = View.INVISIBLE
+                    if ((entry.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0) {
+                        entry.params.flags = entry.params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        try { windowManager.updateViewLayout(entry.root, entry.params) } catch (_: Throwable) {}
+                    }
+                    scanHiddenMarkerKeys += key
+                }
+            }
+
+            val blocker = touchBlockerView
+            val pill = touchBlockerStatusPill
+            if (blocker != null && blocker.visibility == View.VISIBLE && pill != null && pill.visibility == View.VISIBLE) {
+                val pw = pill.width.coerceAtLeast(pill.measuredWidth)
+                val ph = pill.height.coerceAtLeast(pill.measuredHeight)
+                val pRect = PixelRect(pill.left, pill.top, pill.left + pw, pill.top + ph)
+                if (pw > 0 && ph > 0 && ScanRegionGeometry.rectsIntersect(pRect, scanRect)) {
+                    pill.visibility = View.INVISIBLE
+                    scanHiddenBlockerPill = true
+                }
+            }
+
+            isTemporarilyHiddenForScan = scanHiddenHud || scanHiddenStage || scanHiddenBlockerPill || scanHiddenMarkerKeys.isNotEmpty()
+            return isTemporarilyHiddenForScan
+        } else {
+            val wasHidden = isTemporarilyHiddenForScan || scanHiddenHud || scanHiddenStage || scanHiddenBlockerPill || scanHiddenMarkerKeys.isNotEmpty()
+            isTemporarilyHiddenForScan = false
+
+            if (scanHiddenHud) {
+                scanHiddenHud = false
+                val hud = singleHudView
+                val hParams = singleHudParams
+                if (hud != null && hParams != null) {
+                    if ((hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) {
+                        hParams.flags = hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                        try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
+                    }
+                    refreshSingleHudVisuals()
+                }
+            }
+
+            if (scanHiddenStage) {
+                scanHiddenStage = false
+                liveStageView?.visibility = if (isTemporarilyHiddenForAutomation) View.INVISIBLE else View.VISIBLE
+            }
+
+            if (scanHiddenBlockerPill) {
+                scanHiddenBlockerPill = false
+                touchBlockerStatusPill?.visibility = View.VISIBLE
+            }
+
+            if (scanHiddenMarkerKeys.isNotEmpty()) {
+                val keys = scanHiddenMarkerKeys.toList()
+                scanHiddenMarkerKeys.clear()
+                for (key in keys) {
+                    val entry = markerWindows[key] ?: continue
+                    if (!isTemporarilyHiddenForAutomation) {
+                        entry.root.visibility = View.VISIBLE
+                        if ((entry.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) {
+                            entry.params.flags = entry.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                            try { windowManager.updateViewLayout(entry.root, entry.params) } catch (_: Throwable) {}
+                        }
+                    }
+                }
+            }
+            return wasHidden
+        }
+    }
+
     private fun setAllFloatingWindowsHiddenForScan(hide: Boolean) {
+        isTemporarilyHiddenForScan = hide
         setMarkerWindowsTemporaryHidden(hide || isTemporarilyHiddenForAutomation)
         val hud = singleHudView
         val hParams = singleHudParams
@@ -925,7 +1089,6 @@ class FloatingTriggerOverlayService : Service() {
         }
 
         val (screenW, screenH) = getDisplaySizePx()
-        val ringHalf = dp(19)
 
         for (desc in descriptors) {
             if (desc.key == draggingRuleId) continue
@@ -952,20 +1115,75 @@ class FloatingTriggerOverlayService : Service() {
                 existing.crosshairView.text = pinSymbol
                 existing.crosshairView.setTextColor(if (isSelected) Color.WHITE else ruleColor)
                 existing.crosshairView.background = crosshairBg(ruleColor, rule.enabled, isSelected)
-                existing.root.measure(
-                    View.MeasureSpec.makeMeasureSpec(screenW, View.MeasureSpec.AT_MOST),
-                    View.MeasureSpec.makeMeasureSpec(screenH, View.MeasureSpec.AT_MOST)
-                )
-                val mw = existing.root.measuredWidth.coerceAtLeast(dp(38))
-                val mh = existing.root.measuredHeight.coerceAtLeast(dp(38))
-                existing.params.x = ((desc.normX * screenW) - mw / 2f).roundToInt()
-                    .coerceIn(0, (screenW - mw).coerceAtLeast(0))
-                existing.params.y = ((desc.normY * screenH) - ringHalf).roundToInt()
-                    .coerceIn(0, (screenH - mh).coerceAtLeast(0))
-                try {
-                    windowManager.updateViewLayout(existing.root, existing.params)
-                } catch (_: Throwable) {}
+                applyMarkerAnchoredGeometry(existing, desc.normX, desc.normY, screenW, screenH, updateWindow = true)
             }
+        }
+    }
+
+    private fun applyMarkerAnchoredGeometry(
+        entry: MarkerWindowEntry,
+        normX: Float,
+        normY: Float,
+        screenW: Int,
+        screenH: Int,
+        updateWindow: Boolean
+    ) {
+        val ringSize = dp(38)
+        val atMostW = View.MeasureSpec.makeMeasureSpec(screenW, View.MeasureSpec.AT_MOST)
+        val atMostH = View.MeasureSpec.makeMeasureSpec(screenH, View.MeasureSpec.AT_MOST)
+        entry.badgeLabel.measure(atMostW, atMostH)
+        entry.quickActionsRow.measure(atMostW, atMostH)
+
+        val badgeW = entry.badgeLabel.measuredWidth.coerceAtLeast(dp(44))
+        val badgeH = entry.badgeLabel.measuredHeight.coerceAtLeast(dp(16))
+        val rowW = entry.quickActionsRow.measuredWidth.coerceAtLeast(0)
+        val rowH = entry.quickActionsRow.measuredHeight.coerceAtLeast(0)
+
+        val layout = PinAnchorGeometry.computeLayout(
+            normX = normX,
+            normY = normY,
+            screenW = screenW,
+            screenH = screenH,
+            ringSize = ringSize,
+            badgeW = badgeW,
+            badgeH = badgeH,
+            quickRowW = rowW,
+            quickRowH = rowH,
+            isActionsOpen = entry.isActionsOpen,
+            gapBadgePx = dp(2),
+            gapRowPx = dp(3)
+        )
+
+        entry.crosshairView.layoutParams = FrameLayout.LayoutParams(ringSize, ringSize).apply {
+            leftMargin = layout.crosshairLeft
+            topMargin = layout.crosshairTop
+        }
+        entry.badgeLabel.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            leftMargin = layout.badgeLeft
+            topMargin = layout.badgeTop
+        }
+        entry.quickActionsRow.visibility = if (entry.isActionsOpen) View.VISIBLE else View.GONE
+        entry.quickActionsRow.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            leftMargin = layout.quickRowLeft
+            topMargin = layout.quickRowTop
+        }
+
+        entry.lastCrosshairLeft = layout.crosshairLeft
+        entry.lastCrosshairTop = layout.crosshairTop
+        entry.params.x = layout.winX
+        entry.params.y = layout.winY
+        entry.params.width = layout.winW
+        entry.params.height = layout.winH
+        if (updateWindow) {
+            try {
+                windowManager.updateViewLayout(entry.root, entry.params)
+            } catch (_: Throwable) {}
         }
     }
 
@@ -1009,9 +1227,9 @@ class FloatingTriggerOverlayService : Service() {
         val ruleColor = rule.accentColorHex.toInt()
         val pinSymbol = if (desc.totalTouchSteps > 1) "${desc.stepIndex}" else "⊕"
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
+        val root = FrameLayout(this).apply {
+            clipChildren = false
+            clipToPadding = false
             setBackgroundColor(Color.TRANSPARENT)
         }
 
@@ -1042,7 +1260,6 @@ class FloatingTriggerOverlayService : Service() {
         val quickRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(3), 0, 0)
             visibility = View.GONE
         }
         val testPinBtn = makeMicroPinBtn("▶ Tes", Color.rgb(16, 185, 129), Color.BLACK) {
@@ -1102,16 +1319,9 @@ class FloatingTriggerOverlayService : Service() {
         quickRow.addView(editPinBtn, btnLp())
         quickRow.addView(delPinBtn)
 
-        root.addView(crosshair, LinearLayout.LayoutParams(ringSize, ringSize))
-        root.addView(badgeLabel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(2) })
-        root.addView(quickRow)
-
-        root.measure(
-            View.MeasureSpec.makeMeasureSpec(screenW, View.MeasureSpec.AT_MOST),
-            View.MeasureSpec.makeMeasureSpec(screenH, View.MeasureSpec.AT_MOST)
-        )
-        val mw = root.measuredWidth.coerceAtLeast(ringSize)
-        val mh = root.measuredHeight.coerceAtLeast(ringSize)
+        root.addView(crosshair, FrameLayout.LayoutParams(ringSize, ringSize))
+        root.addView(badgeLabel, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
+        root.addView(quickRow, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -1123,15 +1333,16 @@ class FloatingTriggerOverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = ((desc.normX * screenW) - mw / 2f).roundToInt().coerceIn(0, (screenW - mw).coerceAtLeast(0))
-            y = ((desc.normY * screenH) - ringHalf).roundToInt().coerceIn(0, (screenH - mh).coerceAtLeast(0))
             applyCutoutMode(this)
         }
 
         val entry = MarkerWindowEntry(root, crosshair, badgeLabel, quickRow, params)
+        applyMarkerAnchoredGeometry(entry, desc.normX, desc.normY, screenW, screenH, updateWindow = false)
 
         var startX = 0
         var startY = 0
+        var downCrosshairLeft = 0
+        var downCrosshairTop = 0
         var touchDownRawX = 0f
         var touchDownRawY = 0f
         var moved = false
@@ -1144,6 +1355,8 @@ class FloatingTriggerOverlayService : Service() {
                     engine.selectActivePin(rule.id, step?.id)
                     startX = params.x
                     startY = params.y
+                    downCrosshairLeft = entry.lastCrosshairLeft
+                    downCrosshairTop = entry.lastCrosshairTop
                     touchDownRawX = event.rawX
                     touchDownRawY = event.rawY
                     moved = false
@@ -1153,16 +1366,19 @@ class FloatingTriggerOverlayService : Service() {
                     val dx = (event.rawX - touchDownRawX).roundToInt()
                     val dy = (event.rawY - touchDownRawY).roundToInt()
                     if (abs(dx) > dp(4) || abs(dy) > dp(4)) moved = true
-                    val vw = root.width.coerceAtLeast(ringSize)
-                    val vh = root.height.coerceAtLeast(ringSize)
-                    params.x = (startX + dx).coerceIn(0, (curW - vw).coerceAtLeast(0))
-                    params.y = (startY + dy).coerceIn(0, (curH - vh).coerceAtLeast(0))
+                    // Izinkan crosshair mencapai seluruh koordinat layar walau badge/quickRow lebih lebar
+                    val minWinX = -downCrosshairLeft
+                    val maxWinX = (curW - downCrosshairLeft - ringSize).coerceAtLeast(minWinX)
+                    val minWinY = -downCrosshairTop
+                    val maxWinY = (curH - downCrosshairTop - ringSize).coerceAtLeast(minWinY)
+                    params.x = (startX + dx).coerceIn(minWinX, maxWinX)
+                    params.y = (startY + dy).coerceIn(minWinY, maxWinY)
                     try {
                         windowManager.updateViewLayout(root, params)
                     } catch (_: Throwable) {}
 
-                    val centerX = ((params.x + vw / 2f) / curW.coerceAtLeast(1).toFloat()).coerceIn(0.01f, 0.99f)
-                    val centerY = ((params.y + ringHalf.toFloat()) / curH.coerceAtLeast(1).toFloat()).coerceIn(0.01f, 0.99f)
+                    val centerX = ((params.x + downCrosshairLeft + ringHalf) / curW.coerceAtLeast(1).toFloat()).coerceIn(0.01f, 0.99f)
+                    val centerY = ((params.y + downCrosshairTop + ringHalf) / curH.coerceAtLeast(1).toFloat()).coerceIn(0.01f, 0.99f)
                     val latestRule = engine.state.value.rules.firstOrNull { it.id == rule.id } ?: rule
                     val shortName = latestRule.triggerName.trim().ifBlank { latestRule.triggerSource.displayName }.take(10)
                     val stepTag = if (desc.totalTouchSteps > 1) " #${desc.stepIndex}" else ""
@@ -1170,15 +1386,19 @@ class FloatingTriggerOverlayService : Service() {
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    val vw = root.width.coerceAtLeast(ringSize)
                     draggingRuleId = null
                     if (moved) {
-                        val centerX = ((params.x + vw / 2f) / curW.coerceAtLeast(1).toFloat()).coerceIn(0.01f, 0.99f)
-                        val centerY = ((params.y + ringHalf.toFloat()) / curH.coerceAtLeast(1).toFloat()).coerceIn(0.01f, 0.99f)
+                        val centerX = ((params.x + downCrosshairLeft + ringHalf) / curW.coerceAtLeast(1).toFloat()).coerceIn(0.01f, 0.99f)
+                        val centerY = ((params.y + downCrosshairTop + ringHalf) / curH.coerceAtLeast(1).toFloat()).coerceIn(0.01f, 0.99f)
+                        applyMarkerAnchoredGeometry(entry, centerX, centerY, curW, curH, updateWindow = true)
                         engine.updateStepPosition(rule.id, step?.id, centerX, centerY)
                     } else {
                         entry.isActionsOpen = !entry.isActionsOpen
-                        quickRow.visibility = if (entry.isActionsOpen) View.VISIBLE else View.GONE
+                        val latestRule = engine.state.value.rules.firstOrNull { it.id == rule.id } ?: rule
+                        val latestStep = step?.let { st -> latestRule.actionSequence.firstOrNull { it.id == st.id } }
+                        val curNormX = latestStep?.posX ?: latestRule.overlayPosX
+                        val curNormY = latestStep?.posY ?: latestRule.overlayPosY
+                        applyMarkerAnchoredGeometry(entry, curNormX, curNormY, curW, curH, updateWindow = true)
                     }
                     true
                 }
@@ -1891,6 +2111,7 @@ class FloatingTriggerOverlayService : Service() {
             if (lp != null && abs(lp.width - targetDropW) >= dp(4)) {
                 lp.width = targetDropW
                 cv.layoutParams = lp
+                cv.requestLayout()
             }
         }
 

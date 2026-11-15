@@ -10,7 +10,9 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import com.tajasb.debug.VcamDebugLogger
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 
 sealed class SkillCooldownScanResult {
@@ -56,19 +58,23 @@ object SkillCooldownDetector {
 
         return try {
             // Pass 1: Isolasi angka terang (putih/kuning MLBB) jadi hitam pekat di atas latar putih dengan padding
-            val isolated = prepareBrightDigitsOnWhiteBitmap(crop)
+            val (isolated, hasBrightHighlight) = withContext(Dispatchers.Default) {
+                prepareBrightDigitsOnWhiteBitmapWithStats(crop)
+            }
             try {
-                val raw1 = recognizeText(isolated)
-                val sec1 = CooldownOcrParser.extractCooldownSeconds(raw1)
-                if (sec1 != null && sec1 > 0.05) {
-                    return SkillCooldownScanResult.OnCooldown(sec1, raw1.trim())
+                if (hasBrightHighlight) {
+                    val raw1 = recognizeText(isolated)
+                    val sec1 = CooldownOcrParser.extractCooldownSeconds(raw1)
+                    if (sec1 != null && sec1 > 0.05) {
+                        return SkillCooldownScanResult.OnCooldown(sec1, raw1.trim())
+                    }
                 }
             } finally {
                 if (!isolated.isRecycled) isolated.recycle()
             }
 
             // Pass 2: Upscaled high-contrast padded grayscale
-            val contrast = prepareHighContrastPaddedBitmap(crop)
+            val contrast = withContext(Dispatchers.Default) { prepareHighContrastPaddedBitmap(crop) }
             try {
                 val raw2 = recognizeText(contrast)
                 val sec2 = CooldownOcrParser.extractCooldownSeconds(raw2)
@@ -79,16 +85,18 @@ object SkillCooldownDetector {
                 if (!contrast.isRecycled) contrast.recycle()
             }
 
-            // Pass 3: Raw upscaled padded crop (tanpa filter berlebih, aman untuk angka tipis/berwarna)
-            val cleanPad = prepareRawPaddedBitmap(crop)
-            try {
-                val raw3 = recognizeText(cleanPad)
-                val sec3 = CooldownOcrParser.extractCooldownSeconds(raw3)
-                if (sec3 != null && sec3 > 0.05) {
-                    return SkillCooldownScanResult.OnCooldown(sec3, raw3.trim())
+            // Pass 3: Raw upscaled padded crop hanya jika ada variasi terang/highlight pada gambar
+            if (hasBrightHighlight) {
+                val cleanPad = withContext(Dispatchers.Default) { prepareRawPaddedBitmap(crop) }
+                try {
+                    val raw3 = recognizeText(cleanPad)
+                    val sec3 = CooldownOcrParser.extractCooldownSeconds(raw3)
+                    if (sec3 != null && sec3 > 0.05) {
+                        return SkillCooldownScanResult.OnCooldown(sec3, raw3.trim())
+                    }
+                } finally {
+                    if (!cleanPad.isRecycled) cleanPad.recycle()
                 }
-            } finally {
-                if (!cleanPad.isRecycled) cleanPad.recycle()
             }
 
             SkillCooldownScanResult.Ready
@@ -103,8 +111,9 @@ object SkillCooldownDetector {
     /**
      * Angka cooldown di Mobile Legends berwarna putih / kuning cerah di atas ikon skill yang digelapkan.
      * Mengisolasi piksel terang menjadi hitam pekat di atas kanvas putih berpadding meningkatkan akurasi ML Kit drastis.
+     * Sekaligus mengembalikan apakah ada cukup piksel terang/kuning di crop agar Pass OCR tidak sia-sia.
      */
-    private fun prepareBrightDigitsOnWhiteBitmap(src: Bitmap): Bitmap {
+    private fun prepareBrightDigitsOnWhiteBitmapWithStats(src: Bitmap): Pair<Bitmap, Boolean> {
         val scale = if (src.width < 120 || src.height < 120) 4 else 3
         val scaledW = (src.width * scale).coerceAtLeast(160)
         val scaledH = (src.height * scale).coerceAtLeast(160)
@@ -115,6 +124,7 @@ object SkillCooldownDetector {
 
         val pixels = IntArray(scaledW * scaledH)
         scaled.getPixels(pixels, 0, scaledW, 0, 0, scaledW, scaledH)
+        var brightCount = 0
         for (i in pixels.indices) {
             val c = pixels[i]
             val r = (c shr 16) and 0xFF
@@ -123,15 +133,16 @@ object SkillCooldownDetector {
             val luma = (r * 30 + g * 59 + b * 11) / 100
             val isBrightWhite = luma >= 170
             val isBrightGold = r >= 180 && g >= 145 && b <= 150
-            pixels[i] = if (isBrightWhite || isBrightGold) {
-                android.graphics.Color.BLACK
+            if (isBrightWhite || isBrightGold) {
+                brightCount++
+                pixels[i] = android.graphics.Color.BLACK
             } else {
-                android.graphics.Color.WHITE
+                pixels[i] = android.graphics.Color.WHITE
             }
         }
         out.setPixels(pixels, 0, scaledW, pad, pad, scaledW, scaledH)
         if (scaled !== src && !scaled.isRecycled) scaled.recycle()
-        return out
+        return out to (brightCount >= 8)
     }
 
     private fun prepareHighContrastPaddedBitmap(src: Bitmap): Bitmap {

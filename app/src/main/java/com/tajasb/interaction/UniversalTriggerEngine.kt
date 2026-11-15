@@ -55,6 +55,20 @@ object UniversalRuleEvaluator {
             )
         }
 
+        // Filter nama Gift spesifik agar 1 koin dengan nama berbeda (Mawar, Kopi, Es Krim, dll.) tidak bentrok
+        if ((rule.triggerSource == UniversalTriggerSource.GIFT || rule.triggerSource == UniversalTriggerSource.GIFT_QUANTITY) &&
+            rule.targetGiftName.isNotBlank() &&
+            !GiftCoinCatalog.matchesGiftName(rule.targetGiftName, event.giftName)
+        ) {
+            val incoming = event.giftName.ifBlank { "(tanpa nama)" }
+            return CounterEvaluationResult(
+                shouldExecute = false,
+                status = DispatchStatus.SKIPPED_CONDITION,
+                updatedCounter = counter,
+                detail = "Gift '$incoming' bukan '${rule.targetGiftName}'"
+            )
+        }
+
         // Minimum Quantity (hanya aktif bila saklar enableMinimumQuantity = true)
         if (rule.enableMinimumQuantity && event.quantity < rule.minimumQuantity) {
             return CounterEvaluationResult(
@@ -742,12 +756,22 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
     ): List<TriggerExecutionRecord> {
         val rule = _state.value.rules.firstOrNull { it.id == ruleId } ?: return emptyList()
         val effectiveQty = if (rule.enableMinimumQuantity) maxOf(quantity, rule.minimumQuantity) else quantity.coerceAtLeast(1)
+        val effectiveGiftName = if (rule.targetGiftName.isNotBlank() && giftName == "Rose") {
+            GiftCoinCatalog.firstGiftNameForTest(rule.targetGiftName)
+        } else {
+            giftName
+        }
+        val effectiveDiamonds = if (rule.targetGiftName.isNotBlank() && diamonds == 10) {
+            GiftCoinCatalog.resolveCoinCost(effectiveGiftName) ?: diamonds
+        } else {
+            diamonds
+        }
         val event = LiveInteractionEvent(
             source = rule.triggerSource,
             senderName = senderName.ifBlank { "Tester" },
             quantity = effectiveQty,
-            diamonds = diamonds.coerceAtLeast(0),
-            giftName = giftName,
+            diamonds = effectiveDiamonds.coerceAtLeast(0),
+            giftName = effectiveGiftName,
             text = customText,
             avatarUrl = avatarUrl
         )
@@ -764,12 +788,14 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             onResult?.invoke("Target tidak ditemukan")
             return
         }
+        val defaultGift = GiftCoinCatalog.firstGiftNameForTest(rule.targetGiftName)
+        val defaultDiamonds = GiftCoinCatalog.resolveCoinCost(defaultGift) ?: 10
         val event = customEvent ?: LiveInteractionEvent(
             source = rule.triggerSource,
             senderName = "Tester",
             quantity = if (rule.enableMinimumQuantity) rule.minimumQuantity else 1,
-            diamonds = 10,
-            giftName = "Rose",
+            diamonds = defaultDiamonds,
+            giftName = defaultGift,
             text = "Tes ${rule.triggerName}"
         )
         scope.launch {
@@ -873,11 +899,25 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         val targetStep = resolveCooldownTargetStep(rule)
         val cx = (targetStep?.posX ?: rule.overlayPosX).coerceIn(0.02f, 0.98f)
         val cy = (targetStep?.posY ?: rule.overlayPosY).coerceIn(0.02f, 0.98f)
-        val prepareScan = MlbbGestureAccessibilityService.onPrepareScreenForScan
+        val adjX = (cx + rule.cooldownAreaOffsetX).coerceIn(0.02f, 0.98f)
+        val adjY = (cy + rule.cooldownAreaOffsetY).coerceIn(0.02f, 0.98f)
+        val regionSpec = ScanRegionSpec(
+            centerNormX = adjX,
+            centerNormY = adjY,
+            widthRatio = rule.cooldownAreaWidthRatio,
+            heightRatio = rule.cooldownAreaHeightRatio
+        )
+        val prepareRegion = MlbbGestureAccessibilityService.onPrepareScreenForScanRegion
+        val prepareFallback = MlbbGestureAccessibilityService.onPrepareScreenForScan
             ?: MlbbGestureAccessibilityService.onPrepareScreenForTouch
+        var hiddenApplied = false
         return try {
-            if (prepareScan != null) {
-                withContext(Dispatchers.Main) { prepareScan.invoke(true) }
+            if (prepareRegion != null) {
+                hiddenApplied = withContext(Dispatchers.Main) { prepareRegion.invoke(regionSpec, true) }
+                if (hiddenApplied) delay(85L)
+            } else if (prepareFallback != null) {
+                hiddenApplied = true
+                withContext(Dispatchers.Main) { prepareFallback.invoke(true) }
                 delay(95L)
             }
             SkillCooldownDetector.inspectSkillArea(
@@ -889,8 +929,12 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                 offsetY = rule.cooldownAreaOffsetY
             )
         } finally {
-            if (prepareScan != null) {
-                withContext(Dispatchers.Main) { prepareScan.invoke(false) }
+            if (hiddenApplied) {
+                if (prepareRegion != null) {
+                    withContext(Dispatchers.Main) { prepareRegion.invoke(regionSpec, false) }
+                } else if (prepareFallback != null) {
+                    withContext(Dispatchers.Main) { prepareFallback.invoke(false) }
+                }
             }
         }
     }
@@ -929,11 +973,15 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                     _state.update {
                         it.copy(cooldownStatusHint = "⏱️ ${rule.triggerName}: cooldown ${secText}d")
                     }
-                    // Android AccessibilityService.takeScreenshot() mensyaratkan jeda >= ~1 detik antar screenshot
-                    val waitStep = maxOf(
-                        1080L,
-                        (scanResult.secondsRemaining * 550.0).toLong().coerceAtMost(2200L)
-                    )
+                    // Interval adaptif agar tidak boros scan/berkedip saat sisa cooldown masih panjang,
+                    // namun tetap presisi mendekati 0 detik (limit OS Android >= 1050ms per screenshot)
+                    val waitStep = when {
+                        scanResult.secondsRemaining > 8.0 ->
+                            (scanResult.secondsRemaining * 420.0).toLong().coerceIn(2200L, 4200L)
+                        scanResult.secondsRemaining > 3.0 ->
+                            ((scanResult.secondsRemaining - 1.2) * 550.0).toLong().coerceIn(1350L, 2400L)
+                        else -> 1080L
+                    }
                     delay(waitStep)
                 }
                 is SkillCooldownScanResult.Unavailable -> {

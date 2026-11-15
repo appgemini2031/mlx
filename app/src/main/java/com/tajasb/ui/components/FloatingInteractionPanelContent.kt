@@ -59,6 +59,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -88,6 +89,7 @@ import com.tajasb.interaction.FloatingPickerBridge
 import com.tajasb.interaction.FloatingPickerMode
 import com.tajasb.interaction.FloatingPickerProxyActivity
 import com.tajasb.interaction.FullAppBackupManager
+import com.tajasb.interaction.GiftCoinCatalog
 import com.tajasb.interaction.InstalledAppInfo
 import com.tajasb.interaction.InstalledAppSearcher
 import com.tajasb.interaction.LiveInteractionEvent
@@ -153,7 +155,11 @@ fun FloatingInteractionPanelContent(
         FloatingDropdownSection.LIVE_SETTINGS -> NeonOrange
     }
 
-    val dynamicMaxHeightDp = (190f + uiState.floatingConfig.panelHeightRatio.coerceIn(0.35f, 0.96f) * 210f).dp
+    val cfg = LocalConfiguration.current
+    val isLandscape = cfg.screenWidthDp > cfg.screenHeightDp
+    val safeMaxHeightDp = (cfg.screenHeightDp - if (isLandscape) 86 else 135).coerceIn(155, 480)
+    val configuredHeightDp = 190f + uiState.floatingConfig.panelHeightRatio.coerceIn(0.35f, 0.96f) * 210f
+    val dynamicMaxHeightDp = minOf(configuredHeightDp, safeMaxHeightDp.toFloat()).dp
 
     Column(
         modifier = Modifier
@@ -501,8 +507,16 @@ private fun DropdownConceptList(
                         )
                     }
                     Column(modifier = Modifier.weight(1f)) {
+                        val sourceLabel = if (
+                            rule.targetGiftName.isNotBlank() &&
+                            (rule.triggerSource == UniversalTriggerSource.GIFT || rule.triggerSource == UniversalTriggerSource.GIFT_QUANTITY)
+                        ) {
+                            "${rule.triggerSource.displayName} [${rule.targetGiftName}]"
+                        } else {
+                            rule.triggerSource.displayName
+                        }
                         Text(
-                            text = "${rule.triggerSource.displayName} → ${rule.triggerName}",
+                            text = "$sourceLabel → ${rule.triggerName}",
                             color = if (rule.enabled) Color.White else Color(0xFF64748B),
                             fontSize = 9.2.sp,
                             fontWeight = FontWeight.Bold,
@@ -565,9 +579,11 @@ private fun DropdownConceptEditor(
 ) {
     val context = LocalContext.current
     var draftName by remember(rule.id) { mutableStateOf(rule.triggerName) }
+    var draftTargetGiftName by remember(rule.id) { mutableStateOf(rule.targetGiftName) }
     var draftSource by remember(rule.id) { mutableStateOf(rule.triggerSource) }
     var draftColorHex by remember(rule.id, rule.accentColorHex) { mutableStateOf(rule.accentColorHex) }
     var draftPinVisible by remember(rule.id, rule.isPinVisible) { mutableStateOf(rule.isPinVisible) }
+    var delayBeforeText by remember(rule.id) { mutableStateOf(if (rule.enableDelayBefore) rule.delayBeforeMs.toString() else "0") }
     var cooldownText by remember(rule.id) { mutableStateOf(if (rule.enableCooldown) rule.cooldownMs.toString() else "0") }
     var minQtyText by remember(rule.id) { mutableStateOf(if (rule.enableMinimumQuantity) rule.minimumQuantity.toString() else "1") }
     var fineNudge by remember { mutableStateOf(true) }
@@ -693,6 +709,7 @@ private fun DropdownConceptEditor(
         val firstPin = normalized.firstOrNull {
             it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
         }
+        val delayBeforeVal = delayBeforeText.toLongOrNull()?.coerceIn(0L, 60_000L) ?: 0L
         val cd = cooldownText.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
         val minQ = minQtyText.toIntOrNull()?.coerceAtLeast(1) ?: 1
         val maxWait = draftCooldownMaxWaitText.toLongOrNull()?.coerceIn(1500L, 180_000L) ?: 35_000L
@@ -701,11 +718,14 @@ private fun DropdownConceptEditor(
             isPinVisible = draftPinVisible,
             accentColorHex = draftColorHex,
             triggerName = draftName.trim().ifBlank { "Konsep" },
+            targetGiftName = draftTargetGiftName.trim(),
             triggerSource = draftSource,
             overlayPosX = firstPin?.posX ?: rule.overlayPosX,
             overlayPosY = firstPin?.posY ?: rule.overlayPosY,
             enableMinimumQuantity = minQ > 1,
             minimumQuantity = minQ,
+            enableDelayBefore = delayBeforeVal > 0L,
+            delayBeforeMs = delayBeforeVal,
             enableCooldown = cd > 0L,
             cooldownMs = cd,
             enableVisualCooldownWait = draftEnableVisualCooldown,
@@ -975,7 +995,8 @@ private fun DropdownConceptEditor(
                 val condLabel = buildString {
                     val mq = minQtyText.toIntOrNull() ?: 1
                     val cd = cooldownText.toLongOrNull() ?: 0L
-                    append(if (mq > 1 || cd > 0L) "Syarat: Aktif" else "Syarat: Bebas")
+                    val db = delayBeforeText.toLongOrNull() ?: 0L
+                    append(if (mq > 1 || cd > 0L || db > 0L) "Syarat/Delay: Aktif" else "Syarat/Delay")
                 }
                 SubDropdownHeader(condLabel, showConditionDrop) {
                     showConditionDrop = !showConditionDrop
@@ -1003,15 +1024,35 @@ private fun DropdownConceptEditor(
             }
         }
 
+        if (draftSource == UniversalTriggerSource.GIFT || draftSource == UniversalTriggerSource.GIFT_QUANTITY) {
+            GiftNameCatalogPicker(
+                giftName = draftTargetGiftName,
+                onGiftNameChange = { draftTargetGiftName = it },
+                onFocusChange = onKeyboardFocusChanged,
+                onQuickPicked = { picked ->
+                    draftTargetGiftName = picked
+                    onSaveDraftOnly(buildRule())
+                }
+            )
+        }
+
         if (showConditionDrop) {
-            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                ComfortableInput(
+                    label = "Delay Awal(ms)",
+                    value = delayBeforeText,
+                    onValueChange = { delayBeforeText = it.filter(Char::isDigit).take(6) },
+                    keyboardType = KeyboardType.Number,
+                    onFocusChange = onKeyboardFocusChanged,
+                    modifier = Modifier.weight(1f)
+                )
                 ComfortableInput(
                     label = "Min Qty",
                     value = minQtyText,
                     onValueChange = { minQtyText = it.filter(Char::isDigit) },
                     keyboardType = KeyboardType.Number,
                     onFocusChange = onKeyboardFocusChanged,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(0.8f)
                 )
                 ComfortableInput(
                     label = "Cooldown(ms)",
@@ -1021,6 +1062,180 @@ private fun DropdownConceptEditor(
                     onFocusChange = onKeyboardFocusChanged,
                     modifier = Modifier.weight(1f)
                 )
+            }
+        }
+
+        // LOGIKA PRA-AKSI: Visual Skill Cooldown Reader MLBB ditempatkan di ATAS sebelum Koreografi
+        SubDropdownHeader(
+            title = "⏱️ Cooldown Skill ML: ${if (draftEnableVisualCooldown) "AUTO TUNGGU AKTIF" else "OFF"}",
+            open = showCooldownScanSection
+        ) {
+            showCooldownScanSection = !showCooldownScanSection
+        }
+
+        if (showCooldownScanSection) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(DarkSurface)
+                    .border(
+                        0.8.dp,
+                        if (draftEnableVisualCooldown) NeonCyan.copy(alpha = 0.7f) else DarkCardBorder,
+                        RoundedCornerShape(6.dp)
+                    )
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Baca Angka Cooldown MLBB (Sebelum Koreografi)",
+                            color = Color.White,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Menunggu hingga angka detik cooldown di area skill hilang lalu mengeksekusi koreografi di bawah.",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 7.4.sp
+                        )
+                    }
+                    Switch(
+                        checked = draftEnableVisualCooldown,
+                        onCheckedChange = { enabled ->
+                            draftEnableVisualCooldown = enabled
+                            onSaveDraftOnly(buildRule())
+                        },
+                        colors = SwitchDefaults.colors(checkedTrackColor = NeonCyan)
+                    )
+                }
+
+                if (draftEnableVisualCooldown) {
+                    val touchCandidates = draftSteps.filter {
+                        it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
+                    }
+                    if (touchCandidates.size > 1) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Pin Scan:", color = Color(0xFF94A3B8), fontSize = 7.8.sp)
+                            touchCandidates.forEachIndexed { tIdx, tStep ->
+                                val selected = draftCooldownTargetStepId == tStep.id ||
+                                    (draftCooldownTargetStepId.isNullOrBlank() && tIdx == 0)
+                                val label = tStep.stepName.trim().ifBlank { "#${tIdx + 1}" }
+                                SelectPill(label.take(10), selected) {
+                                    draftCooldownTargetStepId = tStep.id
+                                    onSaveDraftOnly(buildRule())
+                                }
+                            }
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        PrecisionStepperBar(
+                            label = "Lebar",
+                            valueText = "${(draftCooldownWidthRatio * 100).roundToInt()}%",
+                            accent = NeonCyan,
+                            onDecrement = {
+                                draftCooldownWidthRatio = (draftCooldownWidthRatio - 0.01f).coerceIn(0.025f, 0.35f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            onIncrement = {
+                                draftCooldownWidthRatio = (draftCooldownWidthRatio + 0.01f).coerceIn(0.025f, 0.35f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        PrecisionStepperBar(
+                            label = "Tinggi",
+                            valueText = "${(draftCooldownHeightRatio * 100).roundToInt()}%",
+                            accent = EmeraldGreen,
+                            onDecrement = {
+                                draftCooldownHeightRatio = (draftCooldownHeightRatio - 0.01f).coerceIn(0.025f, 0.45f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            onIncrement = {
+                                draftCooldownHeightRatio = (draftCooldownHeightRatio + 0.01f).coerceIn(0.025f, 0.45f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        PrecisionStepperBar(
+                            label = "Geser X",
+                            valueText = "${(draftCooldownOffsetX * 100).roundToInt()}%",
+                            accent = NeonOrange,
+                            decLabel = "◀",
+                            incLabel = "▶",
+                            onDecrement = {
+                                draftCooldownOffsetX = (draftCooldownOffsetX - 0.01f).coerceIn(-0.25f, 0.25f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            onIncrement = {
+                                draftCooldownOffsetX = (draftCooldownOffsetX + 0.01f).coerceIn(-0.25f, 0.25f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        PrecisionStepperBar(
+                            label = "Geser Y",
+                            valueText = "${(draftCooldownOffsetY * 100).roundToInt()}%",
+                            accent = NeonPurple,
+                            decLabel = "▲",
+                            incLabel = "▼",
+                            onDecrement = {
+                                draftCooldownOffsetY = (draftCooldownOffsetY - 0.01f).coerceIn(-0.25f, 0.25f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            onIncrement = {
+                                draftCooldownOffsetY = (draftCooldownOffsetY + 0.01f).coerceIn(-0.25f, 0.25f)
+                                onSaveDraftOnly(buildRule())
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ComfortableInput(
+                            label = "Max Tunggu(ms)",
+                            value = draftCooldownMaxWaitText,
+                            onValueChange = { draftCooldownMaxWaitText = it.filter(Char::isDigit).take(6) },
+                            keyboardType = KeyboardType.Number,
+                            onFocusChange = onKeyboardFocusChanged,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextChip("Reset Box", Color(0xFF334155), Color.White) {
+                            draftCooldownWidthRatio = 0.075f
+                            draftCooldownHeightRatio = 0.12f
+                            draftCooldownOffsetX = 0f
+                            draftCooldownOffsetY = 0f
+                            onSaveDraftOnly(buildRule())
+                        }
+                        TextChip("🔍 Scan Sekali", NeonCyan, Color.Black) {
+                            onInspectCooldown(buildRule()) { result ->
+                                cooldownScanTestMsg = result
+                            }
+                        }
+                    }
+                    cooldownScanTestMsg?.let { msg ->
+                        Text(
+                            text = "Hasil Scan: $msg",
+                            color = EmeraldGreen,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
             }
         }
 
@@ -1909,180 +2124,6 @@ private fun DropdownConceptEditor(
             }
         }
 
-        // Dropdown Visual Skill Cooldown Reader MLBB (tombol presisi tanpa loading)
-        SubDropdownHeader(
-            title = "⏱️ Cooldown Skill ML: ${if (draftEnableVisualCooldown) "AUTO TUNGGU AKTIF" else "OFF"}",
-            open = showCooldownScanSection
-        ) {
-            showCooldownScanSection = !showCooldownScanSection
-        }
-
-        if (showCooldownScanSection) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(DarkSurface)
-                    .border(
-                        0.8.dp,
-                        if (draftEnableVisualCooldown) NeonCyan.copy(alpha = 0.7f) else DarkCardBorder,
-                        RoundedCornerShape(6.dp)
-                    )
-                    .padding(horizontal = 6.dp, vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Baca Angka Cooldown MLBB",
-                            color = Color.White,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Menunggu hingga angka detik cooldown di area skill hilang lalu mengeksekusi koreografi.",
-                            color = Color(0xFF94A3B8),
-                            fontSize = 7.4.sp
-                        )
-                    }
-                    Switch(
-                        checked = draftEnableVisualCooldown,
-                        onCheckedChange = { enabled ->
-                            draftEnableVisualCooldown = enabled
-                            onSaveDraftOnly(buildRule())
-                        },
-                        colors = SwitchDefaults.colors(checkedTrackColor = NeonCyan)
-                    )
-                }
-
-                if (draftEnableVisualCooldown) {
-                    val touchCandidates = draftSteps.filter {
-                        it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
-                    }
-                    if (touchCandidates.size > 1) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(3.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Pin Scan:", color = Color(0xFF94A3B8), fontSize = 7.8.sp)
-                            touchCandidates.forEachIndexed { tIdx, tStep ->
-                                val selected = draftCooldownTargetStepId == tStep.id ||
-                                    (draftCooldownTargetStepId.isNullOrBlank() && tIdx == 0)
-                                val label = tStep.stepName.trim().ifBlank { "#${tIdx + 1}" }
-                                SelectPill(label.take(10), selected) {
-                                    draftCooldownTargetStepId = tStep.id
-                                    onSaveDraftOnly(buildRule())
-                                }
-                            }
-                        }
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        PrecisionStepperBar(
-                            label = "Lebar",
-                            valueText = "${(draftCooldownWidthRatio * 100).roundToInt()}%",
-                            accent = NeonCyan,
-                            onDecrement = {
-                                draftCooldownWidthRatio = (draftCooldownWidthRatio - 0.01f).coerceIn(0.025f, 0.35f)
-                                onSaveDraftOnly(buildRule())
-                            },
-                            onIncrement = {
-                                draftCooldownWidthRatio = (draftCooldownWidthRatio + 0.01f).coerceIn(0.025f, 0.35f)
-                                onSaveDraftOnly(buildRule())
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        PrecisionStepperBar(
-                            label = "Tinggi",
-                            valueText = "${(draftCooldownHeightRatio * 100).roundToInt()}%",
-                            accent = EmeraldGreen,
-                            onDecrement = {
-                                draftCooldownHeightRatio = (draftCooldownHeightRatio - 0.01f).coerceIn(0.025f, 0.45f)
-                                onSaveDraftOnly(buildRule())
-                            },
-                            onIncrement = {
-                                draftCooldownHeightRatio = (draftCooldownHeightRatio + 0.01f).coerceIn(0.025f, 0.45f)
-                                onSaveDraftOnly(buildRule())
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        PrecisionStepperBar(
-                            label = "Geser X",
-                            valueText = "${(draftCooldownOffsetX * 100).roundToInt()}%",
-                            accent = NeonOrange,
-                            decLabel = "◀",
-                            incLabel = "▶",
-                            onDecrement = {
-                                draftCooldownOffsetX = (draftCooldownOffsetX - 0.01f).coerceIn(-0.25f, 0.25f)
-                                onSaveDraftOnly(buildRule())
-                            },
-                            onIncrement = {
-                                draftCooldownOffsetX = (draftCooldownOffsetX + 0.01f).coerceIn(-0.25f, 0.25f)
-                                onSaveDraftOnly(buildRule())
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        PrecisionStepperBar(
-                            label = "Geser Y",
-                            valueText = "${(draftCooldownOffsetY * 100).roundToInt()}%",
-                            accent = NeonPurple,
-                            decLabel = "▲",
-                            incLabel = "▼",
-                            onDecrement = {
-                                draftCooldownOffsetY = (draftCooldownOffsetY - 0.01f).coerceIn(-0.25f, 0.25f)
-                                onSaveDraftOnly(buildRule())
-                            },
-                            onIncrement = {
-                                draftCooldownOffsetY = (draftCooldownOffsetY + 0.01f).coerceIn(-0.25f, 0.25f)
-                                onSaveDraftOnly(buildRule())
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        ComfortableInput(
-                            label = "Max Tunggu(ms)",
-                            value = draftCooldownMaxWaitText,
-                            onValueChange = { draftCooldownMaxWaitText = it.filter(Char::isDigit).take(6) },
-                            keyboardType = KeyboardType.Number,
-                            onFocusChange = onKeyboardFocusChanged,
-                            modifier = Modifier.weight(1f)
-                        )
-                        TextChip("Reset Box", Color(0xFF334155), Color.White) {
-                            draftCooldownWidthRatio = 0.075f
-                            draftCooldownHeightRatio = 0.12f
-                            draftCooldownOffsetX = 0f
-                            draftCooldownOffsetY = 0f
-                            onSaveDraftOnly(buildRule())
-                        }
-                        TextChip("🔍 Scan Sekali", NeonCyan, Color.Black) {
-                            onInspectCooldown(buildRule()) { result ->
-                                cooldownScanTestMsg = result
-                            }
-                        }
-                    }
-                    cooldownScanTestMsg?.let { msg ->
-                        Text(
-                            text = "Hasil Scan: $msg",
-                            color = EmeraldGreen,
-                            fontSize = 8.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-        }
-
         Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             OutlinedButton(
                 onClick = onCancel,
@@ -2198,14 +2239,16 @@ private fun DropdownTestSection(
                 ) {
                     Button(
                         onClick = {
+                            val resolvedGift = GiftCoinCatalog.firstGiftNameForTest(chosenRule.targetGiftName)
+                            val resolvedDiamonds = GiftCoinCatalog.resolveCoinCost(resolvedGift) ?: 10
                             engine.forceTestRuleNow(
                                 ruleId = chosenRule.id,
                                 customEvent = LiveInteractionEvent(
                                     source = chosenRule.triggerSource,
                                     senderName = "SultanTester",
                                     quantity = if (chosenRule.enableMinimumQuantity) chosenRule.minimumQuantity else 1,
-                                    diamonds = 10,
-                                    giftName = "Rose",
+                                    diamonds = resolvedDiamonds,
+                                    giftName = resolvedGift,
                                     text = "Tes ${chosenRule.triggerName}"
                                 )
                             ) { result ->
@@ -2235,6 +2278,7 @@ private fun DropdownTestSection(
             }
         }
 
+        var simGiftName by remember { mutableStateOf("Mawar") }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2245,18 +2289,28 @@ private fun DropdownTestSection(
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Text(
-                text = "2️⃣ Simulasi Event Live (Sesuai saklar ON/OFF & syarat):",
+                text = "2️⃣ Simulasi Event Live (Sesuai saklar ON/OFF & nama koin):",
                 color = NeonCyan,
                 fontSize = 8.2.sp,
                 fontWeight = FontWeight.Bold
             )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                listOf("Mawar", "Kopi", "Es Krim", "Bebek", "Heart Me", "Permen", "Paus Menyelam").forEach { gName ->
+                    SelectPill("🎁 $gName", simGiftName.equals(gName, ignoreCase = true)) {
+                        simGiftName = gName
+                    }
+                }
+            }
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 listOf(
                     UniversalTriggerSource.LIKE to "❤️ Like",
-                    UniversalTriggerSource.GIFT to "🎁 Gift",
+                    UniversalTriggerSource.GIFT to "🎁 $simGiftName",
                     UniversalTriggerSource.CHAT to "💬 Chat",
                     UniversalTriggerSource.FOLLOW to "➕ Follow",
                     UniversalTriggerSource.SHARE to "↗️ Share",
@@ -2264,14 +2318,15 @@ private fun DropdownTestSection(
                 ).forEach { (src, label) ->
                     TextChip(label, NeonCyan.copy(alpha = 0.25f), Color.White) {
                         if (!isEngineEnabled) engine.setEngineEnabled(true)
+                        val simCoins = GiftCoinCatalog.resolveCoinCost(simGiftName) ?: 1
                         val records = engine.dispatchEvent(
                             LiveInteractionEvent(
                                 id = "sim_${src.name}_${System.currentTimeMillis()}",
                                 source = src,
                                 senderName = "PenontonSim",
                                 quantity = 1,
-                                diamonds = 10,
-                                giftName = "Rose",
+                                diamonds = simCoins,
+                                giftName = simGiftName,
                                 text = "Simulasi ${src.displayName}"
                             )
                         )

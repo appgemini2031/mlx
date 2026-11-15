@@ -188,6 +188,7 @@ data class UniversalTriggerRule(
     val accentColorHex: Long = 0xFF22D3EEL,
     val triggerSource: UniversalTriggerSource = UniversalTriggerSource.LIKE,
     val triggerName: String = "Rule Baru",
+    val targetGiftName: String = "",
     // Conditions + toggle
     val enableConditions: Boolean = false,
     val conditions: List<TriggerCondition> = emptyList(),
@@ -465,6 +466,7 @@ object UniversalInteractionJsonCodec {
         put("accentColorHex", rule.accentColorHex)
         put("triggerSource", rule.triggerSource.name)
         put("triggerName", rule.triggerName)
+        put("targetGiftName", rule.targetGiftName)
         put("enableConditions", rule.enableConditions)
         put("conditions", JSONArray().apply { rule.conditions.forEach { put(conditionToJson(it)) } })
         put("enableMinimumQuantity", rule.enableMinimumQuantity)
@@ -532,6 +534,7 @@ object UniversalInteractionJsonCodec {
             accentColorHex = obj.optLong("accentColorHex", ChallengeColorPalette.colorForIndex(indexHint)),
             triggerSource = enumOrDefault(obj.optString("triggerSource"), UniversalTriggerSource.LIKE),
             triggerName = obj.optString("triggerName", "Rule Baru").ifBlank { "Rule Baru" },
+            targetGiftName = obj.optString("targetGiftName", "").trim(),
             enableConditions = obj.optBoolean("enableConditions", false),
             conditions = conditions,
             enableMinimumQuantity = obj.optBoolean("enableMinimumQuantity", false),

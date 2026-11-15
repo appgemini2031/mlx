@@ -5,6 +5,7 @@ import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -83,6 +84,8 @@ import com.tajasb.eventrelay.LiveEventPreferences
 import com.tajasb.eventrelay.LiveEventReceiver
 import com.tajasb.interaction.ActionType
 import com.tajasb.interaction.ChallengeColorPalette
+import com.tajasb.interaction.ConceptGrouper
+import com.tajasb.interaction.ConceptGroupingMode
 import com.tajasb.interaction.DispatchStatus
 import com.tajasb.interaction.ExecutionMode
 import com.tajasb.interaction.FloatingPickerBridge
@@ -249,6 +252,7 @@ fun FloatingInteractionPanelContent(
                     if (activeEditRule != null) {
                         DropdownConceptEditor(
                             rule = activeEditRule,
+                            allRules = uiState.rules,
                             activePinStepId = uiState.activePinStepId,
                             isNewEmpty = activeEditRule.actionSequence.isEmpty(),
                             onSelectStepPin = { stepId -> engine.selectActivePin(activeEditRule.id, stepId) },
@@ -304,8 +308,18 @@ fun FloatingInteractionPanelContent(
                         DropdownConceptList(
                             rules = uiState.rules,
                             activePinRuleId = uiState.activePinRuleId,
-                            onCreateEmptyConcept = {
-                                val created = engine.createEmptyConcept(UniversalTriggerSource.GIFT)
+                            onCreateConcept = { source, starterAction ->
+                                val created = engine.createEmptyConcept(source)
+                                if (starterAction != null) {
+                                    val starterStep = buildStarterStepForAction(
+                                        actionType = starterAction,
+                                        posX = created.overlayPosX,
+                                        posY = created.overlayPosY
+                                    )
+                                    if (starterStep != null) {
+                                        engine.addOrUpdateRule(created.copy(actionSequence = listOf(starterStep)))
+                                    }
+                                }
                                 editingRuleId = created.id
                             },
                             onToggleRule = { engine.toggleRuleEnabled(it.id) },
@@ -400,11 +414,75 @@ private fun HorizontalSectionTab(
     }
 }
 
+private fun buildStarterStepForAction(
+    actionType: ActionType,
+    posX: Float,
+    posY: Float
+): UniversalActionStep? {
+    return when (actionType) {
+        ActionType.SIMULATED_CLICK -> UniversalActionStep(
+            enabled = true,
+            actionType = ActionType.SIMULATED_CLICK,
+            paramValue = String.format(Locale.US, "%.3f,%.3f", posX, posY),
+            secondaryValue = "70",
+            durationMs = 70L,
+            posX = posX,
+            posY = posY
+        )
+        ActionType.SIMULATED_SWIPE -> UniversalActionStep(
+            enabled = true,
+            actionType = ActionType.SIMULATED_SWIPE,
+            paramValue = "RIGHT",
+            secondaryValue = "220",
+            durationMs = 220L,
+            posX = posX,
+            posY = posY
+        )
+        ActionType.HOME_BACK_GAME -> UniversalActionStep(
+            enabled = true,
+            actionType = ActionType.HOME_BACK_GAME,
+            paramValue = "1500",
+            durationMs = 1500L
+        )
+        ActionType.MEME_OVERLAY -> UniversalActionStep(
+            enabled = true,
+            actionType = ActionType.MEME_OVERLAY,
+            secondaryValue = "MEME {user}!",
+            durationMs = 2500L,
+            posX = posX,
+            posY = posY
+        )
+        ActionType.PLAY_SOUND -> UniversalActionStep(
+            enabled = true,
+            actionType = ActionType.PLAY_SOUND,
+            paramValue = "CHIME"
+        )
+        else -> null
+    }
+}
+
+private fun starterPresetForGroupKey(groupKey: String): Pair<UniversalTriggerSource, ActionType?> {
+    if (groupKey.startsWith("EVT_")) {
+        val name = groupKey.removePrefix("EVT_")
+        val src = UniversalTriggerSource.values().firstOrNull { it.name == name } ?: UniversalTriggerSource.GIFT
+        return src to null
+    }
+    val action = when (groupKey) {
+        "ACT_CLICK" -> ActionType.SIMULATED_CLICK
+        "ACT_SWIPE" -> ActionType.SIMULATED_SWIPE
+        "ACT_HOME" -> ActionType.HOME_BACK_GAME
+        "ACT_OVERLAY" -> ActionType.MEME_OVERLAY
+        "ACT_SOUND" -> ActionType.PLAY_SOUND
+        else -> null
+    }
+    return UniversalTriggerSource.GIFT to action
+}
+
 @Composable
 private fun DropdownConceptList(
     rules: List<UniversalTriggerRule>,
     activePinRuleId: String?,
-    onCreateEmptyConcept: () -> Unit,
+    onCreateConcept: (UniversalTriggerSource, ActionType?) -> Unit,
     onToggleRule: (UniversalTriggerRule) -> Unit,
     onTogglePinEye: (UniversalTriggerRule) -> Unit,
     onSetAllEyes: (Boolean) -> Unit,
@@ -415,13 +493,29 @@ private fun DropdownConceptList(
     onDeleteRule: (UniversalTriggerRule) -> Unit,
     onShowPinsOutside: () -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    var groupingMode by remember { mutableStateOf(ConceptGroupingMode.BY_EVENT) }
+    var selectedGroupKey by remember { mutableStateOf<String?>(null) }
+    var collapsedGroupKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    val buckets = remember(rules, groupingMode) {
+        ConceptGrouper.groupRules(rules, groupingMode)
+    }
+    val visibleBuckets = remember(buckets, selectedGroupKey) {
+        if (selectedGroupKey == null) buckets
+        else buckets.filter { it.key == selectedGroupKey }.ifEmpty { buckets }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Button(
-                onClick = onCreateEmptyConcept,
+                onClick = {
+                    val (src, starter) = selectedGroupKey?.let { starterPresetForGroupKey(it) }
+                        ?: (UniversalTriggerSource.GIFT to null)
+                    onCreateConcept(src, starter)
+                },
                 colors = ButtonDefaults.buttonColors(containerColor = EmeraldGreen),
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                 modifier = Modifier.weight(1f).height(30.dp)
@@ -440,6 +534,63 @@ private fun DropdownConceptList(
         }
 
         if (rules.isNotEmpty()) {
+            // Menu Grup Konsep (Grup Event / Grup Aksi / Semua)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Grup:",
+                    color = Color(0xFF94A3B8),
+                    fontSize = 8.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                ConceptGroupingMode.values().forEach { mode ->
+                    val active = groupingMode == mode
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(if (active) NeonCyan.copy(alpha = 0.22f) else DarkSurface)
+                            .border(0.7.dp, if (active) NeonCyan else DarkCardBorder, RoundedCornerShape(5.dp))
+                            .clickable {
+                                groupingMode = mode
+                                selectedGroupKey = null
+                            }
+                            .padding(vertical = 3.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = mode.label,
+                            color = if (active) NeonCyan else Color(0xFFCBD5E1),
+                            fontSize = 8.sp,
+                            fontWeight = if (active) FontWeight.Black else FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+
+            if (groupingMode != ConceptGroupingMode.ALL && buckets.size > 1) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    SelectPill("Semua (${rules.size})", selectedGroupKey == null) {
+                        selectedGroupKey = null
+                    }
+                    buckets.forEach { bucket ->
+                        val active = selectedGroupKey == bucket.key
+                        SelectPill("${bucket.emoji} ${bucket.title} (${bucket.rules.size})", active) {
+                            selectedGroupKey = if (active) null else bucket.key
+                        }
+                    }
+                }
+            }
+
             val visibleCount = rules.count { it.isPinVisible }
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -466,97 +617,206 @@ private fun DropdownConceptList(
                 fontSize = 8.5.sp
             )
         } else {
-            rules.forEachIndexed { idx, rule ->
-                val ruleColor = Color(rule.accentColorHex)
-                val isSelected = rule.id == activePinRuleId
-                val activeSteps = rule.actionSequence.filter { it.enabled }
-                val stepSummary = when {
-                    activeSteps.isEmpty() -> "Kosong"
-                    activeSteps.size == 1 -> shortStepLabel(activeSteps.first())
-                    else -> "${activeSteps.size}x: " + activeSteps.take(3).joinToString(" → ") { shortStepLabel(it) }
+            visibleBuckets.forEach { bucket ->
+                val showGroupHeader = groupingMode != ConceptGroupingMode.ALL
+                val isGroupCollapsed = showGroupHeader && selectedGroupKey == null && bucket.key in collapsedGroupKeys
+
+                if (showGroupHeader) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF162033))
+                            .border(0.7.dp, NeonCyan.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
+                            .clickable {
+                                if (selectedGroupKey == null) {
+                                    collapsedGroupKeys = if (isGroupCollapsed) {
+                                        collapsedGroupKeys - bucket.key
+                                    } else {
+                                        collapsedGroupKeys + bucket.key
+                                    }
+                                }
+                            }
+                            .padding(horizontal = 7.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "${if (isGroupCollapsed) "▸" else "▾"} ${bucket.emoji} ${bucket.title} (${bucket.rules.size})",
+                            color = NeonCyan,
+                            fontSize = 8.4.sp,
+                            fontWeight = FontWeight.Black,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        ActionPillButton("+ Grup", EmeraldGreen) {
+                            val (src, starter) = starterPresetForGroupKey(bucket.key)
+                            onCreateConcept(src, starter)
+                        }
+                    }
                 }
 
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(if (isSelected) ruleColor.copy(alpha = 0.12f) else DarkSurface)
-                        .border(
-                            if (isSelected) 1.2.dp else 0.7.dp,
-                            if (rule.isPinVisible) ruleColor.copy(alpha = 0.8f) else DarkCardBorder,
-                            RoundedCornerShape(6.dp)
-                        )
-                        .clickable { onEditRule(rule) }
-                        .padding(horizontal = 6.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(16.dp)
-                            .clip(CircleShape)
-                            .background(ruleColor)
-                            .clickable { onSelectActivePin(rule) },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "${idx + 1}",
-                            color = Color.Black,
-                            fontSize = 8.5.sp,
-                            fontWeight = FontWeight.Black
-                        )
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        val sourceLabel = if (
-                            rule.targetGiftName.isNotBlank() &&
-                            (rule.triggerSource == UniversalTriggerSource.GIFT || rule.triggerSource == UniversalTriggerSource.GIFT_QUANTITY)
-                        ) {
-                            "${rule.triggerSource.displayName} [${rule.targetGiftName}]"
-                        } else {
-                            rule.triggerSource.displayName
+                if (!isGroupCollapsed) {
+                    bucket.rules.forEach { indexed ->
+                        val idx = indexed.globalIndex
+                        val rule = indexed.rule
+                        val ruleColor = Color(rule.accentColorHex)
+                        val isSelected = rule.id == activePinRuleId
+                        val activeSteps = rule.actionSequence.filter { it.enabled }
+                        val giftConflicts = remember(rule.id, rule.triggerSource, rule.targetGiftName, rules) {
+                            GiftCoinCatalog.findConflictingRules(
+                                currentRuleId = rule.id,
+                                currentSource = rule.triggerSource,
+                                targetGiftName = rule.targetGiftName,
+                                allRules = rules
+                            )
                         }
-                        Text(
-                            text = "$sourceLabel → ${rule.triggerName}",
-                            color = if (rule.enabled) Color.White else Color(0xFF64748B),
-                            fontSize = 9.2.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = stepSummary + if (!rule.isPinVisible) " • Tutup" else "",
-                            color = if (rule.isPinVisible) Color(0xFF94A3B8) else NeonOrange,
-                            fontSize = 7.6.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        val stepSummary = when {
+                            activeSteps.isEmpty() -> "Kosong"
+                            activeSteps.size == 1 -> shortStepLabel(activeSteps.first())
+                            else -> "${activeSteps.size}x: " + activeSteps.take(3).joinToString(" → ") { shortStepLabel(it) }
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (isSelected) ruleColor.copy(alpha = 0.12f) else DarkSurface)
+                                .border(
+                                    if (isSelected) 1.2.dp else 0.7.dp,
+                                    if (giftConflicts.isNotEmpty()) NeonOrange.copy(alpha = 0.85f)
+                                    else if (rule.isPinVisible) ruleColor.copy(alpha = 0.8f) else DarkCardBorder,
+                                    RoundedCornerShape(6.dp)
+                                )
+                                .clickable { onEditRule(rule) }
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(16.dp)
+                                    .clip(CircleShape)
+                                    .background(ruleColor)
+                                    .clickable { onSelectActivePin(rule) },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "${idx + 1}",
+                                    color = Color.Black,
+                                    fontSize = 8.5.sp,
+                                    fontWeight = FontWeight.Black
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                val sourceLabel = if (
+                                    rule.targetGiftName.isNotBlank() &&
+                                    (rule.triggerSource == UniversalTriggerSource.GIFT || rule.triggerSource == UniversalTriggerSource.GIFT_QUANTITY)
+                                ) {
+                                    "${rule.triggerSource.displayName} [${rule.targetGiftName}]"
+                                } else {
+                                    rule.triggerSource.displayName
+                                }
+                                Text(
+                                    text = "$sourceLabel → ${rule.triggerName}",
+                                    color = if (rule.enabled) Color.White else Color(0xFF64748B),
+                                    fontSize = 9.2.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                val subLine = buildString {
+                                    append(stepSummary)
+                                    if (rule.enableVisualCooldownWait) append(" • ⏱ Scan")
+                                    if (!rule.isPinVisible) append(" • Tutup")
+                                }
+                                Text(
+                                    text = subLine,
+                                    color = if (rule.isPinVisible) Color(0xFF94A3B8) else NeonOrange,
+                                    fontSize = 7.6.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (giftConflicts.isNotEmpty()) {
+                                    Text(
+                                        text = "⚠️ Gift bentrok dgn ${giftConflicts.first().conflictingRuleName}",
+                                        color = NeonOrange,
+                                        fontSize = 7.3.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(5.dp))
+                                    .background(if (rule.isPinVisible) ruleColor.copy(alpha = 0.20f) else Color(0xFF334155))
+                                    .border(0.7.dp, if (rule.isPinVisible) ruleColor else Color(0xFF475569), RoundedCornerShape(5.dp))
+                                    .clickable { onTogglePinEye(rule) }
+                                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (rule.isPinVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                    contentDescription = if (rule.isPinVisible) "Tutup Mata Pin" else "Buka Mata Pin",
+                                    tint = if (rule.isPinVisible) ruleColor else Color(0xFF94A3B8),
+                                    modifier = Modifier.size(12.dp)
+                                )
+                            }
+                            ActionPillButton(if (rule.enabled) "ON" else "OFF", if (rule.enabled) EmeraldGreen else Color(0xFF64748B)) {
+                                onToggleRule(rule)
+                            }
+                            ActionPillButton("▶", EmeraldGreen) { onTestRule(rule) }
+                            ActionPillButton("⧉", NeonPurple) { onDuplicateRule(rule) }
+                            ActionPillButton("✎", NeonCyan) { onEditRule(rule) }
+                            ConfirmDeleteActionPill(text = "✕") { onDeleteRule(rule) }
+                        }
                     }
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(if (rule.isPinVisible) ruleColor.copy(alpha = 0.20f) else Color(0xFF334155))
-                            .border(0.7.dp, if (rule.isPinVisible) ruleColor else Color(0xFF475569), RoundedCornerShape(5.dp))
-                            .clickable { onTogglePinEye(rule) }
-                            .padding(horizontal = 4.dp, vertical = 4.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = if (rule.isPinVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                            contentDescription = if (rule.isPinVisible) "Tutup Mata Pin" else "Buka Mata Pin",
-                            tint = if (rule.isPinVisible) ruleColor else Color(0xFF94A3B8),
-                            modifier = Modifier.size(12.dp)
-                        )
-                    }
-                    ActionPillButton(if (rule.enabled) "ON" else "OFF", if (rule.enabled) EmeraldGreen else Color(0xFF64748B)) {
-                        onToggleRule(rule)
-                    }
-                    ActionPillButton("▶", EmeraldGreen) { onTestRule(rule) }
-                    ActionPillButton("⧉", NeonPurple) { onDuplicateRule(rule) }
-                    ActionPillButton("✎", NeonCyan) { onEditRule(rule) }
-                    ConfirmDeleteActionPill(text = "✕") { onDeleteRule(rule) }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ConceptSectionCard(
+    stepNumber: String,
+    title: String,
+    accent: Color = NeonCyan,
+    content: @Composable () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(7.dp))
+            .background(DarkSurface)
+            .border(0.8.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(7.dp))
+            .padding(horizontal = 7.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(15.dp)
+                    .clip(CircleShape)
+                    .background(accent),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(stepNumber, color = Color.Black, fontSize = 8.2.sp, fontWeight = FontWeight.Black)
+            }
+            Text(
+                text = title,
+                color = accent,
+                fontSize = 8.6.sp,
+                fontWeight = FontWeight.Black
+            )
+        }
+        content()
     }
 }
 
@@ -564,6 +824,7 @@ private fun DropdownConceptList(
 @Composable
 private fun DropdownConceptEditor(
     rule: UniversalTriggerRule,
+    allRules: List<UniversalTriggerRule>,
     activePinStepId: String?,
     isNewEmpty: Boolean,
     onSelectStepPin: (String?) -> Unit,
@@ -973,112 +1234,99 @@ private fun DropdownConceptEditor(
             }
         }
 
-        ComfortableInput(
-            label = "Nama Konsep / Challenge",
-            value = draftName,
-            onValueChange = { draftName = it },
-            onFocusChange = onKeyboardFocusChanged
-        )
+        // BAGIAN 1: IDENTITAS & PEMICU (Event, Target Gift, Syarat)
+        ConceptSectionCard(stepNumber = "1", title = "Identitas & Pemicu", accent = NeonCyan) {
+            ComfortableInput(
+                label = "Nama Konsep / Challenge",
+                value = draftName,
+                onValueChange = { draftName = it },
+                onFocusChange = onKeyboardFocusChanged
+            )
 
-        // Dropdown ringkas Event Pemicu & Syarat (tertutup rapi saat tidak diklik)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Box(modifier = Modifier.weight(1f)) {
-                SubDropdownHeader("Event: ${draftSource.displayName}", showEventDrop) {
-                    showEventDrop = !showEventDrop
-                    if (showEventDrop) showConditionDrop = false
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Box(modifier = Modifier.weight(1f)) {
+                    SubDropdownHeader("Event: ${draftSource.displayName}", showEventDrop) {
+                        showEventDrop = !showEventDrop
+                        if (showEventDrop) showConditionDrop = false
+                    }
                 }
-            }
-            Box(modifier = Modifier.weight(0.9f)) {
-                val condLabel = buildString {
+                Box(modifier = Modifier.weight(0.85f)) {
                     val mq = minQtyText.toIntOrNull() ?: 1
                     val cd = cooldownText.toLongOrNull() ?: 0L
-                    val db = delayBeforeText.toLongOrNull() ?: 0L
-                    append(if (mq > 1 || cd > 0L || db > 0L) "Syarat/Delay: Aktif" else "Syarat/Delay")
-                }
-                SubDropdownHeader(condLabel, showConditionDrop) {
-                    showConditionDrop = !showConditionDrop
-                    if (showConditionDrop) showEventDrop = false
-                }
-            }
-        }
-
-        if (showEventDrop) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf(
-                    UniversalTriggerSource.LIKE,
-                    UniversalTriggerSource.GIFT,
-                    UniversalTriggerSource.GIFT_QUANTITY,
-                    UniversalTriggerSource.CHAT,
-                    UniversalTriggerSource.FOLLOW,
-                    UniversalTriggerSource.SHARE,
-                    UniversalTriggerSource.MEMBER_JOIN
-                ).forEach { src ->
-                    SelectPill(src.displayName, draftSource == src) {
-                        draftSource = src
-                        showEventDrop = false
+                    val condLabel = if (mq > 1 || cd > 0L) "Syarat: Aktif" else "Syarat Event"
+                    SubDropdownHeader(condLabel, showConditionDrop) {
+                        showConditionDrop = !showConditionDrop
+                        if (showConditionDrop) showEventDrop = false
                     }
                 }
             }
-        }
 
-        if (draftSource == UniversalTriggerSource.GIFT || draftSource == UniversalTriggerSource.GIFT_QUANTITY) {
-            GiftNameCatalogPicker(
-                giftName = draftTargetGiftName,
-                onGiftNameChange = { draftTargetGiftName = it },
-                onFocusChange = onKeyboardFocusChanged,
-                onQuickPicked = { picked ->
-                    draftTargetGiftName = picked
-                    onSaveDraftOnly(buildRule())
+            if (showEventDrop) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf(
+                        UniversalTriggerSource.LIKE,
+                        UniversalTriggerSource.GIFT,
+                        UniversalTriggerSource.GIFT_QUANTITY,
+                        UniversalTriggerSource.CHAT,
+                        UniversalTriggerSource.FOLLOW,
+                        UniversalTriggerSource.SHARE,
+                        UniversalTriggerSource.MEMBER_JOIN
+                    ).forEach { src ->
+                        SelectPill(src.displayName, draftSource == src) {
+                            draftSource = src
+                            showEventDrop = false
+                        }
+                    }
                 }
-            )
-        }
+            }
 
-        if (showConditionDrop) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                ComfortableInput(
-                    label = "Delay Awal(ms)",
-                    value = delayBeforeText,
-                    onValueChange = { delayBeforeText = it.filter(Char::isDigit).take(6) },
-                    keyboardType = KeyboardType.Number,
+            if (draftSource == UniversalTriggerSource.GIFT || draftSource == UniversalTriggerSource.GIFT_QUANTITY) {
+                GiftNameCatalogPicker(
+                    giftName = draftTargetGiftName,
+                    onGiftNameChange = { draftTargetGiftName = it },
                     onFocusChange = onKeyboardFocusChanged,
-                    modifier = Modifier.weight(1f)
+                    onQuickPicked = { picked ->
+                        draftTargetGiftName = picked
+                        onSaveDraftOnly(buildRule())
+                    },
+                    currentRuleId = rule.id,
+                    currentTriggerSource = draftSource,
+                    existingRules = allRules
                 )
-                ComfortableInput(
-                    label = "Min Qty",
-                    value = minQtyText,
-                    onValueChange = { minQtyText = it.filter(Char::isDigit) },
-                    keyboardType = KeyboardType.Number,
-                    onFocusChange = onKeyboardFocusChanged,
-                    modifier = Modifier.weight(0.8f)
-                )
-                ComfortableInput(
-                    label = "Cooldown(ms)",
-                    value = cooldownText,
-                    onValueChange = { cooldownText = it.filter(Char::isDigit) },
-                    keyboardType = KeyboardType.Number,
-                    onFocusChange = onKeyboardFocusChanged,
-                    modifier = Modifier.weight(1f)
-                )
+            }
+
+            if (showConditionDrop) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ComfortableInput(
+                        label = "Min Qty",
+                        value = minQtyText,
+                        onValueChange = { minQtyText = it.filter(Char::isDigit) },
+                        keyboardType = KeyboardType.Number,
+                        onFocusChange = onKeyboardFocusChanged,
+                        modifier = Modifier.weight(0.8f)
+                    )
+                    ComfortableInput(
+                        label = "Jeda Antar Trigger (ms)",
+                        value = cooldownText,
+                        onValueChange = { cooldownText = it.filter(Char::isDigit) },
+                        keyboardType = KeyboardType.Number,
+                        onFocusChange = onKeyboardFocusChanged,
+                        modifier = Modifier.weight(1.2f)
+                    )
+                }
             }
         }
 
-        // LOGIKA PRA-AKSI: Visual Skill Cooldown Reader MLBB ditempatkan di ATAS sebelum Koreografi
-        SubDropdownHeader(
-            title = "⏱️ Cooldown Skill ML: ${if (draftEnableVisualCooldown) "AUTO TUNGGU AKTIF" else "OFF"}",
-            open = showCooldownScanSection
-        ) {
-            showCooldownScanSection = !showCooldownScanSection
-        }
-
-        if (showCooldownScanSection) {
+        // BAGIAN 2: PRA-AKSI (Delay Scan Cooldown ML atau Delay Awal)
+        ConceptSectionCard(stepNumber = "2", title = "Pra-Aksi (Sebelum Koreografi)", accent = NeonOrange) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(6.dp))
-                    .background(DarkSurface)
+                    .background(DarkBackground.copy(alpha = 0.7f))
                     .border(
                         0.8.dp,
                         if (draftEnableVisualCooldown) NeonCyan.copy(alpha = 0.7f) else DarkCardBorder,
@@ -1094,13 +1342,17 @@ private fun DropdownConceptEditor(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Baca Angka Cooldown MLBB (Sebelum Koreografi)",
+                            text = "⏱️ Delay Scan Cooldown MLBB",
                             color = Color.White,
                             fontSize = 9.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Menunggu hingga angka detik cooldown di area skill hilang lalu mengeksekusi koreografi di bawah.",
+                            text = if (draftEnableVisualCooldown) {
+                                "Aktif — menunggu angka CD hilang di tombol skill, tanpa jeda tambahan."
+                            } else {
+                                "Aktifkan jika ingin menunggu cooldown skill ML otomatis sebelum tap."
+                            },
                             color = Color(0xFF94A3B8),
                             fontSize = 7.4.sp
                         )
@@ -1109,6 +1361,7 @@ private fun DropdownConceptEditor(
                         checked = draftEnableVisualCooldown,
                         onCheckedChange = { enabled ->
                             draftEnableVisualCooldown = enabled
+                            showCooldownScanSection = enabled
                             onSaveDraftOnly(buildRule())
                         },
                         colors = SwitchDefaults.colors(checkedTrackColor = NeonCyan)
@@ -1237,16 +1490,27 @@ private fun DropdownConceptEditor(
                     }
                 }
             }
+
+            if (draftEnableVisualCooldown) {
+                Text(
+                    text = "⚡ Delay Awal otomatis dilewati saat Delay Scan aktif — langsung eksekusi saat siap.",
+                    color = NeonCyan,
+                    fontSize = 7.6.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            } else {
+                ComfortableInput(
+                    label = "⏱️ Delay Awal Sebelum Koreografi (ms)",
+                    value = delayBeforeText,
+                    onValueChange = { delayBeforeText = it.filter(Char::isDigit).take(6) },
+                    keyboardType = KeyboardType.Number,
+                    onFocusChange = onKeyboardFocusChanged
+                )
+            }
         }
 
-        // DAFTAR KOREOGRAFI DINAMIS (DEFAULT KOSONG)
-        Text(
-            text = "Koreografi (${draftSteps.size} langkah):",
-            color = Color(0xFFCBD5E1),
-            fontSize = 9.sp,
-            fontWeight = FontWeight.Bold
-        )
-
+        // BAGIAN 3: LANGKAH KOREOGRAFI
+        ConceptSectionCard(stepNumber = "3", title = "Langkah Koreografi (${draftSteps.size})", accent = EmeraldGreen) {
         if (draftSteps.isEmpty()) {
             Text(
                 text = "Kosong — ketuk '+ Tambah Koreografi' untuk pilih Klik, Geser, Home→Game, Jeda, Overlay, atau Sound.",
@@ -2123,6 +2387,7 @@ private fun DropdownConceptEditor(
                 }
             }
         }
+        } // end ConceptSectionCard 3
 
         Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             OutlinedButton(

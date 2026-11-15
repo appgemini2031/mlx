@@ -102,6 +102,7 @@ import kotlin.math.roundToInt
 @Composable
 fun FlexibleTriggerEditorOverlay(
     initialRule: UniversalTriggerRule,
+    existingRules: List<UniversalTriggerRule> = emptyList(),
     onDismiss: () -> Unit,
     onSave: (UniversalTriggerRule) -> Unit,
     onPreview: (UniversalTriggerRule) -> Unit,
@@ -206,7 +207,10 @@ fun FlexibleTriggerEditorOverlay(
                             GiftNameCatalogPicker(
                                 giftName = draft.targetGiftName,
                                 onGiftNameChange = { draft = draft.copy(targetGiftName = it) },
-                                onQuickPicked = { draft = draft.copy(targetGiftName = it) }
+                                onQuickPicked = { draft = draft.copy(targetGiftName = it) },
+                                currentRuleId = draft.id,
+                                currentTriggerSource = draft.triggerSource,
+                                existingRules = existingRules
                             )
                         }
                         if (!draft.triggerSource.isAvailableInRelay) {
@@ -580,16 +584,25 @@ fun FlexibleTriggerEditorOverlay(
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                            ToggleNumberParamRow(
-                                title = "Delay Before",
-                                enabled = draft.enableDelayBefore,
-                                onToggle = { draft = draft.copy(enableDelayBefore = it) },
-                                value = draft.delayBeforeMs.toString(),
-                                onValueChange = {
-                                    it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(delayBeforeMs = v) }
-                                },
-                                unit = "ms"
-                            )
+                            if (draft.enableVisualCooldownWait) {
+                                Text(
+                                    text = "⚡ Delay Scan Cooldown ML sedang aktif: Delay Before & Random Delay dilewati otomatis.",
+                                    color = NeonCyan,
+                                    fontSize = 8.5.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            } else {
+                                ToggleNumberParamRow(
+                                    title = "Delay Before",
+                                    enabled = draft.enableDelayBefore,
+                                    onToggle = { draft = draft.copy(enableDelayBefore = it) },
+                                    value = draft.delayBeforeMs.toString(),
+                                    onValueChange = {
+                                        it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(delayBeforeMs = v) }
+                                    },
+                                    unit = "ms"
+                                )
+                            }
                             ToggleNumberParamRow(
                                 title = "Delay After",
                                 enabled = draft.enableDelayAfter,
@@ -656,41 +669,43 @@ fun FlexibleTriggerEditorOverlay(
                                 },
                                 unit = "prio"
                             )
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(DarkBackground)
-                                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Switch(
-                                    checked = draft.enableRandomDelay,
-                                    onCheckedChange = { draft = draft.copy(enableRandomDelay = it) }
-                                )
-                                Text(
-                                    text = "Random Delay",
-                                    color = if (draft.enableRandomDelay) Color.White else Color(0xFF64748B),
-                                    fontSize = 9.sp,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                NumberFieldBox(
-                                    label = "Min",
-                                    value = draft.randomDelayMinMs.toString(),
-                                    onValueChange = {
-                                        it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(randomDelayMinMs = v) }
-                                    },
-                                    modifier = Modifier.width(64.dp)
-                                )
-                                NumberFieldBox(
-                                    label = "Max",
-                                    value = draft.randomDelayMaxMs.toString(),
-                                    onValueChange = {
-                                        it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(randomDelayMaxMs = v) }
-                                    },
-                                    modifier = Modifier.width(64.dp)
-                                )
+                            if (!draft.enableVisualCooldownWait) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(DarkBackground)
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Switch(
+                                        checked = draft.enableRandomDelay,
+                                        onCheckedChange = { draft = draft.copy(enableRandomDelay = it) }
+                                    )
+                                    Text(
+                                        text = "Random Delay",
+                                        color = if (draft.enableRandomDelay) Color.White else Color(0xFF64748B),
+                                        fontSize = 9.sp,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    NumberFieldBox(
+                                        label = "Min",
+                                        value = draft.randomDelayMinMs.toString(),
+                                        onValueChange = {
+                                            it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(randomDelayMinMs = v) }
+                                        },
+                                        modifier = Modifier.width(64.dp)
+                                    )
+                                    NumberFieldBox(
+                                        label = "Max",
+                                        value = draft.randomDelayMaxMs.toString(),
+                                        onValueChange = {
+                                            it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(randomDelayMaxMs = v) }
+                                        },
+                                        modifier = Modifier.width(64.dp)
+                                    )
+                                }
                             }
                             Column(
                                 modifier = Modifier

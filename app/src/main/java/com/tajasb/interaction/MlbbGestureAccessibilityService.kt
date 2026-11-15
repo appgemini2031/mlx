@@ -27,7 +27,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.math.cos
+import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
 
@@ -148,6 +150,9 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
 
         @Volatile
         var onPrepareScreenForTouch: ((hideForTouch: Boolean) -> Unit)? = null
+
+        @Volatile
+        var onPrepareScreenForTouchRegion: ((holeRectPx: PixelRect?, active: Boolean) -> Unit)? = null
 
         @Volatile
         var onPrepareScreenForScan: ((hideForScan: Boolean) -> Unit)? = null
@@ -293,6 +298,24 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         return false
     }
 
+    private fun buildTouchHoleRect(
+        points: List<Pair<Float, Float>>,
+        screenW: Int,
+        screenH: Int
+    ): PixelRect {
+        val pad = (min(screenW, screenH) * 0.032f).roundToInt().coerceIn(24, 54)
+        val minX = points.minOf { it.first }.roundToInt()
+        val maxX = points.maxOf { it.first }.roundToInt()
+        val minY = points.minOf { it.second }.roundToInt()
+        val maxY = points.maxOf { it.second }.roundToInt()
+        return PixelRect(
+            left = (minX - pad).coerceIn(0, screenW),
+            top = (minY - pad).coerceIn(0, screenH),
+            right = (maxX + pad).coerceIn(0, screenW),
+            bottom = (maxY + pad).coerceIn(0, screenH)
+        )
+    }
+
     suspend fun dispatchTap(
         normX: Float,
         normY: Float,
@@ -303,11 +326,16 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         val (px, py) = ScreenCoordinateMapper.toScreenPx(normX, normY, screenW, screenH)
         val safeHold = if (holdMs <= 0L) 38L else holdMs.coerceIn(38L, 12_000L)
         val repeats = tapCount.coerceIn(1, 10)
+        val holeRect = buildTouchHoleRect(listOf(px to py), screenW, screenH)
 
         var allOk = true
-        val prepare = onPrepareScreenForTouch
-        if (prepare != null) {
-            mainHandler.post { prepare(true) }
+        val prepareRegion = onPrepareScreenForTouchRegion
+        val prepareFallback = onPrepareScreenForTouch
+        if (prepareRegion != null) {
+            mainHandler.post { prepareRegion(holeRect, true) }
+            delay(40L)
+        } else if (prepareFallback != null) {
+            mainHandler.post { prepareFallback(true) }
             delay(85L)
         }
         try {
@@ -322,8 +350,10 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
                 if (i < repeats - 1) delay(60L)
             }
         } finally {
-            if (prepare != null) {
-                mainHandler.post { prepare(false) }
+            if (prepareRegion != null) {
+                mainHandler.post { prepareRegion(null, false) }
+            } else if (prepareFallback != null) {
+                mainHandler.post { prepareFallback(false) }
             }
         }
         return allOk
@@ -360,10 +390,15 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         val safeDrag = dragDurationMs.coerceIn(60L, 5000L)
         val midX = (start.first + 0.5f).coerceIn(1f, (screenW - 1).coerceAtLeast(2).toFloat())
         val midY = start.second
+        val holeRect = buildTouchHoleRect(listOf(start, midX to midY, end), screenW, screenH)
 
-        val prepare = onPrepareScreenForTouch
-        if (prepare != null) {
-            mainHandler.post { prepare(true) }
+        val prepareRegion = onPrepareScreenForTouchRegion
+        val prepareFallback = onPrepareScreenForTouch
+        if (prepareRegion != null) {
+            mainHandler.post { prepareRegion(holeRect, true) }
+            delay(40L)
+        } else if (prepareFallback != null) {
+            mainHandler.post { prepareFallback(true) }
             delay(85L)
         }
         return try {
@@ -386,8 +421,10 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
                 dispatchGestureAsync(dragGesture, safeDrag + 1000L)
             }
         } finally {
-            if (prepare != null) {
-                mainHandler.post { prepare(false) }
+            if (prepareRegion != null) {
+                mainHandler.post { prepareRegion(null, false) }
+            } else if (prepareFallback != null) {
+                mainHandler.post { prepareFallback(false) }
             }
         }
     }
@@ -407,10 +444,15 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
             screenH = screenH
         )
         val safeDur = durationMs.coerceIn(60L, 5000L)
+        val holeRect = buildTouchHoleRect(listOf(start, end), screenW, screenH)
 
-        val prepare = onPrepareScreenForTouch
-        if (prepare != null) {
-            mainHandler.post { prepare(true) }
+        val prepareRegion = onPrepareScreenForTouchRegion
+        val prepareFallback = onPrepareScreenForTouch
+        if (prepareRegion != null) {
+            mainHandler.post { prepareRegion(holeRect, true) }
+            delay(40L)
+        } else if (prepareFallback != null) {
+            mainHandler.post { prepareFallback(true) }
             delay(85L)
         }
         return try {
@@ -422,8 +464,10 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
             val gesture = GestureDescription.Builder().addStroke(stroke).build()
             dispatchGestureAsync(gesture, safeDur + 900L)
         } finally {
-            if (prepare != null) {
-                mainHandler.post { prepare(false) }
+            if (prepareRegion != null) {
+                mainHandler.post { prepareRegion(null, false) }
+            } else if (prepareFallback != null) {
+                mainHandler.post { prepareFallback(false) }
             }
         }
     }

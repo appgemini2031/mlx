@@ -13,6 +13,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -83,12 +84,15 @@ import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonOrange
 import com.example.ui.theme.NeonPurple
 import com.tajasb.interaction.ActionType
+import com.tajasb.interaction.ConceptGrouper
+import com.tajasb.interaction.ConceptGroupingMode
 import com.tajasb.interaction.ExecutionMode
 import com.tajasb.ui.components.GiftNameCatalogPicker
 import com.tajasb.interaction.FloatingPickerBridge
 import com.tajasb.interaction.FloatingPickerMode
 import com.tajasb.interaction.FloatingTriggerOverlayService
 import com.tajasb.interaction.FullAppBackupManager
+import com.tajasb.interaction.GiftCoinCatalog
 import com.tajasb.interaction.InstalledAppInfo
 import com.tajasb.interaction.InstalledAppSearcher
 import com.tajasb.interaction.MlbbGestureAccessibilityService
@@ -446,8 +450,77 @@ fun UniversalInteractionScreen(
             }
         }
 
-        // Daftar Challenge & Koreografi (bisa ubah nama challenge & koreografi langsung di aplikasi)
+        // Daftar Challenge & Koreografi (Menu Grup + Deteksi Bentrok Gift + Edit langsung di aplikasi)
         var editingRuleInApp by remember { mutableStateOf<UniversalTriggerRule?>(null) }
+        var inAppGroupMode by remember { mutableStateOf(ConceptGroupingMode.BY_EVENT) }
+        var inAppSelectedGroupKey by remember { mutableStateOf<String?>(null) }
+        var inAppCollapsedGroups by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+        val inAppBuckets = remember(uiState.rules, inAppGroupMode) {
+            ConceptGrouper.groupRules(uiState.rules, inAppGroupMode)
+        }
+        val inAppVisibleBuckets = remember(inAppBuckets, inAppSelectedGroupKey) {
+            if (inAppSelectedGroupKey == null) inAppBuckets
+            else inAppBuckets.filter { it.key == inAppSelectedGroupKey }.ifEmpty { inAppBuckets }
+        }
+
+        fun createInAppConceptForGroup(groupKey: String?) {
+            val source = if (groupKey != null && groupKey.startsWith("EVT_")) {
+                UniversalTriggerSource.values().firstOrNull { "EVT_${it.name}" == groupKey } ?: UniversalTriggerSource.GIFT
+            } else {
+                UniversalTriggerSource.GIFT
+            }
+            val created = engine.createEmptyConcept(source)
+            val starterStep = when (groupKey) {
+                "ACT_CLICK" -> UniversalActionStep(
+                    enabled = true,
+                    actionType = ActionType.SIMULATED_CLICK,
+                    paramValue = String.format(Locale.US, "%.3f,%.3f", created.overlayPosX, created.overlayPosY),
+                    secondaryValue = "70",
+                    durationMs = 70L,
+                    posX = created.overlayPosX,
+                    posY = created.overlayPosY
+                )
+                "ACT_SWIPE" -> UniversalActionStep(
+                    enabled = true,
+                    actionType = ActionType.SIMULATED_SWIPE,
+                    paramValue = "RIGHT",
+                    secondaryValue = "220",
+                    durationMs = 220L,
+                    posX = created.overlayPosX,
+                    posY = created.overlayPosY
+                )
+                "ACT_HOME" -> UniversalActionStep(
+                    enabled = true,
+                    actionType = ActionType.HOME_BACK_GAME,
+                    paramValue = "1500",
+                    durationMs = 1500L
+                )
+                "ACT_OVERLAY" -> UniversalActionStep(
+                    enabled = true,
+                    actionType = ActionType.MEME_OVERLAY,
+                    secondaryValue = "MEME {user}!",
+                    durationMs = 2500L,
+                    posX = created.overlayPosX,
+                    posY = created.overlayPosY
+                )
+                "ACT_SOUND" -> UniversalActionStep(
+                    enabled = true,
+                    actionType = ActionType.PLAY_SOUND,
+                    paramValue = "CHIME"
+                )
+                else -> null
+            }
+            val finalRule = if (starterStep != null) {
+                val updated = created.copy(actionSequence = listOf(starterStep))
+                engine.addOrUpdateRule(updated)
+                updated
+            } else {
+                created
+            }
+            editingRuleInApp = finalRule
+        }
+
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(14.dp),
@@ -470,13 +543,74 @@ fun UniversalInteractionScreen(
                         fontWeight = FontWeight.Bold
                     )
                     OutlinedButton(
-                        onClick = {
-                            val created = engine.createEmptyConcept(UniversalTriggerSource.GIFT)
-                            editingRuleInApp = created
-                        },
+                        onClick = { createInAppConceptForGroup(inAppSelectedGroupKey) },
                         modifier = Modifier.testTag("inapp_add_challenge_btn")
                     ) {
                         Text("+ Konsep", fontSize = 9.5.sp, color = EmeraldGreen, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                if (uiState.rules.isNotEmpty()) {
+                    // Menu Grup Konsep (Event / Aksi / Semua)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Grup:",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        ConceptGroupingMode.values().forEach { mode ->
+                            val active = inAppGroupMode == mode
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(7.dp))
+                                    .background(if (active) NeonCyan.copy(alpha = 0.22f) else DarkBackground)
+                                    .border(0.8.dp, if (active) NeonCyan else DarkCardBorder, RoundedCornerShape(7.dp))
+                                    .clickable {
+                                        inAppGroupMode = mode
+                                        inAppSelectedGroupKey = null
+                                    }
+                                    .padding(vertical = 5.dp)
+                                    .testTag("inapp_group_mode_${mode.name}"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = mode.label,
+                                    color = if (active) NeonCyan else Color(0xFFCBD5E1),
+                                    fontSize = 9.sp,
+                                    fontWeight = if (active) FontWeight.Black else FontWeight.SemiBold,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+
+                    if (inAppGroupMode != ConceptGroupingMode.ALL && inAppBuckets.size > 1) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            FilterChip(
+                                selected = inAppSelectedGroupKey == null,
+                                onClick = { inAppSelectedGroupKey = null },
+                                label = { Text("Semua (${uiState.rules.size})", fontSize = 8.5.sp) }
+                            )
+                            inAppBuckets.forEach { bucket ->
+                                val active = inAppSelectedGroupKey == bucket.key
+                                FilterChip(
+                                    selected = active,
+                                    onClick = { inAppSelectedGroupKey = if (active) null else bucket.key },
+                                    label = { Text("${bucket.emoji} ${bucket.title} (${bucket.rules.size})", fontSize = 8.5.sp) }
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -487,99 +621,174 @@ fun UniversalInteractionScreen(
                         fontSize = 9.5.sp
                     )
                 } else {
-                    uiState.rules.forEachIndexed { idx, rule ->
-                        val activeSteps = rule.actionSequence.filter { it.enabled }
-                        val choreoSummary = if (activeSteps.isEmpty()) {
-                            "Kosong (belum ada koreografi)"
-                        } else {
-                            activeSteps.mapIndexed { sIdx, st ->
-                                val base = st.stepName.trim().ifBlank { st.actionType.displayName }
-                                "#${sIdx + 1} $base"
-                            }.joinToString(" → ")
-                        }
-                        val accent = Color(rule.accentColorHex)
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(DarkBackground)
-                                .border(0.8.dp, accent.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
-                                .clickable { editingRuleInApp = rule }
-                                .padding(horizontal = 8.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
-                        ) {
-                            Box(
+                    inAppVisibleBuckets.forEach { bucket ->
+                        val showHeader = inAppGroupMode != ConceptGroupingMode.ALL
+                        val isCollapsed = showHeader && inAppSelectedGroupKey == null && bucket.key in inAppCollapsedGroups
+
+                        if (showHeader) {
+                            Row(
                                 modifier = Modifier
-                                    .size(20.dp)
-                                    .clip(CircleShape)
-                                    .background(accent),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("${idx + 1}", color = Color.Black, fontSize = 9.5.sp, fontWeight = FontWeight.Black)
-                            }
-                            Column(modifier = Modifier.weight(1f)) {
-                                val srcBadge = if (
-                                    rule.targetGiftName.isNotBlank() &&
-                                    (rule.triggerSource == UniversalTriggerSource.GIFT || rule.triggerSource == UniversalTriggerSource.GIFT_QUANTITY)
-                                ) {
-                                    "${rule.triggerSource.displayName} [${rule.targetGiftName}]"
-                                } else {
-                                    rule.triggerSource.displayName
-                                }
-                                Text(
-                                    text = "$srcBadge → ${rule.triggerName}",
-                                    color = Color.White,
-                                    fontSize = 10.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = choreoSummary,
-                                    color = Color(0xFF94A3B8),
-                                    fontSize = 8.5.sp,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            OutlinedButton(
-                                onClick = {
-                                    engine.forceTestRuleNow(rule.id)
-                                    Toast.makeText(context, "▶ Menjalankan tes: ${rule.triggerName}", Toast.LENGTH_SHORT).show()
-                                },
-                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                                modifier = Modifier.height(30.dp).testTag("test_challenge_${rule.id}")
-                            ) {
-                                Text("▶", fontSize = 9.sp, color = EmeraldGreen, fontWeight = FontWeight.Black)
-                            }
-                            OutlinedButton(
-                                onClick = {
-                                    val copy = engine.duplicateRule(rule.id)
-                                    if (copy != null) {
-                                        Toast.makeText(context, "⧉ Duplikat dibuat: ${copy.triggerName}", Toast.LENGTH_SHORT).show()
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF162033))
+                                    .border(0.8.dp, NeonCyan.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        if (inAppSelectedGroupKey == null) {
+                                            inAppCollapsedGroups = if (isCollapsed) {
+                                                inAppCollapsedGroups - bucket.key
+                                            } else {
+                                                inAppCollapsedGroups + bucket.key
+                                            }
+                                        }
                                     }
-                                },
-                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                                modifier = Modifier.height(30.dp).testTag("duplicate_challenge_${rule.id}")
+                                    .padding(horizontal = 9.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Text("⧉", fontSize = 9.sp, color = NeonPurple, fontWeight = FontWeight.Black)
+                                Text(
+                                    text = "${if (isCollapsed) "▸" else "▾"} ${bucket.emoji} ${bucket.title} (${bucket.rules.size})",
+                                    color = NeonCyan,
+                                    fontSize = 9.5.sp,
+                                    fontWeight = FontWeight.Black,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    text = "+ Grup",
+                                    color = EmeraldGreen,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Black,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(EmeraldGreen.copy(alpha = 0.16f))
+                                        .border(0.7.dp, EmeraldGreen, RoundedCornerShape(6.dp))
+                                        .clickable { createInAppConceptForGroup(bucket.key) }
+                                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                                )
                             }
-                            OutlinedButton(
-                                onClick = { editingRuleInApp = rule },
-                                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 2.dp),
-                                modifier = Modifier.height(30.dp).testTag("edit_challenge_${rule.id}")
-                            ) {
-                                Text("✎", fontSize = 9.sp, color = NeonCyan, fontWeight = FontWeight.Bold)
-                            }
-                            ConfirmDeleteTextButton(
-                                label = "Hapus",
-                                fontSize = 8.5.sp,
-                                horizontalPadding = 7.dp,
-                                verticalPadding = 5.dp,
-                                modifier = Modifier.testTag("delete_challenge_${rule.id}")
-                            ) {
-                                engine.deleteRule(rule.id)
+                        }
+
+                        if (!isCollapsed) {
+                            bucket.rules.forEach { indexed ->
+                                val idx = indexed.globalIndex
+                                val rule = indexed.rule
+                                val activeSteps = rule.actionSequence.filter { it.enabled }
+                                val giftConflicts = remember(rule.id, rule.triggerSource, rule.targetGiftName, uiState.rules) {
+                                    GiftCoinCatalog.findConflictingRules(
+                                        currentRuleId = rule.id,
+                                        currentSource = rule.triggerSource,
+                                        targetGiftName = rule.targetGiftName,
+                                        allRules = uiState.rules
+                                    )
+                                }
+                                val choreoSummary = if (activeSteps.isEmpty()) {
+                                    "Kosong (belum ada koreografi)"
+                                } else {
+                                    activeSteps.mapIndexed { sIdx, st ->
+                                        val base = st.stepName.trim().ifBlank { st.actionType.displayName }
+                                        "#${sIdx + 1} $base"
+                                    }.joinToString(" → ")
+                                }
+                                val accent = Color(rule.accentColorHex)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(DarkBackground)
+                                        .border(
+                                            0.8.dp,
+                                            if (giftConflicts.isNotEmpty()) NeonOrange.copy(alpha = 0.85f) else accent.copy(alpha = 0.6f),
+                                            RoundedCornerShape(10.dp)
+                                        )
+                                        .clickable { editingRuleInApp = rule }
+                                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(20.dp)
+                                            .clip(CircleShape)
+                                            .background(accent),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text("${idx + 1}", color = Color.Black, fontSize = 9.5.sp, fontWeight = FontWeight.Black)
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        val srcBadge = if (
+                                            rule.targetGiftName.isNotBlank() &&
+                                            (rule.triggerSource == UniversalTriggerSource.GIFT || rule.triggerSource == UniversalTriggerSource.GIFT_QUANTITY)
+                                        ) {
+                                            "${rule.triggerSource.displayName} [${rule.targetGiftName}]"
+                                        } else {
+                                            rule.triggerSource.displayName
+                                        }
+                                        Text(
+                                            text = "$srcBadge → ${rule.triggerName}",
+                                            color = Color.White,
+                                            fontSize = 10.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = choreoSummary + if (rule.enableVisualCooldownWait) " • ⏱ Scan" else "",
+                                            color = Color(0xFF94A3B8),
+                                            fontSize = 8.5.sp,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (giftConflicts.isNotEmpty()) {
+                                            Text(
+                                                text = "⚠️ Gift sudah dipakai di: ${giftConflicts.first().conflictingRuleName}",
+                                                color = NeonOrange,
+                                                fontSize = 8.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            engine.forceTestRuleNow(rule.id)
+                                            Toast.makeText(context, "▶ Menjalankan tes: ${rule.triggerName}", Toast.LENGTH_SHORT).show()
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(30.dp).testTag("test_challenge_${rule.id}")
+                                    ) {
+                                        Text("▶", fontSize = 9.sp, color = EmeraldGreen, fontWeight = FontWeight.Black)
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            val copy = engine.duplicateRule(rule.id)
+                                            if (copy != null) {
+                                                Toast.makeText(context, "⧉ Duplikat dibuat: ${copy.triggerName}", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(30.dp).testTag("duplicate_challenge_${rule.id}")
+                                    ) {
+                                        Text("⧉", fontSize = 9.sp, color = NeonPurple, fontWeight = FontWeight.Black)
+                                    }
+                                    OutlinedButton(
+                                        onClick = { editingRuleInApp = rule },
+                                        contentPadding = PaddingValues(horizontal = 7.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(30.dp).testTag("edit_challenge_${rule.id}")
+                                    ) {
+                                        Text("✎", fontSize = 9.sp, color = NeonCyan, fontWeight = FontWeight.Bold)
+                                    }
+                                    ConfirmDeleteTextButton(
+                                        label = "Hapus",
+                                        fontSize = 8.5.sp,
+                                        horizontalPadding = 7.dp,
+                                        verticalPadding = 5.dp,
+                                        modifier = Modifier.testTag("delete_challenge_${rule.id}")
+                                    ) {
+                                        engine.deleteRule(rule.id)
+                                    }
+                                }
                             }
                         }
                     }
@@ -738,6 +947,7 @@ fun UniversalInteractionScreen(
         editingRuleInApp?.let { targetRule ->
             EditChallengeAndChoreographyDialog(
                 rule = targetRule,
+                allRules = uiState.rules,
                 engine = engine,
                 onDismiss = { editingRuleInApp = null },
                 onSave = { updated ->
@@ -752,10 +962,51 @@ fun UniversalInteractionScreen(
     }
 }
 
+@Composable
+private fun DialogConceptSectionCard(
+    stepNumber: String,
+    title: String,
+    accent: Color = NeonCyan,
+    content: @Composable () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(DarkBackground.copy(alpha = 0.65f))
+            .border(0.8.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+            .padding(9.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(18.dp)
+                    .clip(CircleShape)
+                    .background(accent),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(stepNumber, color = Color.Black, fontSize = 9.5.sp, fontWeight = FontWeight.Black)
+            }
+            Text(
+                text = title,
+                color = accent,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Black
+            )
+        }
+        content()
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun EditChallengeAndChoreographyDialog(
     rule: UniversalTriggerRule,
+    allRules: List<UniversalTriggerRule> = emptyList(),
     engine: UniversalTriggerEngine,
     onDismiss: () -> Unit,
     onSave: (UniversalTriggerRule) -> Unit
@@ -838,188 +1089,211 @@ private fun EditChallengeAndChoreographyDialog(
                     .fillMaxWidth()
                     .heightIn(max = maxDialogBodyHeightDp)
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                OutlinedTextField(
-                    value = draftChallengeName,
-                    onValueChange = { draftChallengeName = it },
-                    label = { Text("Nama Konsep / Challenge", fontSize = 10.sp) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().testTag("dialog_challenge_name_input")
-                )
-
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    listOf(
-                        UniversalTriggerSource.LIKE,
-                        UniversalTriggerSource.GIFT,
-                        UniversalTriggerSource.GIFT_QUANTITY,
-                        UniversalTriggerSource.CHAT,
-                        UniversalTriggerSource.FOLLOW,
-                        UniversalTriggerSource.SHARE,
-                        UniversalTriggerSource.MEMBER_JOIN
-                    ).forEach { src ->
-                        FilterChip(
-                            selected = draftSource == src,
-                            onClick = { draftSource = src },
-                            label = { Text(src.displayName, fontSize = 8.5.sp) }
-                        )
-                    }
-                }
-
-                if (draftSource == UniversalTriggerSource.GIFT || draftSource == UniversalTriggerSource.GIFT_QUANTITY) {
-                    GiftNameCatalogPicker(
-                        giftName = draftTargetGiftName,
-                        onGiftNameChange = { draftTargetGiftName = it },
-                        onQuickPicked = { draftTargetGiftName = it }
+                // BAGIAN 1: IDENTITAS & PEMICU
+                DialogConceptSectionCard(stepNumber = "1", title = "Identitas & Pemicu", accent = NeonCyan) {
+                    OutlinedTextField(
+                        value = draftChallengeName,
+                        onValueChange = { draftChallengeName = it },
+                        label = { Text("Nama Konsep / Challenge", fontSize = 10.sp) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("dialog_challenge_name_input")
                     )
-                }
 
-                // LOGIKA PRA-AKSI (ditempatkan di ATAS sebelum Koreografi): Delay Awal + Baca Angka Cooldown Skill ML
-                OutlinedTextField(
-                    value = draftDelayBeforeText,
-                    onValueChange = { draftDelayBeforeText = it.filter(Char::isDigit).take(6) },
-                    label = { Text("⏱️ Delay Awal Sebelum Koreografi (ms)", fontSize = 9.sp) },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(DarkBackground)
-                        .border(0.7.dp, if (draftEnableVisualCooldown) NeonCyan else DarkCardBorder, RoundedCornerShape(8.dp))
-                        .padding(7.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Text("⏱️ Baca Angka Cooldown Skill ML (Sebelum Aksi)", color = Color.White, fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
-                        Switch(
-                            checked = draftEnableVisualCooldown,
-                            onCheckedChange = { draftEnableVisualCooldown = it }
+                        listOf(
+                            UniversalTriggerSource.LIKE,
+                            UniversalTriggerSource.GIFT,
+                            UniversalTriggerSource.GIFT_QUANTITY,
+                            UniversalTriggerSource.CHAT,
+                            UniversalTriggerSource.FOLLOW,
+                            UniversalTriggerSource.SHARE,
+                            UniversalTriggerSource.MEMBER_JOIN
+                        ).forEach { src ->
+                            FilterChip(
+                                selected = draftSource == src,
+                                onClick = { draftSource = src },
+                                label = { Text(src.displayName, fontSize = 8.5.sp) }
+                            )
+                        }
+                    }
+
+                    if (draftSource == UniversalTriggerSource.GIFT || draftSource == UniversalTriggerSource.GIFT_QUANTITY) {
+                        GiftNameCatalogPicker(
+                            giftName = draftTargetGiftName,
+                            onGiftNameChange = { draftTargetGiftName = it },
+                            onQuickPicked = { draftTargetGiftName = it },
+                            currentRuleId = rule.id,
+                            currentTriggerSource = draftSource,
+                            existingRules = allRules
                         )
                     }
-                    if (draftEnableVisualCooldown) {
-                        val touchCandidates = draftSteps.filter {
-                            it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
-                        }
-                        if (touchCandidates.size > 1) {
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text("Pin Scan:", color = Color(0xFF94A3B8), fontSize = 8.5.sp, modifier = Modifier.align(Alignment.CenterVertically))
-                                touchCandidates.forEachIndexed { tIdx, tStep ->
-                                    val selected = draftCooldownTargetStepId == tStep.id ||
-                                        (draftCooldownTargetStepId.isNullOrBlank() && tIdx == 0)
-                                    val label = tStep.stepName.trim().ifBlank { "#${tIdx + 1}" }
-                                    FilterChip(
-                                        selected = selected,
-                                        onClick = { draftCooldownTargetStepId = tStep.id },
-                                        label = { Text(label.take(12), fontSize = 8.sp) }
-                                    )
-                                }
-                            }
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            PrecisionStepperBar(
-                                label = "Lebar",
-                                valueText = "${(draftCooldownWidth * 100).roundToInt()}%",
-                                accent = NeonCyan,
-                                onDecrement = { draftCooldownWidth = (draftCooldownWidth - 0.01f).coerceIn(0.025f, 0.35f) },
-                                onIncrement = { draftCooldownWidth = (draftCooldownWidth + 0.01f).coerceIn(0.025f, 0.35f) },
-                                modifier = Modifier.weight(1f)
-                            )
-                            PrecisionStepperBar(
-                                label = "Tinggi",
-                                valueText = "${(draftCooldownHeight * 100).roundToInt()}%",
-                                accent = EmeraldGreen,
-                                onDecrement = { draftCooldownHeight = (draftCooldownHeight - 0.01f).coerceIn(0.025f, 0.45f) },
-                                onIncrement = { draftCooldownHeight = (draftCooldownHeight + 0.01f).coerceIn(0.025f, 0.45f) },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            PrecisionStepperBar(
-                                label = "Geser X",
-                                valueText = "${(draftCooldownOffsetX * 100).roundToInt()}%",
-                                accent = NeonOrange,
-                                decLabel = "◀",
-                                incLabel = "▶",
-                                onDecrement = { draftCooldownOffsetX = (draftCooldownOffsetX - 0.01f).coerceIn(-0.25f, 0.25f) },
-                                onIncrement = { draftCooldownOffsetX = (draftCooldownOffsetX + 0.01f).coerceIn(-0.25f, 0.25f) },
-                                modifier = Modifier.weight(1f)
-                            )
-                            PrecisionStepperBar(
-                                label = "Geser Y",
-                                valueText = "${(draftCooldownOffsetY * 100).roundToInt()}%",
-                                accent = NeonPurple,
-                                decLabel = "▲",
-                                incLabel = "▼",
-                                onDecrement = { draftCooldownOffsetY = (draftCooldownOffsetY - 0.01f).coerceIn(-0.25f, 0.25f) },
-                                onIncrement = { draftCooldownOffsetY = (draftCooldownOffsetY + 0.01f).coerceIn(-0.25f, 0.25f) },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
+                }
+
+                // BAGIAN 2: PRA-AKSI (Delay Scan Cooldown ML di atas, Delay Awal di bawah — otomatis disembunyikan jika Delay Scan aktif)
+                DialogConceptSectionCard(stepNumber = "2", title = "Pra-Aksi (Sebelum Koreografi)", accent = NeonOrange) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(DarkSurface)
+                            .border(0.7.dp, if (draftEnableVisualCooldown) NeonCyan else DarkCardBorder, RoundedCornerShape(8.dp))
+                            .padding(7.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            OutlinedTextField(
-                                value = draftCooldownMaxWaitText,
-                                onValueChange = { draftCooldownMaxWaitText = it.filter(Char::isDigit).take(6) },
-                                label = { Text("Max Tunggu(ms)", fontSize = 8.5.sp) },
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                singleLine = true,
-                                modifier = Modifier.weight(1f)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("⏱️ Delay Scan Cooldown Skill ML", color = Color.White, fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = if (draftEnableVisualCooldown) {
+                                        "Aktif — menunggu angka cooldown skill hilang sebelum eksekusi."
+                                    } else {
+                                        "Nonaktif — eksekusi memakai Delay Awal di bawah."
+                                    },
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 8.sp
+                                )
+                            }
+                            Switch(
+                                checked = draftEnableVisualCooldown,
+                                onCheckedChange = { draftEnableVisualCooldown = it }
                             )
-                            OutlinedButton(
-                                onClick = {
-                                    draftCooldownWidth = 0.075f
-                                    draftCooldownHeight = 0.12f
-                                    draftCooldownOffsetX = 0f
-                                    draftCooldownOffsetY = 0f
-                                },
-                                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp)
-                            ) { Text("Reset Box", fontSize = 8.5.sp, color = Color.White) }
-                            Button(
-                                onClick = {
-                                    val saved = buildDraftRule()
-                                    engine.addOrUpdateRule(saved)
-                                    engine.inspectRuleCooldownOnce(saved.id) { res ->
-                                        cooldownScanTestMsg = res
+                        }
+                        if (draftEnableVisualCooldown) {
+                            val touchCandidates = draftSteps.filter {
+                                it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
+                            }
+                            if (touchCandidates.size > 1) {
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text("Pin Scan:", color = Color(0xFF94A3B8), fontSize = 8.5.sp, modifier = Modifier.align(Alignment.CenterVertically))
+                                    touchCandidates.forEachIndexed { tIdx, tStep ->
+                                        val selected = draftCooldownTargetStepId == tStep.id ||
+                                            (draftCooldownTargetStepId.isNullOrBlank() && tIdx == 0)
+                                        val label = tStep.stepName.trim().ifBlank { "#${tIdx + 1}" }
+                                        FilterChip(
+                                            selected = selected,
+                                            onClick = { draftCooldownTargetStepId = tStep.id },
+                                            label = { Text(label.take(12), fontSize = 8.sp) }
+                                        )
                                     }
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = NeonCyan),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                            ) { Text("🔍 Scan Sekali", color = Color.Black, fontSize = 8.5.sp, fontWeight = FontWeight.Black) }
+                                }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                PrecisionStepperBar(
+                                    label = "Lebar",
+                                    valueText = "${(draftCooldownWidth * 100).roundToInt()}%",
+                                    accent = NeonCyan,
+                                    onDecrement = { draftCooldownWidth = (draftCooldownWidth - 0.01f).coerceIn(0.025f, 0.35f) },
+                                    onIncrement = { draftCooldownWidth = (draftCooldownWidth + 0.01f).coerceIn(0.025f, 0.35f) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                PrecisionStepperBar(
+                                    label = "Tinggi",
+                                    valueText = "${(draftCooldownHeight * 100).roundToInt()}%",
+                                    accent = EmeraldGreen,
+                                    onDecrement = { draftCooldownHeight = (draftCooldownHeight - 0.01f).coerceIn(0.025f, 0.45f) },
+                                    onIncrement = { draftCooldownHeight = (draftCooldownHeight + 0.01f).coerceIn(0.025f, 0.45f) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                PrecisionStepperBar(
+                                    label = "Geser X",
+                                    valueText = "${(draftCooldownOffsetX * 100).roundToInt()}%",
+                                    accent = NeonOrange,
+                                    decLabel = "◀",
+                                    incLabel = "▶",
+                                    onDecrement = { draftCooldownOffsetX = (draftCooldownOffsetX - 0.01f).coerceIn(-0.25f, 0.25f) },
+                                    onIncrement = { draftCooldownOffsetX = (draftCooldownOffsetX + 0.01f).coerceIn(-0.25f, 0.25f) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                PrecisionStepperBar(
+                                    label = "Geser Y",
+                                    valueText = "${(draftCooldownOffsetY * 100).roundToInt()}%",
+                                    accent = NeonPurple,
+                                    decLabel = "▲",
+                                    incLabel = "▼",
+                                    onDecrement = { draftCooldownOffsetY = (draftCooldownOffsetY - 0.01f).coerceIn(-0.25f, 0.25f) },
+                                    onIncrement = { draftCooldownOffsetY = (draftCooldownOffsetY + 0.01f).coerceIn(-0.25f, 0.25f) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedTextField(
+                                    value = draftCooldownMaxWaitText,
+                                    onValueChange = { draftCooldownMaxWaitText = it.filter(Char::isDigit).take(6) },
+                                    label = { Text("Max Tunggu(ms)", fontSize = 8.5.sp) },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedButton(
+                                    onClick = {
+                                        draftCooldownWidth = 0.075f
+                                        draftCooldownHeight = 0.12f
+                                        draftCooldownOffsetX = 0f
+                                        draftCooldownOffsetY = 0f
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp)
+                                ) { Text("Reset Box", fontSize = 8.5.sp, color = Color.White) }
+                                Button(
+                                    onClick = {
+                                        val saved = buildDraftRule()
+                                        engine.addOrUpdateRule(saved)
+                                        engine.inspectRuleCooldownOnce(saved.id) { res ->
+                                            cooldownScanTestMsg = res
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = NeonCyan),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                ) { Text("🔍 Scan Sekali", color = Color.Black, fontSize = 8.5.sp, fontWeight = FontWeight.Black) }
+                            }
+                            cooldownScanTestMsg?.let { msg ->
+                                Text(
+                                    text = "Hasil Scan: $msg",
+                                    color = EmeraldGreen,
+                                    fontSize = 8.5.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
-                        cooldownScanTestMsg?.let { msg ->
-                            Text(
-                                text = "Hasil Scan: $msg",
-                                color = EmeraldGreen,
-                                fontSize = 8.5.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
+                    }
+
+                    if (draftEnableVisualCooldown) {
+                        Text(
+                            text = "⚡ Delay Awal tidak diperlukan & dilewati otomatis saat Delay Scan aktif.",
+                            color = NeonCyan,
+                            fontSize = 8.5.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    } else {
+                        OutlinedTextField(
+                            value = draftDelayBeforeText,
+                            onValueChange = { draftDelayBeforeText = it.filter(Char::isDigit).take(6) },
+                            label = { Text("⏱️ Delay Awal Sebelum Koreografi (ms)", fontSize = 9.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
                 }
 
-                Text(
-                    text = "Koreografi (${draftSteps.size} langkah):",
-                    color = Color.White,
-                    fontSize = 10.5.sp,
-                    fontWeight = FontWeight.Bold
-                )
-
+                // BAGIAN 3: LANGKAH KOREOGRAFI
+                DialogConceptSectionCard(stepNumber = "3", title = "Langkah Koreografi (${draftSteps.size})", accent = EmeraldGreen) {
                 if (draftSteps.isEmpty()) {
                     Text(
                         text = "Kosong — tambahkan koreografi sesuai kebutuhan di bawah.",
@@ -1701,6 +1975,7 @@ private fun EditChallengeAndChoreographyDialog(
                         }
                     }
                 }
+                } // end DialogConceptSectionCard 3
             }
         },
         confirmButton = {

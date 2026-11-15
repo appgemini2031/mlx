@@ -140,3 +140,43 @@ object ScanRegionGeometry {
         return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
     }
 }
+
+/**
+ * Geometri 4 panel pemblokir sentuhan (Atas, Bawah, Kiri, Kanan) yang mengelilingi lubang kecil
+ * tempat gesture Accessibility (Tap / Tahan+Geser / Swipe) berlangsung, agar sentuhan manual gamer
+ * tetap terblokir sementara Accessibility gesture bisa menembus langsung ke game MLBB.
+ */
+object TouchBlockerHoleGeometry {
+
+    fun computePanels(
+        screenW: Int,
+        screenH: Int,
+        hole: PixelRect
+    ): List<PixelRect> {
+        val sw = screenW.coerceAtLeast(2)
+        val sh = screenH.coerceAtLeast(2)
+        val hLeft = hole.left.coerceIn(0, sw)
+        val hRight = hole.right.coerceIn(hLeft, sw)
+        val hTop = hole.top.coerceIn(0, sh)
+        val hBottom = hole.bottom.coerceIn(hTop, sh)
+
+        val panels = mutableListOf<PixelRect>()
+        // Top strip: penuh lebar layar dari 0..hTop
+        if (hTop > 0) {
+            panels += PixelRect(left = 0, top = 0, right = sw, bottom = hTop)
+        }
+        // Bottom strip: penuh lebar layar dari hBottom..sh
+        if (hBottom < sh) {
+            panels += PixelRect(left = 0, top = hBottom, right = sw, bottom = sh)
+        }
+        // Left strip: di samping kiri hole pada tinggi hTop..hBottom
+        if (hLeft > 0 && hBottom > hTop) {
+            panels += PixelRect(left = 0, top = hTop, right = hLeft, bottom = hBottom)
+        }
+        // Right strip: di samping kanan hole pada tinggi hTop..hBottom
+        if (hRight < sw && hBottom > hTop) {
+            panels += PixelRect(left = hRight, top = hTop, right = sw, bottom = hBottom)
+        }
+        return panels
+    }
+}

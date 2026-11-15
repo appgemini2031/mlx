@@ -37,6 +37,27 @@ data class CounterEvaluationResult(
  */
 object UniversalRuleEvaluator {
 
+    /**
+     * Jika Delay Scan Cooldown Skill ML aktif, Delay Awal & Random Delay dilewati otomatis
+     * agar tidak terjadi jeda ganda.
+     */
+    fun effectiveBeforeDelayMs(rule: UniversalTriggerRule, randomOverride: Long? = null): Long {
+        if (rule.enableVisualCooldownWait) return 0L
+        val base = if (rule.enableDelayBefore) rule.delayBeforeMs.coerceIn(0L, 60_000L) else 0L
+        val rnd = if (rule.enableRandomDelay) {
+            val minD = minOf(rule.randomDelayMinMs, rule.randomDelayMaxMs).coerceIn(0L, 30_000L)
+            val maxD = maxOf(rule.randomDelayMinMs, rule.randomDelayMaxMs).coerceIn(minD, 30_000L)
+            if (randomOverride != null) {
+                randomOverride.coerceIn(minD, maxD)
+            } else if (maxD > minD) {
+                kotlin.random.Random.nextLong(minD, maxD + 1L)
+            } else {
+                minD
+            }
+        } else 0L
+        return base + rnd
+    }
+
     fun evaluateCounterAndEligibility(
         rule: UniversalTriggerRule,
         currentCounter: TriggerCounterState?,
@@ -799,7 +820,6 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             text = "Tes ${rule.triggerName}"
         )
         scope.launch {
-            enterChallengeExecution()
             val summary = try {
                 val cooldownNote = waitForSkillCooldownIfNeeded(rule)
                 if (_state.value.isEmergencyStopped) {
@@ -816,7 +836,6 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             } catch (t: Throwable) {
                 "Error: ${t.message}"
             } finally {
-                exitChallengeExecution()
                 _state.update { it.copy(cooldownStatusHint = "") }
             }
             val a11yOk = MlbbGestureAccessibilityService.peekInstance() != null
@@ -854,17 +873,12 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             text = "Preview ${rule.triggerName}"
         )
         scope.launch {
-            enterChallengeExecution()
-            try {
-                dispatcher.dispatchRuleActions(
-                    rule = rule.copy(enabled = true),
-                    event = sampleEvent,
-                    counterCount = 1,
-                    isMlbbMatchActive = false
-                )
-            } finally {
-                exitChallengeExecution()
-            }
+            dispatcher.dispatchRuleActions(
+                rule = rule.copy(enabled = true),
+                event = sampleEvent,
+                counterCount = 1,
+                isMlbbMatchActive = false
+            )
         }
     }
 
@@ -909,7 +923,6 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         )
         val prepareRegion = MlbbGestureAccessibilityService.onPrepareScreenForScanRegion
         val prepareFallback = MlbbGestureAccessibilityService.onPrepareScreenForScan
-            ?: MlbbGestureAccessibilityService.onPrepareScreenForTouch
         var hiddenApplied = false
         return try {
             if (prepareRegion != null) {
@@ -1019,7 +1032,6 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
     private fun ensureQueueWorkerRunning() {
         if (!isWorkerRunning.compareAndSet(false, true)) return
         scope.launch {
-            enterChallengeExecution()
             try {
                 while (true) {
                     val nextTask = synchronized(queueLock) {
@@ -1070,7 +1082,6 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                     )
                 }
             } finally {
-                exitChallengeExecution()
                 isWorkerRunning.set(false)
                 val hasMore = synchronized(queueLock) {
                     pendingQueue.isNotEmpty() && !_state.value.isEmergencyStopped
@@ -1973,6 +1984,14 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                 detail = detail
             )
         )
+    }
+
+    override fun onTouchLockChanged(locked: Boolean) {
+        if (locked) {
+            enterChallengeExecution()
+        } else {
+            exitChallengeExecution()
+        }
     }
 
     private fun appendHistory(record: TriggerExecutionRecord) {

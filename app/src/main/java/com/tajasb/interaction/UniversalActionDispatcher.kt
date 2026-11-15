@@ -31,6 +31,7 @@ interface ActionDispatchSink {
     fun onChangeScene(sceneName: String)
     fun onInteractionTestSimulated(simEvent: InteractionTestSimEvent)
     fun onRecordStepDetail(rule: UniversalTriggerRule, event: LiveInteractionEvent, status: DispatchStatus, detail: String)
+    fun onTouchLockChanged(locked: Boolean)
 }
 
 /**
@@ -182,12 +183,22 @@ class UniversalActionDispatcher(
         val repeats = step.repeatCount.coerceIn(1, 20)
         var summary = step.actionType.displayName
 
-        for (r in 0 until repeats) {
-            if (isAborted(startEpoch)) break
-            val resolvedParam = resolveTemplate(step.paramValue, event, counterCount, rule)
-            val resolvedSecondary = resolveTemplate(step.secondaryValue, event, counterCount, rule)
+        // Kunci layar HANYA selama aksi sentuh / navigasi nyata sedang dikerjakan (bukan saat delay/cooldown)
+        val acquiresTouchLock = !isMlbbMatchActive && (
+            step.actionType == ActionType.SIMULATED_CLICK ||
+                step.actionType == ActionType.SIMULATED_SWIPE ||
+                step.actionType == ActionType.HOME_BACK_GAME
+            )
+        if (acquiresTouchLock) {
+            sink.onTouchLockChanged(true)
+        }
+        try {
+            for (r in 0 until repeats) {
+                if (isAborted(startEpoch)) break
+                val resolvedParam = resolveTemplate(step.paramValue, event, counterCount, rule)
+                val resolvedSecondary = resolveTemplate(step.secondaryValue, event, counterCount, rule)
 
-            when (step.actionType) {
+                when (step.actionType) {
                 // ---------------- VISUAL ----------------
                 ActionType.SHOW_OVERLAY,
                 ActionType.PROFILE_OVERLAY,
@@ -534,17 +545,16 @@ class UniversalActionDispatcher(
                 }
             }
         }
+        } finally {
+            if (acquiresTouchLock) {
+                sink.onTouchLockChanged(false)
+            }
+        }
         return summary
     }
 
     private fun buildBeforeDelay(rule: UniversalTriggerRule): Long {
-        val base = if (rule.enableDelayBefore) rule.delayBeforeMs.coerceIn(0L, 60_000L) else 0L
-        val rnd = if (rule.enableRandomDelay) {
-            val minD = minOf(rule.randomDelayMinMs, rule.randomDelayMaxMs).coerceIn(0L, 30_000L)
-            val maxD = maxOf(rule.randomDelayMinMs, rule.randomDelayMaxMs).coerceIn(minD, 30_000L)
-            if (maxD > minD) Random.nextLong(minD, maxD + 1L) else minD
-        } else 0L
-        return base + rnd
+        return UniversalRuleEvaluator.effectiveBeforeDelayMs(rule)
     }
 
     private fun isAborted(startEpoch: Long): Boolean = emergencyEpoch.get() != startEpoch

@@ -50,6 +50,8 @@ import com.example.ui.theme.EmeraldGreen
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonOrange
 import com.tajasb.interaction.GiftCoinCatalog
+import com.tajasb.interaction.UniversalTriggerRule
+import com.tajasb.interaction.UniversalTriggerSource
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -58,6 +60,9 @@ fun GiftNameCatalogPicker(
     onGiftNameChange: (String) -> Unit,
     onFocusChange: (Boolean) -> Unit = {},
     onQuickPicked: ((String) -> Unit)? = null,
+    currentRuleId: String? = null,
+    currentTriggerSource: UniversalTriggerSource = UniversalTriggerSource.GIFT,
+    existingRules: List<UniversalTriggerRule> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     var showCatalog by remember { mutableStateOf(false) }
@@ -73,6 +78,15 @@ fun GiftNameCatalogPicker(
         if (giftName.isBlank()) null else GiftCoinCatalog.findEntry(giftName.split(',', '|').firstOrNull().orEmpty())
     }
 
+    val conflicts = remember(giftName, currentRuleId, currentTriggerSource, existingRules) {
+        GiftCoinCatalog.findConflictingRules(
+            currentRuleId = currentRuleId,
+            currentSource = currentTriggerSource,
+            targetGiftName = giftName,
+            allRules = existingRules
+        )
+    }
+
     val filteredGifts = remember(searchQuery, selectedTier) {
         val tier = if (searchQuery.isNotBlank()) "Semua" else selectedTier
         GiftCoinCatalog.filterEntries(query = searchQuery, tierBucket = tier)
@@ -85,7 +99,11 @@ fun GiftNameCatalogPicker(
             .background(DarkSurface)
             .border(
                 0.8.dp,
-                if (giftName.isNotBlank()) EmeraldGreen.copy(alpha = 0.7f) else DarkCardBorder,
+                when {
+                    conflicts.isNotEmpty() -> NeonOrange
+                    giftName.isNotBlank() -> EmeraldGreen.copy(alpha = 0.7f)
+                    else -> DarkCardBorder
+                },
                 RoundedCornerShape(6.dp)
             )
             .padding(horizontal = 6.dp, vertical = 5.dp),
@@ -204,6 +222,28 @@ fun GiftNameCatalogPicker(
             overflow = TextOverflow.Ellipsis
         )
 
+        if (conflicts.isNotEmpty()) {
+            val conflictSummary = conflicts.take(3).joinToString(", ") {
+                "\"${it.conflictingRuleName}\" (${it.conflictingGiftName})"
+            } + if (conflicts.size > 3) " +${conflicts.size - 3} lainnya" else ""
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(NeonOrange.copy(alpha = 0.16f))
+                    .border(0.8.dp, NeonOrange, RoundedCornerShape(5.dp))
+                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                    .testTag("gift_conflict_warning_banner")
+            ) {
+                Text(
+                    text = "⚠️ Gift ini sudah digunakan di konsep lain: $conflictSummary",
+                    color = NeonOrange,
+                    fontSize = 7.8.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
         if (showCatalog) {
             Column(
                 modifier = Modifier
@@ -312,15 +352,33 @@ fun GiftNameCatalogPicker(
                         filteredGifts.forEach { entry ->
                             val isSelected = giftName.isNotBlank() &&
                                 GiftCoinCatalog.matchesGiftName(giftName, entry.primaryName)
+                            val usedBy = remember(entry.primaryName, currentRuleId, existingRules) {
+                                GiftCoinCatalog.findUsedByRuleNames(
+                                    giftPrimaryName = entry.primaryName,
+                                    currentRuleId = currentRuleId,
+                                    allRules = existingRules
+                                )
+                            }
+                            val isUsedElsewhere = !isSelected && usedBy.isNotEmpty()
+                            val chipBg = when {
+                                isSelected -> EmeraldGreen.copy(alpha = 0.22f)
+                                isUsedElsewhere -> NeonOrange.copy(alpha = 0.14f)
+                                else -> DarkSurface
+                            }
+                            val chipBorder = when {
+                                isSelected -> EmeraldGreen
+                                isUsedElsewhere -> NeonOrange.copy(alpha = 0.75f)
+                                else -> DarkCardBorder
+                            }
+                            val chipLabel = buildString {
+                                append("${entry.emoji} ${entry.primaryName} (${entry.coinCost}💎)")
+                                if (isUsedElsewhere) append(" • Dipakai")
+                            }
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(5.dp))
-                                    .background(if (isSelected) EmeraldGreen.copy(alpha = 0.22f) else DarkSurface)
-                                    .border(
-                                        0.7.dp,
-                                        if (isSelected) EmeraldGreen else DarkCardBorder,
-                                        RoundedCornerShape(5.dp)
-                                    )
+                                    .background(chipBg)
+                                    .border(0.7.dp, chipBorder, RoundedCornerShape(5.dp))
                                     .clickable {
                                         onGiftNameChange(entry.primaryName)
                                         onQuickPicked?.invoke(entry.primaryName)
@@ -331,10 +389,14 @@ fun GiftNameCatalogPicker(
                                     .testTag("gift_db_item_${GiftCoinCatalog.normalizeName(entry.primaryName)}")
                             ) {
                                 Text(
-                                    text = "${entry.emoji} ${entry.primaryName} (${entry.coinCost}💎)",
-                                    color = if (isSelected) EmeraldGreen else Color.White,
+                                    text = chipLabel,
+                                    color = when {
+                                        isSelected -> EmeraldGreen
+                                        isUsedElsewhere -> NeonOrange
+                                        else -> Color.White
+                                    },
                                     fontSize = 8.sp,
-                                    fontWeight = if (isSelected) FontWeight.Black else FontWeight.SemiBold,
+                                    fontWeight = if (isSelected || isUsedElsewhere) FontWeight.Bold else FontWeight.SemiBold,
                                     maxLines = 1
                                 )
                             }

@@ -241,4 +241,70 @@ object GiftCoinCatalog {
                 entry.coinCost.toString().contains(qNorm)
         }
     }
+
+    data class GiftUsageConflict(
+        val conflictingRuleId: String,
+        val conflictingRuleName: String,
+        val conflictingGiftName: String
+    )
+
+    private fun isGiftSource(source: UniversalTriggerSource): Boolean =
+        source == UniversalTriggerSource.GIFT || source == UniversalTriggerSource.GIFT_QUANTITY
+
+    fun giftsOverlap(firstTarget: String, secondTarget: String): Boolean {
+        val t1 = firstTarget.split(',', '|').map { it.trim() }.filter { it.isNotEmpty() }
+        val t2 = secondTarget.split(',', '|').map { it.trim() }.filter { it.isNotEmpty() }
+        if (t1.isEmpty() || t2.isEmpty()) return false
+        for (a in t1) {
+            for (b in t2) {
+                if (matchesGiftName(a, b) || matchesGiftName(b, a)) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * Mencari konsep/rule lain yang sudah memakai gift yang sama (termasuk alias bahasa).
+     */
+    fun findConflictingRules(
+        currentRuleId: String?,
+        currentSource: UniversalTriggerSource,
+        targetGiftName: String,
+        allRules: List<UniversalTriggerRule>
+    ): List<GiftUsageConflict> {
+        if (!isGiftSource(currentSource) || targetGiftName.isBlank()) return emptyList()
+        return allRules.mapNotNull { other ->
+            if (other.id == currentRuleId) return@mapNotNull null
+            if (!isGiftSource(other.triggerSource)) return@mapNotNull null
+            if (other.targetGiftName.isBlank()) return@mapNotNull null
+            if (giftsOverlap(targetGiftName, other.targetGiftName)) {
+                GiftUsageConflict(
+                    conflictingRuleId = other.id,
+                    conflictingRuleName = other.triggerName.ifBlank { other.triggerSource.displayName },
+                    conflictingGiftName = other.targetGiftName
+                )
+            } else {
+                null
+            }
+        }
+    }
+
+    fun findUsedByRuleNames(
+        giftPrimaryName: String,
+        currentRuleId: String?,
+        allRules: List<UniversalTriggerRule>
+    ): List<String> {
+        if (giftPrimaryName.isBlank()) return emptyList()
+        return allRules.mapNotNull { other ->
+            if (other.id == currentRuleId) return@mapNotNull null
+            if (!isGiftSource(other.triggerSource) || other.targetGiftName.isBlank()) return@mapNotNull null
+            if (giftsOverlap(giftPrimaryName, other.targetGiftName)) {
+                other.triggerName.ifBlank { other.triggerSource.displayName }
+            } else {
+                null
+            }
+        }
+    }
 }

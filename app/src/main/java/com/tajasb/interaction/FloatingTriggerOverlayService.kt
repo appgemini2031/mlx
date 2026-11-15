@@ -253,6 +253,8 @@ class FloatingTriggerOverlayService : Service() {
     private var touchBlockerView: FrameLayout? = null
     private var touchBlockerParams: WindowManager.LayoutParams? = null
     private var touchBlockerStatusPill: TextView? = null
+    private val touchBlockerHolePanels = mutableListOf<FrameLayout>()
+    private val touchBlockerHoleParams = mutableListOf<WindowManager.LayoutParams>()
     private var singleHudView: LinearLayout? = null
     private var singleHudParams: WindowManager.LayoutParams? = null
     private var subMenuComposeOwner: FloatingComposeOwner? = null
@@ -277,6 +279,10 @@ class FloatingTriggerOverlayService : Service() {
 
     @Volatile
     private var isTemporarilyHiddenForAutomation = false
+
+    @Volatile
+    private var activeTouchHolePx: PixelRect? = null
+    private var touchHiddenHudForHole = false
 
     @Volatile
     private var isTemporarilyHiddenForScan = false
@@ -334,8 +340,15 @@ class FloatingTriggerOverlayService : Service() {
         }
 
         MlbbGestureAccessibilityService.onPrepareScreenForTouch = { hideForTouch ->
-            isTemporarilyHiddenForAutomation = hideForTouch
-            setMarkerWindowsTemporaryHidden(hideForTouch)
+            if (!hideForTouch) {
+                setTouchHoleForAutomation(null, false)
+            } else {
+                isTemporarilyHiddenForAutomation = true
+                setMarkerWindowsTemporaryHidden(true)
+            }
+        }
+        MlbbGestureAccessibilityService.onPrepareScreenForTouchRegion = { holeRect, active ->
+            setTouchHoleForAutomation(holeRect, active)
         }
         MlbbGestureAccessibilityService.onPrepareScreenForScan = { hideForScan ->
             setFloatingWindowsHiddenForScanRegion(null, hideForScan)
@@ -456,6 +469,9 @@ class FloatingTriggerOverlayService : Service() {
         if (MlbbGestureAccessibilityService.onPrepareScreenForTouch != null) {
             MlbbGestureAccessibilityService.onPrepareScreenForTouch = null
         }
+        if (MlbbGestureAccessibilityService.onPrepareScreenForTouchRegion != null) {
+            MlbbGestureAccessibilityService.onPrepareScreenForTouchRegion = null
+        }
         if (MlbbGestureAccessibilityService.onPrepareScreenForScan != null) {
             MlbbGestureAccessibilityService.onPrepareScreenForScan = null
         }
@@ -469,6 +485,9 @@ class FloatingTriggerOverlayService : Service() {
         subMenuComposeOwner = null
         singleHudView?.let { safeRemoveView(it) }
         singleHudView = null
+        touchBlockerHolePanels.forEach { safeRemoveView(it) }
+        touchBlockerHolePanels.clear()
+        touchBlockerHoleParams.clear()
         touchBlockerView?.let { safeRemoveView(it) }
         touchBlockerView = null
         liveStageView?.let { safeRemoveView(it) }
@@ -504,7 +523,7 @@ class FloatingTriggerOverlayService : Service() {
                 }
                 updateTouchBlockerState(
                     st,
-                    temporarilyHiddenForAutomation = isTemporarilyHiddenForAutomation || isTemporarilyHiddenForScan
+                    temporarilyHiddenForAutomation = isTemporarilyHiddenForScan
                 )
                 if (hiddenChanged) {
                     updateNotification(st.isFloatingHiddenForLive)
@@ -599,6 +618,97 @@ class FloatingTriggerOverlayService : Service() {
         } catch (t: Throwable) {
             Log.e(TAG, "Gagal pasang touch blocker overlay: ${t.message}")
         }
+
+        // 4 panel hole-punch untuk menyisakan lubang gesture Accessibility sambil tetap mengunci area layar lain
+        repeat(4) {
+            val strip = FrameLayout(this).apply {
+                visibility = View.GONE
+                isClickable = true
+                isFocusable = false
+                setBackgroundColor(Color.TRANSPARENT)
+                setOnTouchListener { _, _ -> true }
+            }
+            val stripParams = WindowManager.LayoutParams(
+                1,
+                1,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = 0
+                y = 0
+                applyCutoutMode(this)
+            }
+            try {
+                windowManager.addView(strip, stripParams)
+                touchBlockerHolePanels += strip
+                touchBlockerHoleParams += stripParams
+            } catch (t: Throwable) {
+                Log.e(TAG, "Gagal pasang panel hole touch blocker: ${t.message}")
+            }
+        }
+    }
+
+    private fun setTouchHoleForAutomation(holeRect: PixelRect?, active: Boolean) {
+        if (active) {
+            isTemporarilyHiddenForAutomation = true
+            activeTouchHolePx = holeRect
+            setMarkerWindowsTemporaryHidden(true)
+
+            if (holeRect != null) {
+                val hud = singleHudView
+                val hParams = singleHudParams
+                if (hud != null && hParams != null && hud.visibility == View.VISIBLE) {
+                    val hw = hud.width.coerceAtLeast(hud.measuredWidth)
+                    val hh = hud.height.coerceAtLeast(hud.measuredHeight)
+                    val hudRect = PixelRect(hParams.x, hParams.y, hParams.x + hw, hParams.y + hh)
+                    if (hw > 0 && hh > 0 && ScanRegionGeometry.rectsIntersect(hudRect, holeRect)) {
+                        hud.visibility = View.INVISIBLE
+                        if ((hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0) {
+                            hParams.flags = hParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
+                        }
+                        touchHiddenHudForHole = true
+                    }
+                }
+            }
+        } else {
+            isTemporarilyHiddenForAutomation = false
+            activeTouchHolePx = null
+            if (touchHiddenHudForHole) {
+                touchHiddenHudForHole = false
+                val hud = singleHudView
+                val hParams = singleHudParams
+                if (hud != null && hParams != null && !isTemporarilyHiddenForScan && !scanHiddenHud) {
+                    if ((hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) {
+                        hParams.flags = hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                        try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
+                    }
+                    refreshSingleHudVisuals()
+                }
+            }
+            setMarkerWindowsTemporaryHidden(false)
+        }
+        updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
+    }
+
+    private fun hideAllHoleBlockerPanels() {
+        for (i in touchBlockerHolePanels.indices) {
+            val panel = touchBlockerHolePanels[i]
+            val pParams = touchBlockerHoleParams[i]
+            if (panel.visibility != View.GONE) {
+                panel.visibility = View.GONE
+            }
+            val notTouchable = (pParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
+            if (!notTouchable) {
+                pParams.flags = pParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                try { windowManager.updateViewLayout(panel, pParams) } catch (_: Throwable) {}
+            }
+        }
     }
 
     private fun updateTouchBlockerState(
@@ -607,35 +717,96 @@ class FloatingTriggerOverlayService : Service() {
     ) {
         val blocker = touchBlockerView ?: return
         val params = touchBlockerParams ?: return
-        val shouldLock = !temporarilyHiddenForAutomation &&
+        // Saat scan OCR berlangsung (isTemporarilyHiddenForScan), blocker dilepas sementara agar OCR bersih.
+        // Saat challenge menjalankan klik/tahan/geser (activeTouchHolePx != null), blocker TETAP MENGUNCI SENTUHAN USER
+        // melalui 4 panel di luar lubang gesture, sementara Accessibility gesture bebas menyentuh game MLBB.
+        val shouldLock = !isTemporarilyHiddenForScan &&
+            !temporarilyHiddenForAutomation &&
             st.blockTouchDuringChallenge &&
             st.isChallengeExecuting &&
             !st.isPositionEditMode &&
             !st.isEmergencyStopped
 
-        val desiredVis = if (shouldLock) View.VISIBLE else View.GONE
-        if (blocker.visibility != desiredVis) {
-            blocker.visibility = desiredVis
+        if (!shouldLock) {
+            if (blocker.visibility != View.GONE) {
+                blocker.visibility = View.GONE
+            }
+            if ((params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0) {
+                params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                try { windowManager.updateViewLayout(blocker, params) } catch (_: Throwable) {}
+            }
+            hideAllHoleBlockerPanels()
+            return
         }
-        if (!scanHiddenBlockerPill && touchBlockerStatusPill?.visibility != View.VISIBLE) {
-            touchBlockerStatusPill?.visibility = View.VISIBLE
+
+        if (blocker.visibility != View.VISIBLE) {
+            blocker.visibility = View.VISIBLE
         }
-        if (shouldLock && st.cooldownStatusHint.isNotBlank()) {
+        if (st.cooldownStatusHint.isNotBlank()) {
             touchBlockerStatusPill?.text = "🔒 Layar Terkunci • ${st.cooldownStatusHint}"
         } else {
-            touchBlockerStatusPill?.text = "🔒 Layar Terkunci — Challenge Sedang Berjalan"
+            touchBlockerStatusPill?.text = "🔒 Layar Terkunci — Aksi ML Sedang Berjalan"
         }
-        val currentlyNotTouchable = (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
-        val desiredNotTouchable = !shouldLock
-        if (currentlyNotTouchable != desiredNotTouchable) {
-            params.flags = if (desiredNotTouchable) {
-                params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            } else {
-                params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+
+        val hole = activeTouchHolePx
+        if (hole == null) {
+            // Kunci penuh seluruh layar (mis. selama Home->Game)
+            if (!scanHiddenBlockerPill && touchBlockerStatusPill?.visibility != View.VISIBLE) {
+                touchBlockerStatusPill?.visibility = View.VISIBLE
             }
-            try {
-                windowManager.updateViewLayout(blocker, params)
-            } catch (_: Throwable) {}
+            val currentlyNotTouchable = (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
+            if (currentlyNotTouchable) {
+                params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                try { windowManager.updateViewLayout(blocker, params) } catch (_: Throwable) {}
+            }
+            hideAllHoleBlockerPanels()
+        } else {
+            // Mode lubang gesture: visual merah tetap tampil NON-TOUCHABLE, sementara 4 panel strip mengunci area luar lubang
+            val currentlyNotTouchable = (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
+            if (!currentlyNotTouchable) {
+                params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                try { windowManager.updateViewLayout(blocker, params) } catch (_: Throwable) {}
+            }
+            val pill = touchBlockerStatusPill
+            if (pill != null) {
+                val pw = pill.width.coerceAtLeast(pill.measuredWidth)
+                val ph = pill.height.coerceAtLeast(pill.measuredHeight)
+                val pRect = PixelRect(pill.left, pill.top, pill.left + pw, pill.top + ph)
+                val overlapsPill = pw > 0 && ph > 0 && ScanRegionGeometry.rectsIntersect(pRect, hole)
+                pill.visibility = if (scanHiddenBlockerPill || overlapsPill) View.INVISIBLE else View.VISIBLE
+            }
+            val (screenW, screenH) = getDisplaySizePx()
+            val rects = TouchBlockerHoleGeometry.computePanels(screenW, screenH, hole)
+            for (i in touchBlockerHolePanels.indices) {
+                val panel = touchBlockerHolePanels[i]
+                val pParams = touchBlockerHoleParams[i]
+                if (i < rects.size) {
+                    val r = rects[i]
+                    val rw = (r.right - r.left).coerceAtLeast(1)
+                    val rh = (r.bottom - r.top).coerceAtLeast(1)
+                    val posOrSizeChanged = pParams.x != r.left || pParams.y != r.top || pParams.width != rw || pParams.height != rh
+                    val flagsChanged = (pParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
+                    pParams.x = r.left
+                    pParams.y = r.top
+                    pParams.width = rw
+                    pParams.height = rh
+                    pParams.flags = pParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                    if (panel.visibility != View.VISIBLE) {
+                        panel.visibility = View.VISIBLE
+                    }
+                    if (posOrSizeChanged || flagsChanged) {
+                        try { windowManager.updateViewLayout(panel, pParams) } catch (_: Throwable) {}
+                    }
+                } else {
+                    if (panel.visibility != View.GONE) {
+                        panel.visibility = View.GONE
+                    }
+                    if ((pParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0) {
+                        pParams.flags = pParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        try { windowManager.updateViewLayout(panel, pParams) } catch (_: Throwable) {}
+                    }
+                }
+            }
         }
     }
 
@@ -848,7 +1019,7 @@ class FloatingTriggerOverlayService : Service() {
     // ==================== Layer 2: External Trigger Pins OUTSIDE Floating (Colored + Per-Challenge Eye) ====================
 
     private fun setMarkerWindowsTemporaryHidden(hide: Boolean) {
-        updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = hide || isTemporarilyHiddenForScan)
+        updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
         liveStageView?.visibility = if (hide || isTemporarilyHiddenForScan) View.INVISIBLE else View.VISIBLE
         val targetVis = if (hide || isTemporarilyHiddenForScan) View.INVISIBLE else View.VISIBLE
         for (entry in markerWindows.values) {
@@ -2071,6 +2242,10 @@ class FloatingTriggerOverlayService : Service() {
 
         if (st.isFloatingHiddenForLive) {
             hud.visibility = View.GONE
+            return
+        }
+        if (touchHiddenHudForHole || scanHiddenHud || isTemporarilyHiddenForScan) {
+            hud.visibility = View.INVISIBLE
             return
         }
         hud.visibility = View.VISIBLE

@@ -347,11 +347,31 @@ data class FloatingWindowConfig(
     val panelOpacity: Float = 0.94f
 )
 
+data class GameCoverArea(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String = "Tutup Area",
+    val enabled: Boolean = true,
+    val posX: Float = 0.14f,
+    val posY: Float = 0.24f,
+    val widthRatio: Float = 0.18f,
+    val heightRatio: Float = 0.24f,
+    val opacity: Float = 0.98f,
+    val colorHex: Long = 0xFF0B1120L
+)
+
 data class UniversalEngineUiState(
     val isEngineEnabled: Boolean = true,
     val isMlbbMatchActive: Boolean = false,
     val blockTouchDuringChallenge: Boolean = true,
     val isChallengeExecuting: Boolean = false,
+    val isSingleTestRunning: Boolean = false,
+    val isDevice2SimpleMode: Boolean = true,
+    val globalDelayBeforeMs: Long = 0L,
+    val globalDelayAfterMs: Long = 0L,
+    val globalDelayExcludeCooldownRules: Boolean = true,
+    val gameCoverAreas: List<GameCoverArea> = emptyList(),
+    val isCoverEditMode: Boolean = false,
+    val activeCoverAreaId: String? = null,
     val cooldownStatusHint: String = "",
     val isEmergencyStopped: Boolean = false,
     val isFloatingOverlayRunning: Boolean = false,
@@ -698,9 +718,51 @@ object UniversalInteractionJsonCodec {
             overlayScale = obj.optDouble("overlayScale", 1.0).toFloat().coerceIn(0.35f, 3.0f),
             holdAndDrag = obj.optBoolean("holdAndDrag", false),
             dragDirection = obj.optString("dragDirection", "RIGHT").ifBlank { "RIGHT" },
-            dragDurationMs = obj.optLong("dragDurationMs", 220L).coerceIn(60L, 5000L)
+            dragDurationMs = obj.optLong("dragDurationMs", 220L).coerceIn(0L, 5000L)
         )
     }
+
+    fun encodeGameCoverAreas(areas: List<GameCoverArea>): String {
+        val arr = JSONArray()
+        areas.forEach { arr.put(coverAreaToJson(it)) }
+        return arr.toString()
+    }
+
+    fun decodeGameCoverAreas(raw: String?): List<GameCoverArea> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).mapNotNull { idx ->
+                arr.optJSONObject(idx)?.let { jsonToCoverArea(it) }
+            }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    fun coverAreaToJson(a: GameCoverArea): JSONObject = JSONObject().apply {
+        put("id", a.id)
+        put("name", a.name)
+        put("enabled", a.enabled)
+        put("posX", a.posX.toDouble())
+        put("posY", a.posY.toDouble())
+        put("widthRatio", a.widthRatio.toDouble())
+        put("heightRatio", a.heightRatio.toDouble())
+        put("opacity", a.opacity.toDouble())
+        put("colorHex", a.colorHex)
+    }
+
+    fun jsonToCoverArea(obj: JSONObject): GameCoverArea = GameCoverArea(
+        id = obj.optString("id", "").ifBlank { UUID.randomUUID().toString() },
+        name = obj.optString("name", "Tutup Area").ifBlank { "Tutup Area" },
+        enabled = obj.optBoolean("enabled", true),
+        posX = obj.optDouble("posX", 0.14).toFloat().coerceIn(0.01f, 0.99f),
+        posY = obj.optDouble("posY", 0.24).toFloat().coerceIn(0.01f, 0.99f),
+        widthRatio = obj.optDouble("widthRatio", 0.18).toFloat().coerceIn(0.03f, 0.96f),
+        heightRatio = obj.optDouble("heightRatio", 0.24).toFloat().coerceIn(0.03f, 0.96f),
+        opacity = obj.optDouble("opacity", 0.98).toFloat().coerceIn(0.20f, 1.0f),
+        colorHex = obj.optLong("colorHex", 0xFF0B1120L)
+    )
 
     fun encodeFloatingConfig(cfg: FloatingWindowConfig): String = JSONObject().apply {
         put("hudXRatio", cfg.hudXRatio.toDouble())

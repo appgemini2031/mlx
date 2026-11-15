@@ -3,6 +3,7 @@ package com.tajasb.interaction
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.tajasb.eventrelay.ConnectionStatus
 import com.tajasb.eventrelay.LiveEventItem
 import com.tajasb.eventrelay.LiveEventReceiver
 import com.tajasb.eventrelay.LiveEventType
@@ -14,9 +15,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.UUID
@@ -36,6 +41,18 @@ data class CounterEvaluationResult(
  * cooldown, dan reset condition.
  */
 object UniversalRuleEvaluator {
+
+    fun resolveGlobalDelayPairMs(
+        rule: UniversalTriggerRule,
+        globalBeforeMs: Long,
+        globalAfterMs: Long,
+        excludeCooldownRules: Boolean
+    ): Pair<Long, Long> {
+        if (excludeCooldownRules && rule.enableVisualCooldownWait) {
+            return 0L to 0L
+        }
+        return globalBeforeMs.coerceIn(0L, 60_000L) to globalAfterMs.coerceIn(0L, 60_000L)
+    }
 
     /**
      * Jika Delay Scan Cooldown Skill ML aktif, Delay Awal & Random Delay dilewati otomatis
@@ -408,6 +425,11 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         private const val KEY_BLOCK_TOUCH_DURING_CHALLENGE = "block_touch_during_challenge"
         private const val KEY_ACTIVE_SCENE = "active_scene"
         private const val KEY_FLOATING_CONFIG = "floating_window_config_json"
+        private const val KEY_GLOBAL_DELAY_BEFORE_MS = "global_delay_before_ms"
+        private const val KEY_GLOBAL_DELAY_AFTER_MS = "global_delay_after_ms"
+        private const val KEY_GLOBAL_DELAY_EXCLUDE_COOLDOWN = "global_delay_exclude_cooldown"
+        private const val KEY_GAME_COVER_AREAS_JSON = "game_cover_areas_json"
+        private const val KEY_DEVICE2_SIMPLE_MODE = "device2_simple_mode"
         private const val MAX_HISTORY = 60
         private const val DUPLICATE_WINDOW_MS = 2500L
 
@@ -437,6 +459,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
     private val pendingQueue = mutableListOf<QueuedDispatchTask>()
     private val queueSeq = AtomicLong(0L)
     private val isWorkerRunning = AtomicBoolean(false)
+    private val isSingleTestRunningGuard = AtomicBoolean(false)
     private val activeChallengeCount = AtomicInteger(0)
 
     private val recentEventIds = object : LinkedHashMap<String, Long>(128, 0.75f, true) {
@@ -448,9 +471,32 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
 
     private var lastObservedRelayEventId: String? = null
 
+    private data class RemoteSyncDigest(
+        val isEngineEnabled: Boolean,
+        val isMlbbMatchActive: Boolean,
+        val blockTouchDuringChallenge: Boolean,
+        val isEmergencyStopped: Boolean,
+        val isDevice2SimpleMode: Boolean,
+        val isFloatingOverlayRunning: Boolean,
+        val isFloatingHiddenForLive: Boolean,
+        val isPositionEditMode: Boolean,
+        val isCoverEditMode: Boolean,
+        val activePinRuleId: String?,
+        val activePinStepId: String?,
+        val activeCoverAreaId: String?,
+        val globalDelayBeforeMs: Long,
+        val globalDelayAfterMs: Long,
+        val globalDelayExcludeCooldownRules: Boolean,
+        val rules: List<UniversalTriggerRule>,
+        val gameCoverAreas: List<GameCoverArea>,
+        val counters: Map<String, TriggerCounterState>,
+        val historyIds: List<Pair<String, DispatchStatus>>
+    )
+
     init {
         observeLiveEventRelay()
         startOverlayExpiryTicker()
+        startRemoteSyncObserver()
     }
 
     private fun loadInitialState(): UniversalEngineUiState {
@@ -460,8 +506,13 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         val enabled = prefs.getBoolean(KEY_ENGINE_ENABLED, true)
         val matchActive = prefs.getBoolean(KEY_MATCH_ACTIVE, false)
         val blockTouch = prefs.getBoolean(KEY_BLOCK_TOUCH_DURING_CHALLENGE, true)
+        val simpleMode = prefs.getBoolean(KEY_DEVICE2_SIMPLE_MODE, true)
         val scene = prefs.getString(KEY_ACTIVE_SCENE, "SCENE_UTAMA")?.ifBlank { "SCENE_UTAMA" } ?: "SCENE_UTAMA"
         val floatingCfg = UniversalInteractionJsonCodec.decodeFloatingConfig(prefs.getString(KEY_FLOATING_CONFIG, null))
+        val globalBeforeMs = prefs.getLong(KEY_GLOBAL_DELAY_BEFORE_MS, 0L).coerceIn(0L, 60_000L)
+        val globalAfterMs = prefs.getLong(KEY_GLOBAL_DELAY_AFTER_MS, 0L).coerceIn(0L, 60_000L)
+        val globalExcludeCd = prefs.getBoolean(KEY_GLOBAL_DELAY_EXCLUDE_COOLDOWN, true)
+        val savedCovers = UniversalInteractionJsonCodec.decodeGameCoverAreas(prefs.getString(KEY_GAME_COVER_AREAS_JSON, null))
         val initialRule = savedRules.firstOrNull { it.isPinVisible } ?: savedRules.firstOrNull()
         val initialStep = initialRule?.actionSequence?.firstOrNull {
             it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
@@ -470,7 +521,13 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             isEngineEnabled = enabled,
             isMlbbMatchActive = matchActive,
             blockTouchDuringChallenge = blockTouch,
+            isDevice2SimpleMode = simpleMode,
             isEmergencyStopped = false,
+            globalDelayBeforeMs = globalBeforeMs,
+            globalDelayAfterMs = globalAfterMs,
+            globalDelayExcludeCooldownRules = globalExcludeCd,
+            gameCoverAreas = savedCovers,
+            activeCoverAreaId = savedCovers.firstOrNull()?.id,
             activePinRuleId = initialRule?.id,
             activePinStepId = initialStep?.id,
             floatingConfig = floatingCfg,
@@ -481,9 +538,19 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
     }
 
     private fun observeLiveEventRelay() {
+        val receiver = LiveEventReceiver.getInstance(appContext)
+        receiver.onBrokerConnected = {
+            scope.launch {
+                sendCurrentSyncToBroker()
+            }
+        }
+        receiver.onMlbbControlReceived = { obj ->
+            scope.launch {
+                applyRemoteControlCommand(obj)
+            }
+        }
         scope.launch {
             try {
-                val receiver = LiveEventReceiver.getInstance(appContext)
                 receiver.lastEvent.collect { item ->
                     if (item == null) return@collect
                     if (item.id == lastObservedRelayEventId) return@collect
@@ -497,6 +564,303 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             } catch (t: Throwable) {
                 Log.w(TAG, "Relay observer stopped: ${t.message}")
             }
+        }
+    }
+
+    private fun startRemoteSyncObserver() {
+        scope.launch {
+            _state
+                .map { st ->
+                    RemoteSyncDigest(
+                        isEngineEnabled = st.isEngineEnabled,
+                        isMlbbMatchActive = st.isMlbbMatchActive,
+                        blockTouchDuringChallenge = st.blockTouchDuringChallenge,
+                        isEmergencyStopped = st.isEmergencyStopped,
+                        isDevice2SimpleMode = st.isDevice2SimpleMode,
+                        isFloatingOverlayRunning = st.isFloatingOverlayRunning,
+                        isFloatingHiddenForLive = st.isFloatingHiddenForLive,
+                        isPositionEditMode = st.isPositionEditMode,
+                        isCoverEditMode = st.isCoverEditMode,
+                        activePinRuleId = st.activePinRuleId,
+                        activePinStepId = st.activePinStepId,
+                        activeCoverAreaId = st.activeCoverAreaId,
+                        globalDelayBeforeMs = st.globalDelayBeforeMs,
+                        globalDelayAfterMs = st.globalDelayAfterMs,
+                        globalDelayExcludeCooldownRules = st.globalDelayExcludeCooldownRules,
+                        rules = st.rules,
+                        gameCoverAreas = st.gameCoverAreas,
+                        counters = st.counters,
+                        historyIds = st.history.take(15).map { it.id to it.status }
+                    )
+                }
+                .distinctUntilChanged()
+                .collectLatest {
+                    delay(150L)
+                    val receiver = LiveEventReceiver.getInstance(appContext)
+                    if (receiver.connectionStatus.value == ConnectionStatus.CONNECTED) {
+                        sendCurrentSyncToBroker()
+                    }
+                }
+        }
+    }
+
+    fun sendCurrentSyncToBroker(): Boolean {
+        val receiver = LiveEventReceiver.getInstance(appContext)
+        if (receiver.connectionStatus.value != ConnectionStatus.CONNECTED) return false
+        val cfg = receiver.currentServerConfig()
+        val payload = MlbbRemoteSyncCodec.encodeStateSyncPayload(
+            state = _state.value,
+            serverHost = cfg.serverHost,
+            serverPort = cfg.serverPort,
+            activePlatform = cfg.activePlatform
+        )
+        return receiver.sendMlbbStateSync(payload)
+    }
+
+    private suspend fun applyRemoteControlCommand(obj: JSONObject) {
+        val cmd = MlbbRemoteSyncCodec.parseControlCommand(obj) ?: return
+        when (cmd) {
+            is MlbbControlCommand.SetEngineEnabled -> setEngineEnabled(cmd.enabled)
+            is MlbbControlCommand.SetMatchSafePause -> setMlbbMatchActive(cmd.paused)
+            is MlbbControlCommand.SetTouchLock -> setBlockTouchDuringChallenge(cmd.enabled)
+            is MlbbControlCommand.SetDevice2SimpleMode -> setDevice2SimpleMode(cmd.simple)
+            is MlbbControlCommand.SetGlobalDelays -> setGlobalDelaySettings(
+                beforeMs = cmd.beforeMs,
+                afterMs = cmd.afterMs,
+                excludeCooldownRules = cmd.excludeCooldownRules
+            )
+            is MlbbControlCommand.SetLiveDisplayMode -> {
+                withContext(Dispatchers.Main) {
+                    val runningNow = _state.value.isFloatingOverlayRunning
+                    if (cmd.floatingRunning == false) {
+                        FloatingTriggerOverlayService.stop(appContext)
+                    } else if (
+                        (cmd.floatingRunning == true || !runningNow) &&
+                        FloatingTriggerOverlayService.canDrawOverlays(appContext)
+                    ) {
+                        FloatingTriggerOverlayService.start(
+                            context = appContext,
+                            startInEditMode = cmd.positionEditMode ?: _state.value.isPositionEditMode,
+                            openSettingsPanel = false,
+                            hideFloatingForLive = cmd.hiddenForLive ?: _state.value.isFloatingHiddenForLive
+                        )
+                    }
+                    cmd.hiddenForLive?.let { setFloatingHiddenForLive(it) }
+                    cmd.positionEditMode?.let { setPositionEditMode(it) }
+                    cmd.coverEditMode?.let { setCoverEditMode(it) }
+                }
+            }
+            is MlbbControlCommand.UpsertRuleDetail -> {
+                val finalRule = if (cmd.preserveCoordinates) {
+                    val existing = _state.value.rules.firstOrNull { it.id == cmd.rule.id }
+                    if (existing != null) {
+                        val existingStepsById = existing.actionSequence.associateBy { it.id }
+                        val preservedSteps = cmd.rule.actionSequence.map { incomingStep ->
+                            val curStep = existingStepsById[incomingStep.id]
+                            if (curStep != null && curStep.posX != null && curStep.posY != null) {
+                                incomingStep.copy(
+                                    posX = curStep.posX,
+                                    posY = curStep.posY,
+                                    paramValue = if (incomingStep.actionType == ActionType.SIMULATED_CLICK) {
+                                        String.format(Locale.US, "%.3f,%.3f", curStep.posX, curStep.posY)
+                                    } else {
+                                        incomingStep.paramValue
+                                    }
+                                )
+                            } else {
+                                incomingStep
+                            }
+                        }
+                        cmd.rule.copy(
+                            overlayPosX = existing.overlayPosX,
+                            overlayPosY = existing.overlayPosY,
+                            actionSequence = preservedSteps
+                        )
+                    } else {
+                        cmd.rule
+                    }
+                } else {
+                    cmd.rule
+                }
+                addOrUpdateRule(finalRule)
+            }
+            is MlbbControlCommand.CreateRule -> {
+                val created = createEmptyConcept(
+                    source = cmd.source,
+                    name = cmd.name.ifBlank { null }
+                )
+                val starterStep = when (cmd.starterActionType) {
+                    ActionType.SIMULATED_CLICK -> UniversalActionStep(
+                        enabled = true,
+                        actionType = ActionType.SIMULATED_CLICK,
+                        paramValue = String.format(Locale.US, "%.3f,%.3f", created.overlayPosX, created.overlayPosY),
+                        secondaryValue = "70",
+                        durationMs = 70L,
+                        posX = created.overlayPosX,
+                        posY = created.overlayPosY
+                    )
+                    ActionType.SIMULATED_SWIPE -> UniversalActionStep(
+                        enabled = true,
+                        actionType = ActionType.SIMULATED_SWIPE,
+                        paramValue = "RIGHT",
+                        secondaryValue = "220",
+                        durationMs = 220L,
+                        posX = created.overlayPosX,
+                        posY = created.overlayPosY
+                    )
+                    ActionType.DELAY -> UniversalActionStep(
+                        enabled = true,
+                        actionType = ActionType.DELAY,
+                        paramValue = "500",
+                        durationMs = 500L
+                    )
+                    ActionType.HOME_BACK_GAME -> UniversalActionStep(
+                        enabled = true,
+                        actionType = ActionType.HOME_BACK_GAME,
+                        paramValue = "1500",
+                        durationMs = 1500L
+                    )
+                    ActionType.MEME_OVERLAY -> UniversalActionStep(
+                        enabled = true,
+                        actionType = ActionType.MEME_OVERLAY,
+                        secondaryValue = "MEME {user}!",
+                        durationMs = 2500L,
+                        posX = created.overlayPosX,
+                        posY = created.overlayPosY,
+                        executionMode = ExecutionMode.PARALLEL
+                    )
+                    ActionType.PROFILE_OVERLAY -> UniversalActionStep(
+                        enabled = true,
+                        actionType = ActionType.PROFILE_OVERLAY,
+                        paramValue = "{user}",
+                        secondaryValue = "{gift}",
+                        durationMs = 2500L,
+                        posX = created.overlayPosX,
+                        posY = created.overlayPosY,
+                        executionMode = ExecutionMode.PARALLEL
+                    )
+                    ActionType.PLAY_SOUND -> UniversalActionStep(
+                        enabled = true,
+                        actionType = ActionType.PLAY_SOUND,
+                        paramValue = "CHIME",
+                        executionMode = ExecutionMode.PARALLEL
+                    )
+                    else -> null
+                }
+                val updated = created.copy(
+                    targetGiftName = cmd.targetGiftName,
+                    actionSequence = listOfNotNull(starterStep)
+                )
+                addOrUpdateRule(updated)
+            }
+            is MlbbControlCommand.ToggleRule -> {
+                val target = _state.value.rules.firstOrNull { it.id == cmd.ruleId }
+                if (target != null && (cmd.enabled == null || target.enabled != cmd.enabled)) {
+                    toggleRuleEnabled(cmd.ruleId)
+                }
+            }
+            is MlbbControlCommand.ToggleRulePin -> {
+                val target = _state.value.rules.firstOrNull { it.id == cmd.ruleId }
+                if (target != null && (cmd.visible == null || target.isPinVisible != cmd.visible)) {
+                    toggleRulePinVisibility(cmd.ruleId)
+                }
+            }
+            is MlbbControlCommand.DuplicateRule -> {
+                duplicateRule(cmd.ruleId)
+            }
+            is MlbbControlCommand.DeleteRule -> {
+                deleteRule(cmd.ruleId)
+            }
+            is MlbbControlCommand.MoveRule -> {
+                val rules = _state.value.rules
+                val idx = rules.indexOfFirst { it.id == cmd.ruleId }
+                if (idx >= 0 && cmd.delta != 0) {
+                    val targetIdx = (idx + cmd.delta).coerceIn(0, rules.lastIndex)
+                    moveRule(idx, targetIdx)
+                }
+            }
+            is MlbbControlCommand.SelectActivePin -> {
+                selectActivePin(cmd.ruleId, cmd.stepId)
+            }
+            is MlbbControlCommand.SetAllPinsVisible -> {
+                setAllPinsVisible(cmd.visible)
+            }
+            is MlbbControlCommand.UpsertCoverArea -> {
+                val existing = _state.value.gameCoverAreas.firstOrNull { it.id == cmd.area.id }
+                if (existing != null) {
+                    val nextArea = if (cmd.preservePosition) {
+                        cmd.area.copy(posX = existing.posX, posY = existing.posY)
+                    } else {
+                        cmd.area
+                    }
+                    updateGameCoverArea(nextArea)
+                } else {
+                    addGameCoverArea(
+                        name = cmd.area.name,
+                        posX = cmd.area.posX,
+                        posY = cmd.area.posY,
+                        widthRatio = cmd.area.widthRatio,
+                        heightRatio = cmd.area.heightRatio,
+                        opacity = cmd.area.opacity,
+                        colorHex = cmd.area.colorHex
+                    )
+                }
+            }
+            is MlbbControlCommand.CreateCoverArea -> {
+                addGameCoverArea(
+                    name = cmd.name,
+                    posX = cmd.posX,
+                    posY = cmd.posY,
+                    widthRatio = cmd.widthRatio,
+                    heightRatio = cmd.heightRatio,
+                    opacity = cmd.opacity
+                )
+            }
+            is MlbbControlCommand.ToggleCoverArea -> {
+                val area = _state.value.gameCoverAreas.firstOrNull { it.id == cmd.areaId }
+                if (area != null && (cmd.enabled == null || area.enabled != cmd.enabled)) {
+                    toggleGameCoverAreaEnabled(cmd.areaId)
+                }
+            }
+            is MlbbControlCommand.DeleteCoverArea -> deleteGameCoverArea(cmd.areaId)
+            is MlbbControlCommand.SelectCoverArea -> selectActiveCoverArea(cmd.areaId)
+            is MlbbControlCommand.TestRule -> {
+                forceTestRuleNow(cmd.ruleId)
+            }
+            is MlbbControlCommand.InspectCooldown -> {
+                val rule = _state.value.rules.firstOrNull { it.id == cmd.ruleId }
+                inspectRuleCooldownOnce(cmd.ruleId) { result ->
+                    appendHistory(
+                        TriggerExecutionRecord(
+                            timestampMs = System.currentTimeMillis(),
+                            ruleId = cmd.ruleId,
+                            ruleName = rule?.triggerName ?: "Scan CD",
+                            source = rule?.triggerSource ?: UniversalTriggerSource.CUSTOM_EVENT,
+                            senderName = "Device 1 Web",
+                            quantity = 1,
+                            status = DispatchStatus.EXECUTED,
+                            detail = "SCAN OCR • $result"
+                        )
+                    )
+                }
+            }
+            is MlbbControlCommand.InjectEvent -> {
+                dispatchEvent(
+                    LiveInteractionEvent(
+                        source = cmd.source,
+                        senderName = cmd.senderName,
+                        quantity = cmd.quantity,
+                        diamonds = cmd.diamonds,
+                        giftName = cmd.giftName,
+                        text = cmd.text
+                    )
+                )
+            }
+            is MlbbControlCommand.EmergencyStop -> emergencyStop()
+            is MlbbControlCommand.ResumeEngine -> resumeAfterEmergencyStop()
+            is MlbbControlCommand.ResetCounters -> resetAllCounters()
+            is MlbbControlCommand.ClearHistory -> clearHistory()
+            is MlbbControlCommand.RequestStateSync -> sendCurrentSyncToBroker()
         }
     }
 
@@ -809,6 +1173,10 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             onResult?.invoke("Target tidak ditemukan")
             return
         }
+        if (!isSingleTestRunningGuard.compareAndSet(false, true)) {
+            onResult?.invoke("Tes lain masih berjalan...")
+            return
+        }
         val defaultGift = GiftCoinCatalog.firstGiftNameForTest(rule.targetGiftName)
         val defaultDiamonds = GiftCoinCatalog.resolveCoinCost(defaultGift) ?: 10
         val event = customEvent ?: LiveInteractionEvent(
@@ -819,24 +1187,38 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             giftName = defaultGift,
             text = "Tes ${rule.triggerName}"
         )
+        _state.update { it.copy(isSingleTestRunning = true, isEmergencyStopped = false) }
         scope.launch {
             val summary = try {
+                // Beri waktu 95ms agar panel submenu/keyboard floating menutup dulu & WindowManager stabil (zero blink)
+                delay(95L)
                 val cooldownNote = waitForSkillCooldownIfNeeded(rule)
                 if (_state.value.isEmergencyStopped) {
                     "Dihentikan darurat saat tunggu cooldown"
                 } else {
+                    val snapshot = _state.value
+                    val (gBefore, gAfter) = UniversalRuleEvaluator.resolveGlobalDelayPairMs(
+                        rule = rule,
+                        globalBeforeMs = snapshot.globalDelayBeforeMs,
+                        globalAfterMs = snapshot.globalDelayAfterMs,
+                        excludeCooldownRules = snapshot.globalDelayExcludeCooldownRules
+                    )
                     val execSummary = dispatcher.dispatchRuleActions(
                         rule = rule.copy(enabled = true),
                         event = event,
-                        counterCount = (_state.value.counters[rule.id]?.accumulatedCount ?: 0) + 1,
-                        isMlbbMatchActive = false
+                        counterCount = (snapshot.counters[rule.id]?.accumulatedCount ?: 0) + 1,
+                        isMlbbMatchActive = false,
+                        globalDelayBeforeMs = gBefore,
+                        globalDelayAfterMs = gAfter,
+                        enableTouchLock = false
                     )
                     if (!cooldownNote.isNullOrBlank()) "$cooldownNote • $execSummary" else execSummary
                 }
             } catch (t: Throwable) {
                 "Error: ${t.message}"
             } finally {
-                _state.update { it.copy(cooldownStatusHint = "") }
+                isSingleTestRunningGuard.set(false)
+                _state.update { it.copy(cooldownStatusHint = "", isSingleTestRunning = false) }
             }
             val a11yOk = MlbbGestureAccessibilityService.peekInstance() != null
             val needsA11y = rule.actionSequence.any {
@@ -1049,11 +1431,21 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                         if (_state.value.isEmergencyStopped) {
                             "Dihentikan darurat saat tunggu cooldown"
                         } else {
+                            val snapshot = _state.value
+                            val (gBefore, gAfter) = UniversalRuleEvaluator.resolveGlobalDelayPairMs(
+                                rule = nextTask.rule,
+                                globalBeforeMs = snapshot.globalDelayBeforeMs,
+                                globalAfterMs = snapshot.globalDelayAfterMs,
+                                excludeCooldownRules = snapshot.globalDelayExcludeCooldownRules
+                            )
                             val execSummary = dispatcher.dispatchRuleActions(
                                 rule = nextTask.rule,
                                 event = nextTask.event,
                                 counterCount = nextTask.counterSnapshot.accumulatedCount,
-                                isMlbbMatchActive = _state.value.isMlbbMatchActive
+                                isMlbbMatchActive = snapshot.isMlbbMatchActive,
+                                globalDelayBeforeMs = gBefore,
+                                globalDelayAfterMs = gAfter,
+                                enableTouchLock = snapshot.blockTouchDuringChallenge
                             )
                             if (!cooldownNote.isNullOrBlank()) "$cooldownNote • $execSummary" else execSummary
                         }
@@ -1110,6 +1502,108 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         _state.update { it.copy(blockTouchDuringChallenge = enabled) }
     }
 
+    fun setDevice2SimpleMode(simple: Boolean) {
+        prefs.edit().putBoolean(KEY_DEVICE2_SIMPLE_MODE, simple).apply()
+        _state.update { it.copy(isDevice2SimpleMode = simple) }
+    }
+
+    fun setGlobalDelaySettings(
+        beforeMs: Long? = null,
+        afterMs: Long? = null,
+        excludeCooldownRules: Boolean? = null
+    ) {
+        val cur = _state.value
+        val nextBefore = (beforeMs ?: cur.globalDelayBeforeMs).coerceIn(0L, 60_000L)
+        val nextAfter = (afterMs ?: cur.globalDelayAfterMs).coerceIn(0L, 60_000L)
+        val nextExclude = excludeCooldownRules ?: cur.globalDelayExcludeCooldownRules
+        prefs.edit()
+            .putLong(KEY_GLOBAL_DELAY_BEFORE_MS, nextBefore)
+            .putLong(KEY_GLOBAL_DELAY_AFTER_MS, nextAfter)
+            .putBoolean(KEY_GLOBAL_DELAY_EXCLUDE_COOLDOWN, nextExclude)
+            .apply()
+        _state.update {
+            it.copy(
+                globalDelayBeforeMs = nextBefore,
+                globalDelayAfterMs = nextAfter,
+                globalDelayExcludeCooldownRules = nextExclude
+            )
+        }
+    }
+
+    fun setCoverEditMode(editing: Boolean) {
+        _state.update {
+            it.copy(
+                isCoverEditMode = editing,
+                isFloatingHiddenForLive = if (editing) false else it.isFloatingHiddenForLive
+            )
+        }
+    }
+
+    fun addGameCoverArea(
+        name: String,
+        posX: Float = 0.14f,
+        posY: Float = 0.24f,
+        widthRatio: Float = 0.18f,
+        heightRatio: Float = 0.24f,
+        opacity: Float = 0.98f,
+        colorHex: Long = 0xFF0B1120L
+    ): GameCoverArea {
+        val created = GameCoverArea(
+            name = name.trim().ifBlank { "Penutup #${_state.value.gameCoverAreas.size + 1}" },
+            enabled = true,
+            posX = posX.coerceIn(0.01f, 0.99f),
+            posY = posY.coerceIn(0.01f, 0.99f),
+            widthRatio = widthRatio.coerceIn(0.03f, 0.96f),
+            heightRatio = heightRatio.coerceIn(0.03f, 0.96f),
+            opacity = opacity.coerceIn(0.20f, 1.0f),
+            colorHex = colorHex
+        )
+        val updated = _state.value.gameCoverAreas + created
+        persistAndUpdateCoverAreas(updated, activeId = created.id)
+        return created
+    }
+
+    fun updateGameCoverArea(area: GameCoverArea) {
+        val clean = area.copy(
+            name = area.name.trim().ifBlank { "Penutup" },
+            posX = area.posX.coerceIn(0.01f, 0.99f),
+            posY = area.posY.coerceIn(0.01f, 0.99f),
+            widthRatio = area.widthRatio.coerceIn(0.03f, 0.96f),
+            heightRatio = area.heightRatio.coerceIn(0.03f, 0.96f),
+            opacity = area.opacity.coerceIn(0.20f, 1.0f)
+        )
+        val updated = _state.value.gameCoverAreas.map { if (it.id == clean.id) clean else it }
+        persistAndUpdateCoverAreas(updated, activeId = clean.id)
+    }
+
+    fun toggleGameCoverAreaEnabled(id: String) {
+        val updated = _state.value.gameCoverAreas.map {
+            if (it.id == id) it.copy(enabled = !it.enabled) else it
+        }
+        persistAndUpdateCoverAreas(updated)
+    }
+
+    fun selectActiveCoverArea(id: String?) {
+        _state.update { it.copy(activeCoverAreaId = id) }
+    }
+
+    fun deleteGameCoverArea(id: String) {
+        val updated = _state.value.gameCoverAreas.filterNot { it.id == id }
+        val nextActive = if (_state.value.activeCoverAreaId == id) updated.firstOrNull()?.id else _state.value.activeCoverAreaId
+        persistAndUpdateCoverAreas(updated, activeId = nextActive)
+    }
+
+    private fun persistAndUpdateCoverAreas(
+        areas: List<GameCoverArea>,
+        activeId: String? = _state.value.activeCoverAreaId
+    ) {
+        prefs.edit().putString(KEY_GAME_COVER_AREAS_JSON, UniversalInteractionJsonCodec.encodeGameCoverAreas(areas)).apply()
+        _state.update { st ->
+            val resolvedActive = activeId?.takeIf { id -> areas.any { it.id == id } } ?: areas.firstOrNull()?.id
+            st.copy(gameCoverAreas = areas, activeCoverAreaId = resolvedActive)
+        }
+    }
+
     fun updateRuleVisualCooldown(
         ruleId: String,
         enabled: Boolean? = null,
@@ -1141,6 +1635,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             pendingQueue.clear()
         }
         activeChallengeCount.set(0)
+        isSingleTestRunningGuard.set(false)
         val clampedFloating = payload.floatingConfig.copy(
             hudXRatio = payload.floatingConfig.hudXRatio.coerceIn(0f, 1f),
             hudYRatio = payload.floatingConfig.hudYRatio.coerceIn(0f, 1f),
@@ -1152,6 +1647,9 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             panelHeightRatio = payload.floatingConfig.panelHeightRatio.coerceIn(0.35f, 0.96f),
             panelOpacity = payload.floatingConfig.panelOpacity.coerceIn(0.45f, 1.0f)
         )
+        val safeGlobalBefore = payload.globalDelayBeforeMs.coerceIn(0L, 60_000L)
+        val safeGlobalAfter = payload.globalDelayAfterMs.coerceIn(0L, 60_000L)
+        val safeCovers = payload.gameCoverAreas
         prefs.edit()
             .putString(KEY_RULES, UniversalInteractionJsonCodec.encodeRules(payload.rules))
             .putString(KEY_PRESETS, UniversalInteractionJsonCodec.encodePresets(payload.presets))
@@ -1159,7 +1657,12 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             .putBoolean(KEY_ENGINE_ENABLED, payload.isEngineEnabled)
             .putBoolean(KEY_MATCH_ACTIVE, payload.isMlbbMatchActive)
             .putBoolean(KEY_BLOCK_TOUCH_DURING_CHALLENGE, payload.blockTouchDuringChallenge)
+            .putBoolean(KEY_DEVICE2_SIMPLE_MODE, payload.isDevice2SimpleMode)
             .putString(KEY_ACTIVE_SCENE, payload.activeSceneName.ifBlank { "SCENE_UTAMA" })
+            .putLong(KEY_GLOBAL_DELAY_BEFORE_MS, safeGlobalBefore)
+            .putLong(KEY_GLOBAL_DELAY_AFTER_MS, safeGlobalAfter)
+            .putBoolean(KEY_GLOBAL_DELAY_EXCLUDE_COOLDOWN, payload.globalDelayExcludeCooldownRules)
+            .putString(KEY_GAME_COVER_AREAS_JSON, UniversalInteractionJsonCodec.encodeGameCoverAreas(safeCovers))
             .apply()
 
         val initialRule = payload.rules.firstOrNull { it.isPinVisible } ?: payload.rules.firstOrNull()
@@ -1171,9 +1674,17 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                 isEngineEnabled = payload.isEngineEnabled,
                 isMlbbMatchActive = payload.isMlbbMatchActive,
                 blockTouchDuringChallenge = payload.blockTouchDuringChallenge,
+                isDevice2SimpleMode = payload.isDevice2SimpleMode,
                 isChallengeExecuting = false,
+                isSingleTestRunning = false,
                 cooldownStatusHint = "",
                 isEmergencyStopped = false,
+                globalDelayBeforeMs = safeGlobalBefore,
+                globalDelayAfterMs = safeGlobalAfter,
+                globalDelayExcludeCooldownRules = payload.globalDelayExcludeCooldownRules,
+                gameCoverAreas = safeCovers,
+                activeCoverAreaId = safeCovers.firstOrNull()?.id,
+                isCoverEditMode = false,
                 activeSceneName = payload.activeSceneName.ifBlank { "SCENE_UTAMA" },
                 floatingConfig = clampedFloating,
                 rules = payload.rules,
@@ -1666,6 +2177,16 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         val clampedX = posX.coerceIn(0.01f, 0.99f)
         val clampedY = posY.coerceIn(0.01f, 0.99f)
         val coordText = String.format(java.util.Locale.US, "%.3f,%.3f", clampedX, clampedY)
+        val visualOverlayTypes = setOf(
+            ActionType.PROFILE_OVERLAY,
+            ActionType.MEME_OVERLAY,
+            ActionType.CUSTOM_IMAGE,
+            ActionType.TEXT_OVERLAY,
+            ActionType.SHOW_OVERLAY,
+            ActionType.ANIMATION,
+            ActionType.TIER_OVERLAY,
+            ActionType.RANDOM_SELECTION
+        )
         val updated = _state.value.rules.map { rule ->
             if (rule.id != ruleId) {
                 rule
@@ -1673,20 +2194,33 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                 val touchSteps = rule.actionSequence.filter {
                     it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
                 }
-                val targetStepId = stepId ?: touchSteps.firstOrNull()?.id
-                val isFirstTouch = targetStepId == null || touchSteps.firstOrNull()?.id == targetStepId
+                val firstTouch = touchSteps.firstOrNull()
+                val targetStepId = stepId ?: firstTouch?.id
+                val isFirstTouchOrRoot = targetStepId == null || firstTouch?.id == targetStepId
+                val prevAnchorX = firstTouch?.posX ?: rule.overlayPosX
+                val prevAnchorY = firstTouch?.posY ?: rule.overlayPosY
                 rule.copy(
-                    overlayPosX = if (isFirstTouch) clampedX else rule.overlayPosX,
-                    overlayPosY = if (isFirstTouch) clampedY else rule.overlayPosY,
+                    overlayPosX = if (isFirstTouchOrRoot) clampedX else rule.overlayPosX,
+                    overlayPosY = if (isFirstTouchOrRoot) clampedY else rule.overlayPosY,
                     actionSequence = rule.actionSequence.map { step ->
                         val isExplicitTarget = stepId != null && step.id == stepId
                         val isTargetTouch = isExplicitTarget || (stepId == null && touchSteps.size <= 1 && (step.actionType == ActionType.SIMULATED_CLICK || step.actionType == ActionType.SIMULATED_SWIPE))
+                        val isVisualStepAlignedWithRoot = isFirstTouchOrRoot &&
+                            step.actionType in visualOverlayTypes && (
+                            step.posX == null ||
+                                (kotlin.math.abs((step.posX ?: prevAnchorX) - prevAnchorX) < 0.025f &&
+                                    kotlin.math.abs((step.posY ?: prevAnchorY) - prevAnchorY) < 0.025f)
+                            )
                         when {
+                            isExplicitTarget && step.actionType == ActionType.SIMULATED_CLICK ->
+                                step.copy(paramValue = coordText, posX = clampedX, posY = clampedY)
+                            isExplicitTarget ->
+                                step.copy(posX = clampedX, posY = clampedY)
                             isTargetTouch && step.actionType == ActionType.SIMULATED_CLICK ->
                                 step.copy(paramValue = coordText, posX = clampedX, posY = clampedY)
                             isTargetTouch ->
                                 step.copy(posX = clampedX, posY = clampedY)
-                            isFirstTouch && step.actionType == ActionType.CUSTOM_IMAGE ->
+                            isVisualStepAlignedWithRoot ->
                                 step.copy(posX = clampedX, posY = clampedY)
                             else -> step
                         }
@@ -1706,6 +2240,9 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         val targetStep = stepId?.let { id -> rule.actionSequence.firstOrNull { it.id == id } }
             ?: rule.actionSequence.firstOrNull {
                 it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+            }
+            ?: rule.actionSequence.firstOrNull {
+                it.enabled && (it.actionType == ActionType.PROFILE_OVERLAY || it.actionType == ActionType.MEME_OVERLAY || it.actionType == ActionType.CUSTOM_IMAGE)
             }
         val curX = targetStep?.posX ?: rule.overlayPosX
         val curY = targetStep?.posY ?: rule.overlayPosY

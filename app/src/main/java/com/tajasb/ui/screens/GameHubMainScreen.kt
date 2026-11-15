@@ -343,6 +343,9 @@ private fun TermuxRelayTabContent(
 ) {
     val context = LocalContext.current
 
+    val relayConfig by brokerPrefs.config.collectAsState()
+    val controllerUrl = "http://${relayConfig.serverHost}:${relayConfig.serverPort}/controller"
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -383,7 +386,7 @@ private fun TermuxRelayTabContent(
                         )
                     }
                     Text(
-                        text = "Port: 8765",
+                        text = "Port: ${relayConfig.serverPort}",
                         color = EmeraldGreen,
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Bold
@@ -391,13 +394,19 @@ private fun TermuxRelayTabContent(
                 }
 
                 Text(
-                    text = "Jalankan perintah ini di Termux (Device 1) untuk membaca stream live dan meneruskannya ke MLBB Live Studio:",
+                    text = "Jalankan perintah ini di Termux (Device 1) sebagai Server Live sekaligus Web Controller detail untuk Device 2:",
                     fontSize = 8.5.sp,
                     color = Color(0xFFCBD5E1)
                 )
 
                 TermuxCommandRow(
-                    label = "1. Jalankan TikTok Live Server:",
+                    label = "0. Node.js TikTok Broker (Direkomendasikan):",
+                    cmd = "node tools/tiktok_event_node.js",
+                    onCopy = { copyToClipboard(context, "Node TikTok Broker", "node tools/tiktok_event_node.js") }
+                )
+
+                TermuxCommandRow(
+                    label = "1. Jalankan TikTok Live Server (Python):",
                     cmd = "python tools/tiktok_event_server.py",
                     onCopy = { copyToClipboard(context, "TikTok Server", "python tools/tiktok_event_server.py") }
                 )
@@ -412,6 +421,12 @@ private fun TermuxRelayTabContent(
                     label = "3. Eksekusi Script Update Pipeline:",
                     cmd = "bash update.sh",
                     onCopy = { copyToClipboard(context, "Update Script", "bash update.sh") }
+                )
+
+                TermuxCommandRow(
+                    label = "🎛️ Controller Web Device 1 (2-HP) — Buka di Browser Device 1:",
+                    cmd = controllerUrl,
+                    onCopy = { copyToClipboard(context, "URL Controller Web", controllerUrl) }
                 )
             }
         }

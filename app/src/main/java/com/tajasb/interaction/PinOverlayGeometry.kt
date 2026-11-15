@@ -180,3 +180,67 @@ object TouchBlockerHoleGeometry {
         return panels
     }
 }
+
+data class OverlayAnchorLayout(
+    val left: Int,
+    val top: Int
+)
+
+/**
+ * Menjangkar pusat media utama (foto profil bulat / gambar meme) tepat di titik pin (normX, normY)
+ * sehingga judul/subjudul di bawah foto tidak menarik avatar bergeser ke atas.
+ */
+object OverlayAnchorGeometry {
+
+    fun computeCardTopLeft(
+        normX: Float,
+        normY: Float,
+        screenW: Int,
+        screenH: Int,
+        cardWidthPx: Int,
+        cardHeightPx: Int,
+        primaryMediaHeightPx: Int = 0
+    ): OverlayAnchorLayout {
+        val safeScreenW = screenW.coerceAtLeast(2)
+        val safeScreenH = screenH.coerceAtLeast(2)
+        val cw = cardWidthPx.coerceAtLeast(1)
+        val ch = cardHeightPx.coerceAtLeast(1)
+        val targetPx = (normX.coerceIn(0.01f, 0.99f) * safeScreenW).roundToInt()
+        val targetPy = (normY.coerceIn(0.01f, 0.99f) * safeScreenH).roundToInt()
+        val left = (targetPx - cw / 2f).roundToInt().coerceIn(0, (safeScreenW - cw).coerceAtLeast(0))
+        val anchorOffsetY = if (primaryMediaHeightPx > 0) {
+            primaryMediaHeightPx / 2f
+        } else {
+            ch / 2f
+        }
+        val top = (targetPy - anchorOffsetY).roundToInt().coerceIn(0, (safeScreenH - ch).coerceAtLeast(0))
+        return OverlayAnchorLayout(left = left, top = top)
+    }
+}
+
+/**
+ * Kalkulasi geometri persegi area penutup layar game (minimap/chat/room ID) dalam piksel.
+ */
+object GameCoverGeometry {
+
+    fun computeCoverRectPx(
+        centerNormX: Float,
+        centerNormY: Float,
+        widthRatio: Float,
+        heightRatio: Float,
+        screenW: Int,
+        screenH: Int,
+        minSizePx: Int = 28
+    ): PixelRect {
+        val safeW = screenW.coerceAtLeast(minSizePx)
+        val safeH = screenH.coerceAtLeast(minSizePx)
+        val w = (safeW * widthRatio.coerceIn(0.03f, 0.96f)).roundToInt().coerceIn(minSizePx, safeW)
+        val h = (safeH * heightRatio.coerceIn(0.03f, 0.96f)).roundToInt().coerceIn(minSizePx, safeH)
+        val cx = (centerNormX.coerceIn(0.01f, 0.99f) * safeW).roundToInt()
+        val cy = (centerNormY.coerceIn(0.01f, 0.99f) * safeH).roundToInt()
+        val left = (cx - w / 2).coerceIn(0, (safeW - w).coerceAtLeast(0))
+        val top = (cy - h / 2).coerceIn(0, (safeH - h).coerceAtLeast(0))
+        return PixelRect(left = left, top = top, right = left + w, bottom = top + h)
+    }
+}
+

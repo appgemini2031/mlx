@@ -59,14 +59,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -388,6 +393,8 @@ fun FlexibleTriggerEditorOverlay(
                             NumberFieldBox(
                                 label = "Threshold",
                                 value = draft.thresholdValue.toString(),
+                                minValue = 1L,
+                                resetKey = draft.id,
                                 onValueChange = {
                                     it.filter(Char::isDigit).toIntOrNull()?.let { n ->
                                         draft = draft.copy(thresholdValue = n.coerceAtLeast(1))
@@ -398,9 +405,11 @@ fun FlexibleTriggerEditorOverlay(
                             NumberFieldBox(
                                 label = "Combo (ms)",
                                 value = draft.comboWindowMs.toString(),
+                                minValue = 0L,
+                                resetKey = draft.id,
                                 onValueChange = {
                                     it.filter(Char::isDigit).toLongOrNull()?.let { n ->
-                                        draft = draft.copy(comboWindowMs = n.coerceAtLeast(200L))
+                                        draft = draft.copy(comboWindowMs = n.coerceIn(0L, 60_000L))
                                     }
                                 },
                                 modifier = Modifier.weight(1f)
@@ -408,6 +417,8 @@ fun FlexibleTriggerEditorOverlay(
                             NumberFieldBox(
                                 label = "Milestone",
                                 value = draft.milestoneStep.toString(),
+                                minValue = 1L,
+                                resetKey = draft.id,
                                 onValueChange = {
                                     it.filter(Char::isDigit).toIntOrNull()?.let { n ->
                                         draft = draft.copy(milestoneStep = n.coerceAtLeast(1))
@@ -422,6 +433,8 @@ fun FlexibleTriggerEditorOverlay(
                             enabled = draft.enableMinimumQuantity,
                             onToggle = { draft = draft.copy(enableMinimumQuantity = it) },
                             value = draft.minimumQuantity.toString(),
+                            minValue = 1L,
+                            resetKey = draft.id,
                             onValueChange = {
                                 it.filter(Char::isDigit).toIntOrNull()?.let { n ->
                                     draft = draft.copy(minimumQuantity = n.coerceAtLeast(1))
@@ -597,6 +610,8 @@ fun FlexibleTriggerEditorOverlay(
                                     enabled = draft.enableDelayBefore,
                                     onToggle = { draft = draft.copy(enableDelayBefore = it) },
                                     value = draft.delayBeforeMs.toString(),
+                                    minValue = 0L,
+                                    resetKey = draft.id,
                                     onValueChange = {
                                         it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(delayBeforeMs = v) }
                                     },
@@ -608,6 +623,8 @@ fun FlexibleTriggerEditorOverlay(
                                 enabled = draft.enableDelayAfter,
                                 onToggle = { draft = draft.copy(enableDelayAfter = it) },
                                 value = draft.delayAfterMs.toString(),
+                                minValue = 0L,
+                                resetKey = draft.id,
                                 onValueChange = {
                                     it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(delayAfterMs = v) }
                                 },
@@ -618,6 +635,8 @@ fun FlexibleTriggerEditorOverlay(
                                 enabled = draft.enableInterval,
                                 onToggle = { draft = draft.copy(enableInterval = it) },
                                 value = draft.intervalMs.toString(),
+                                minValue = 0L,
+                                resetKey = draft.id,
                                 onValueChange = {
                                     it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(intervalMs = v) }
                                 },
@@ -628,9 +647,11 @@ fun FlexibleTriggerEditorOverlay(
                                 enabled = draft.enableDuration,
                                 onToggle = { draft = draft.copy(enableDuration = it) },
                                 value = draft.durationMs.toString(),
+                                minValue = 0L,
+                                resetKey = draft.id,
                                 onValueChange = {
                                     it.filter(Char::isDigit).toLongOrNull()?.let { v ->
-                                        draft = draft.copy(durationMs = v.coerceAtLeast(100L))
+                                        draft = draft.copy(durationMs = v.coerceIn(0L, 60_000L))
                                     }
                                 },
                                 unit = "ms"
@@ -640,6 +661,8 @@ fun FlexibleTriggerEditorOverlay(
                                 enabled = draft.enableRepeat,
                                 onToggle = { draft = draft.copy(enableRepeat = it) },
                                 value = draft.repeatCount.toString(),
+                                minValue = 1L,
+                                resetKey = draft.id,
                                 onValueChange = {
                                     it.filter(Char::isDigit).toIntOrNull()?.let { v ->
                                         draft = draft.copy(repeatCount = v.coerceIn(1, 30))
@@ -652,6 +675,8 @@ fun FlexibleTriggerEditorOverlay(
                                 enabled = draft.enableCooldown,
                                 onToggle = { draft = draft.copy(enableCooldown = it) },
                                 value = draft.cooldownMs.toString(),
+                                minValue = 0L,
+                                resetKey = draft.id,
                                 onValueChange = {
                                     it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(cooldownMs = v) }
                                 },
@@ -662,6 +687,8 @@ fun FlexibleTriggerEditorOverlay(
                                 enabled = draft.enablePriority,
                                 onToggle = { draft = draft.copy(enablePriority = it) },
                                 value = draft.priority.toString(),
+                                minValue = 1L,
+                                resetKey = draft.id,
                                 onValueChange = {
                                     it.filter(Char::isDigit).toIntOrNull()?.let { v ->
                                         draft = draft.copy(priority = v.coerceIn(1, 100))
@@ -692,6 +719,8 @@ fun FlexibleTriggerEditorOverlay(
                                     NumberFieldBox(
                                         label = "Min",
                                         value = draft.randomDelayMinMs.toString(),
+                                        minValue = 0L,
+                                        resetKey = draft.id,
                                         onValueChange = {
                                             it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(randomDelayMinMs = v) }
                                         },
@@ -700,6 +729,8 @@ fun FlexibleTriggerEditorOverlay(
                                     NumberFieldBox(
                                         label = "Max",
                                         value = draft.randomDelayMaxMs.toString(),
+                                        minValue = 0L,
+                                        resetKey = draft.id,
                                         onValueChange = {
                                             it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(randomDelayMaxMs = v) }
                                         },
@@ -753,9 +784,11 @@ fun FlexibleTriggerEditorOverlay(
                                     NumberFieldBox(
                                         label = "Idle Reset Timeout (ms)",
                                         value = draft.resetTimeoutMs.toString(),
+                                        minValue = 0L,
+                                        resetKey = draft.id,
                                         onValueChange = {
                                             it.filter(Char::isDigit).toLongOrNull()?.let { v ->
-                                                draft = draft.copy(resetTimeoutMs = v.coerceAtLeast(1000L))
+                                                draft = draft.copy(resetTimeoutMs = v.coerceAtLeast(0L))
                                             }
                                         },
                                         modifier = Modifier.fillMaxWidth()
@@ -1217,21 +1250,26 @@ private fun ActionStepCard(
             NumberFieldBox(
                 label = "Delay",
                 value = step.delayMs.toString(),
+                minValue = 0L,
+                resetKey = step.id,
                 onValueChange = { it.filter(Char::isDigit).toLongOrNull()?.let { v -> onUpdate(step.copy(delayMs = v)) } },
                 modifier = Modifier.weight(1f)
             )
             NumberFieldBox(
                 label = "Durasi",
                 value = step.durationMs.toString(),
+                minValue = 0L,
+                resetKey = step.id,
                 onValueChange = { raw ->
-                    val minDur = if (step.actionType == ActionType.SIMULATED_CLICK) 0L else 60L
-                    raw.filter(Char::isDigit).toLongOrNull()?.let { v -> onUpdate(step.copy(durationMs = v.coerceAtLeast(minDur))) }
+                    raw.filter(Char::isDigit).toLongOrNull()?.let { v -> onUpdate(step.copy(durationMs = v.coerceAtLeast(0L))) }
                 },
                 modifier = Modifier.weight(1f)
             )
             NumberFieldBox(
                 label = "Ulang",
                 value = step.repeatCount.toString(),
+                minValue = 1L,
+                resetKey = step.id,
                 onValueChange = { it.filter(Char::isDigit).toIntOrNull()?.let { v -> onUpdate(step.copy(repeatCount = v.coerceIn(1, 20))) } },
                 modifier = Modifier.weight(0.8f)
             )
@@ -1321,18 +1359,24 @@ fun UniversalPresetEditorOverlay(
                         NumberFieldBox(
                             label = "Threshold",
                             value = draft.thresholdValue.toString(),
+                            minValue = 1L,
+                            resetKey = draft.id,
                             onValueChange = { it.filter(Char::isDigit).toIntOrNull()?.let { v -> draft = draft.copy(thresholdValue = v.coerceAtLeast(1)) } },
                             modifier = Modifier.weight(1f)
                         )
                         NumberFieldBox(
                             label = "Durasi",
                             value = draft.durationMs.toString(),
-                            onValueChange = { it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(durationMs = v.coerceAtLeast(100L)) } },
+                            minValue = 0L,
+                            resetKey = draft.id,
+                            onValueChange = { it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(durationMs = v.coerceIn(0L, 60_000L)) } },
                             modifier = Modifier.weight(1f)
                         )
                         NumberFieldBox(
                             label = "Cooldown",
                             value = draft.cooldownMs.toString(),
+                            minValue = 0L,
+                            resetKey = draft.id,
                             onValueChange = { it.filter(Char::isDigit).toLongOrNull()?.let { v -> draft = draft.copy(cooldownMs = v) } },
                             modifier = Modifier.weight(1f)
                         )
@@ -1620,8 +1664,30 @@ private fun ToggleNumberParamRow(
     onToggle: (Boolean) -> Unit,
     value: String,
     onValueChange: (String) -> Unit,
-    unit: String
+    unit: String,
+    minValue: Long = 0L,
+    resetKey: Any? = Unit
 ) {
+    var rawText by remember(resetKey) { mutableStateOf(value) }
+    var isFocused by remember(resetKey) { mutableStateOf(false) }
+
+    LaunchedEffect(value, isFocused) {
+        if (!isFocused && rawText != value) {
+            rawText = value
+        }
+    }
+
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    fun commitOnLeave() {
+        val trimmed = rawText.trim()
+        val resolved = if (trimmed.isEmpty()) minValue else (trimmed.toLongOrNull() ?: minValue).coerceAtLeast(minValue)
+        val asText = resolved.toString()
+        rawText = asText
+        onValueChange(asText)
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1640,12 +1706,37 @@ private fun ToggleNumberParamRow(
             modifier = Modifier.weight(1f)
         )
         OutlinedTextField(
-            value = value,
-            onValueChange = onValueChange,
+            value = rawText,
+            onValueChange = { incoming ->
+                val digits = incoming.filter(Char::isDigit).take(6)
+                rawText = digits
+                if (digits.isNotEmpty()) {
+                    val v = digits.toLongOrNull() ?: 0L
+                    if (v >= minValue) {
+                        onValueChange(digits)
+                    }
+                } else if (minValue == 0L) {
+                    onValueChange("0")
+                }
+            },
             singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(
+                onDone = {
+                    commitOnLeave()
+                    focusManager.clearFocus()
+                    keyboardController?.hide()
+                }
+            ),
             suffix = { Text(unit, fontSize = 8.sp, color = Color(0xFF94A3B8)) },
-            modifier = Modifier.width(98.dp),
+            modifier = Modifier
+                .width(98.dp)
+                .onFocusChanged { fs ->
+                    if (isFocused && !fs.isFocused) {
+                        commitOnLeave()
+                    }
+                    isFocused = fs.isFocused
+                },
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = Color.White,
                 unfocusedTextColor = if (enabled) Color.White else Color(0xFF64748B),
@@ -1661,15 +1752,60 @@ private fun NumberFieldBox(
     label: String,
     value: String,
     onValueChange: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    minValue: Long = 0L,
+    resetKey: Any? = Unit
 ) {
+    var rawText by remember(resetKey) { mutableStateOf(value) }
+    var isFocused by remember(resetKey) { mutableStateOf(false) }
+
+    LaunchedEffect(value, isFocused) {
+        if (!isFocused && rawText != value) {
+            rawText = value
+        }
+    }
+
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    fun commitOnLeave() {
+        val trimmed = rawText.trim()
+        val resolved = if (trimmed.isEmpty()) minValue else (trimmed.toLongOrNull() ?: minValue).coerceAtLeast(minValue)
+        val asText = resolved.toString()
+        rawText = asText
+        onValueChange(asText)
+    }
+
     OutlinedTextField(
-        value = value,
-        onValueChange = onValueChange,
+        value = rawText,
+        onValueChange = { incoming ->
+            val digits = incoming.filter(Char::isDigit).take(6)
+            rawText = digits
+            if (digits.isNotEmpty()) {
+                val v = digits.toLongOrNull() ?: 0L
+                if (v >= minValue) {
+                    onValueChange(digits)
+                }
+            } else if (minValue == 0L) {
+                onValueChange("0")
+            }
+        },
         label = { Text(label, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         singleLine = true,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        modifier = modifier,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(
+            onDone = {
+                commitOnLeave()
+                focusManager.clearFocus()
+                keyboardController?.hide()
+            }
+        ),
+        modifier = modifier.onFocusChanged { fs ->
+            if (isFocused && !fs.isFocused) {
+                commitOnLeave()
+            }
+            isFocused = fs.isFocused
+        },
         colors = OutlinedTextFieldDefaults.colors(
             focusedTextColor = Color.White,
             unfocusedTextColor = Color.White,

@@ -12,6 +12,11 @@ data class FullAppBackupPayload(
     val isEngineEnabled: Boolean = true,
     val isMlbbMatchActive: Boolean = false,
     val blockTouchDuringChallenge: Boolean = true,
+    val isDevice2SimpleMode: Boolean = true,
+    val globalDelayBeforeMs: Long = 0L,
+    val globalDelayAfterMs: Long = 0L,
+    val globalDelayExcludeCooldownRules: Boolean = true,
+    val gameCoverAreas: List<GameCoverArea> = emptyList(),
     val activeSceneName: String = "SCENE_UTAMA",
     val floatingConfig: FloatingWindowConfig = FloatingWindowConfig(),
     val rules: List<UniversalTriggerRule> = emptyList(),
@@ -30,6 +35,13 @@ object FullAppBackupJsonCodec {
                 put("isEngineEnabled", payload.isEngineEnabled)
                 put("isMlbbMatchActive", payload.isMlbbMatchActive)
                 put("blockTouchDuringChallenge", payload.blockTouchDuringChallenge)
+                put("isDevice2SimpleMode", payload.isDevice2SimpleMode)
+                put("globalDelayBeforeMs", payload.globalDelayBeforeMs)
+                put("globalDelayAfterMs", payload.globalDelayAfterMs)
+                put("globalDelayExcludeCooldownRules", payload.globalDelayExcludeCooldownRules)
+                put("gameCoverAreas", JSONArray().apply {
+                    payload.gameCoverAreas.forEach { put(UniversalInteractionJsonCodec.coverAreaToJson(it)) }
+                })
                 put("activeSceneName", payload.activeSceneName)
                 put("floatingConfig", JSONObject(UniversalInteractionJsonCodec.encodeFloatingConfig(payload.floatingConfig)))
                 put("rules", JSONArray().apply {
@@ -76,6 +88,13 @@ object FullAppBackupJsonCodec {
                 FloatingWindowConfig()
             }
 
+            val coverArr = uObj.optJSONArray("gameCoverAreas")
+            val coverAreas = if (coverArr != null) {
+                (0 until coverArr.length()).mapNotNull { i ->
+                    coverArr.optJSONObject(i)?.let { UniversalInteractionJsonCodec.jsonToCoverArea(it) }
+                }
+            } else emptyList()
+
             val leObj = root.optJSONObject("liveEvent")
             val liveCfg = if (leObj != null) jsonToLiveEventConfig(leObj) else LiveEventConfig()
 
@@ -86,6 +105,11 @@ object FullAppBackupJsonCodec {
                     isEngineEnabled = uObj.optBoolean("isEngineEnabled", true),
                     isMlbbMatchActive = uObj.optBoolean("isMlbbMatchActive", false),
                     blockTouchDuringChallenge = uObj.optBoolean("blockTouchDuringChallenge", true),
+                    isDevice2SimpleMode = uObj.optBoolean("isDevice2SimpleMode", true),
+                    globalDelayBeforeMs = uObj.optLong("globalDelayBeforeMs", 0L).coerceIn(0L, 60_000L),
+                    globalDelayAfterMs = uObj.optLong("globalDelayAfterMs", 0L).coerceIn(0L, 60_000L),
+                    globalDelayExcludeCooldownRules = uObj.optBoolean("globalDelayExcludeCooldownRules", true),
+                    gameCoverAreas = coverAreas,
                     activeSceneName = uObj.optString("activeSceneName", "SCENE_UTAMA").ifBlank { "SCENE_UTAMA" },
                     floatingConfig = fc,
                     rules = rules,
@@ -300,6 +324,11 @@ object FullAppBackupManager {
             isEngineEnabled = u.isEngineEnabled,
             isMlbbMatchActive = u.isMlbbMatchActive,
             blockTouchDuringChallenge = u.blockTouchDuringChallenge,
+            isDevice2SimpleMode = u.isDevice2SimpleMode,
+            globalDelayBeforeMs = u.globalDelayBeforeMs,
+            globalDelayAfterMs = u.globalDelayAfterMs,
+            globalDelayExcludeCooldownRules = u.globalDelayExcludeCooldownRules,
+            gameCoverAreas = u.gameCoverAreas,
             activeSceneName = u.activeSceneName,
             floatingConfig = u.floatingConfig,
             rules = u.rules,

@@ -83,6 +83,9 @@ import com.example.ui.theme.EmeraldGreen
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonOrange
 import com.example.ui.theme.NeonPurple
+import com.tajasb.eventrelay.ConnectionStatus
+import com.tajasb.eventrelay.LiveEventPreferences
+import com.tajasb.eventrelay.LiveEventReceiver
 import com.tajasb.interaction.ActionType
 import com.tajasb.interaction.ConceptGrouper
 import com.tajasb.interaction.ConceptGroupingMode
@@ -101,6 +104,7 @@ import com.tajasb.interaction.UniversalTriggerEngine
 import com.tajasb.interaction.UniversalTriggerRule
 import com.tajasb.interaction.UniversalTriggerSource
 import com.tajasb.ui.components.ConfirmDeleteTextButton
+import com.tajasb.ui.components.OutlinedMsTextField
 import com.tajasb.ui.components.PrecisionStepperBar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -113,6 +117,7 @@ import kotlin.math.roundToInt
  * 1) Cek 2 izin utama: Overlay (Pin + HUD mini) & Aksesibilitas (Tap/Swipe nyata ke tombol MLBB).
  * 2) Saklar HUD Floating Minimalis atau langsung Mode Live Bersih tanpa floating.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun UniversalInteractionScreen(
     modifier: Modifier = Modifier
@@ -121,6 +126,11 @@ fun UniversalInteractionScreen(
     val engine = remember { UniversalTriggerEngine.getInstance(context) }
     val uiState by engine.state.collectAsState()
     val a11yConnected by MlbbGestureAccessibilityService.isConnected.collectAsState()
+    val relayPrefs = remember { LiveEventPreferences.getInstance(context) }
+    val relayConfig by relayPrefs.config.collectAsState()
+    val relayReceiver = remember { LiveEventReceiver.getInstance(context) }
+    val relayStatus by relayReceiver.connectionStatus.collectAsState()
+    val controllerUrl = "http://${relayConfig.serverHost}:${relayConfig.serverPort}/controller"
 
     var hasOverlayPermission by remember {
         mutableStateOf(FloatingTriggerOverlayService.canDrawOverlays(context))
@@ -446,6 +456,434 @@ fun UniversalInteractionScreen(
                         fontSize = 8.5.sp,
                         lineHeight = 12.5.sp
                     )
+                }
+            }
+        }
+
+        // Card Mode Kerja (2-HP Split Control vs 1-HP Solo Lengkap)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = DarkSurface),
+            border = BorderStroke(
+                1.dp,
+                if (uiState.isDevice2SimpleMode) NeonCyan.copy(alpha = 0.65f) else NeonPurple.copy(alpha = 0.65f)
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (uiState.isDevice2SimpleMode) "📱 Mode Kerja: 2-HP Simpel" else "🎛️ Mode Kerja: 1-HP Lengkap",
+                        color = if (uiState.isDevice2SimpleMode) NeonCyan else NeonPurple,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Black
+                    )
+                    Text(
+                        text = if (relayStatus == ConnectionStatus.CONNECTED) "● Termux Tersambung" else "○ Termux Offline",
+                        color = if (relayStatus == ConnectionStatus.CONNECTED) EmeraldGreen else Color(0xFF94A3B8),
+                        fontSize = 8.8.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val isSimple = uiState.isDevice2SimpleMode
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(if (isSimple) NeonCyan.copy(alpha = 0.2f) else DarkBackground)
+                            .border(1.dp, if (isSimple) NeonCyan else DarkCardBorder, RoundedCornerShape(9.dp))
+                            .clickable { engine.setDevice2SimpleMode(true) }
+                            .padding(vertical = 8.dp, horizontal = 6.dp)
+                            .testTag("mode_2hp_simple_btn"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "📱 Simpel (2-HP)",
+                            color = if (isSimple) NeonCyan else Color(0xFFCBD5E1),
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.Black
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(if (!isSimple) NeonPurple.copy(alpha = 0.22f) else DarkBackground)
+                            .border(1.dp, if (!isSimple) NeonPurple else DarkCardBorder, RoundedCornerShape(9.dp))
+                            .clickable { engine.setDevice2SimpleMode(false) }
+                            .padding(vertical = 8.dp, horizontal = 6.dp)
+                            .testTag("mode_1hp_full_btn"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "🎛️ Lengkap (1-HP)",
+                            color = if (!isSimple) NeonPurple else Color(0xFFCBD5E1),
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.Black
+                        )
+                    }
+                }
+
+                if (uiState.isDevice2SimpleMode) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(DarkBackground)
+                            .border(0.8.dp, NeonCyan.copy(alpha = 0.45f), RoundedCornerShape(9.dp))
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Kontroler Web Device 1:",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 8.2.sp
+                            )
+                            Text(
+                                text = controllerUrl,
+                                color = EmeraldGreen,
+                                fontSize = 9.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "HP ini fokus + Konsep, Pin & Koreo. Detail delay, OCR scan & syarat diatur di Web Device 1.",
+                                color = Color(0xFFCBD5E1),
+                                fontSize = 8.sp,
+                                lineHeight = 11.5.sp
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                cm?.setPrimaryClip(ClipData.newPlainText("Controller URL", controllerUrl))
+                                Toast.makeText(context, "📋 URL Kontroler disalin: $controllerUrl", Toast.LENGTH_SHORT).show()
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text("📋 Salin", fontSize = 8.8.sp, color = NeonCyan, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                } else {
+                    Text(
+                        text = "Semua pengaturan detail (Delay Global, Delay Scan Cooldown OCR, ms langkah, syarat & backup JSON) terbuka langsung di HP ini.",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 8.5.sp
+                    )
+                }
+            }
+        }
+
+        // Card Delay Global Sebelum & Sesudah Aksi (disembunyikan di Mode 2-HP Simpel)
+        if (!uiState.isDevice2SimpleMode) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = DarkSurface),
+            border = BorderStroke(
+                1.dp,
+                if (uiState.globalDelayBeforeMs > 0L || uiState.globalDelayAfterMs > 0L) {
+                    NeonCyan.copy(alpha = 0.65f)
+                } else {
+                    DarkCardBorder
+                }
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "⏱️ Delay Global (Sebelum & Sesudah Aksi)",
+                    color = NeonCyan,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "Atur jeda global sebelum dan sesudah koreografi berjalan. Bisa diisi 0 ms. Konsep dengan Delay Scan Cooldown ML bisa dikecualikan otomatis.",
+                    color = Color(0xFF94A3B8),
+                    fontSize = 9.sp
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedMsTextField(
+                        label = "Delay Sebelum (ms)",
+                        value = uiState.globalDelayBeforeMs,
+                        onValueCommitted = { v -> engine.setGlobalDelaySettings(beforeMs = v) },
+                        minValue = 0L,
+                        maxValue = 60_000L,
+                        maxDigits = 5,
+                        resetKey = "screen_global_before",
+                        modifier = Modifier.weight(1f).testTag("global_delay_before_input")
+                    )
+                    OutlinedMsTextField(
+                        label = "Delay Sesudah (ms)",
+                        value = uiState.globalDelayAfterMs,
+                        onValueCommitted = { v -> engine.setGlobalDelaySettings(afterMs = v) },
+                        minValue = 0L,
+                        maxValue = 60_000L,
+                        maxDigits = 5,
+                        resetKey = "screen_global_after",
+                        modifier = Modifier.weight(1f).testTag("global_delay_after_input")
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(DarkBackground)
+                        .border(0.8.dp, DarkCardBorder, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Kecualikan konsep Delay Scan Cooldown ML",
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Konsep yang memakai scan cooldown skill langsung jalan tanpa delay global.",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 8.2.sp
+                        )
+                    }
+                    Switch(
+                        checked = uiState.globalDelayExcludeCooldownRules,
+                        onCheckedChange = { engine.setGlobalDelaySettings(excludeCooldownRules = it) },
+                        modifier = Modifier.testTag("global_delay_exclude_cooldown_switch"),
+                        colors = SwitchDefaults.colors(checkedTrackColor = NeonCyan)
+                    )
+                }
+            }
+        }
+        }
+
+        // Card Area Penutup Layar Game (Custom Ukuran & Posisi)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = DarkSurface),
+            border = BorderStroke(
+                1.dp,
+                if (uiState.isCoverEditMode || uiState.gameCoverAreas.any { it.enabled }) {
+                    NeonPurple.copy(alpha = 0.65f)
+                } else {
+                    DarkCardBorder
+                }
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "🛡️ Area Penutup Layar Game (${uiState.gameCoverAreas.count { it.enabled }}/${uiState.gameCoverAreas.size})",
+                            color = NeonPurple,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Tutup minimap, chat, atau ID lobby dengan ukuran bebas. Sentuhan game tetap tembus saat main.",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 8.8.sp
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val nextEdit = !uiState.isCoverEditMode
+                            if (nextEdit && !uiState.isFloatingOverlayRunning) {
+                                if (!FloatingTriggerOverlayService.canDrawOverlays(context)) {
+                                    requestFloatingToggle(true)
+                                    return@OutlinedButton
+                                }
+                                FloatingTriggerOverlayService.start(
+                                    context = context,
+                                    startInEditMode = false,
+                                    openSettingsPanel = false,
+                                    hideFloatingForLive = false
+                                )
+                            }
+                            engine.setCoverEditMode(nextEdit)
+                        },
+                        modifier = Modifier.testTag("toggle_cover_edit_mode_btn")
+                    ) {
+                        Text(
+                            text = if (uiState.isCoverEditMode) "✓ Selesai Atur" else "✥ Atur di Layar",
+                            fontSize = 9.5.sp,
+                            color = if (uiState.isCoverEditMode) EmeraldGreen else NeonPurple,
+                            fontWeight = FontWeight.Black
+                        )
+                    }
+                }
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    fun addPresetCover(name: String, px: Float, py: Float, wr: Float, hr: Float) {
+                        engine.addGameCoverArea(name = name, posX = px, posY = py, widthRatio = wr, heightRatio = hr)
+                        if (FloatingTriggerOverlayService.canDrawOverlays(context)) {
+                            if (!uiState.isFloatingOverlayRunning) {
+                                FloatingTriggerOverlayService.start(
+                                    context = context,
+                                    startInEditMode = false,
+                                    openSettingsPanel = false,
+                                    hideFloatingForLive = false
+                                )
+                            }
+                            engine.setCoverEditMode(true)
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = { addPresetCover("Minimap", 0.12f, 0.22f, 0.16f, 0.26f) },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) { Text("+ Minimap", fontSize = 9.sp, color = NeonCyan, fontWeight = FontWeight.Bold) }
+                    OutlinedButton(
+                        onClick = { addPresetCover("Chat/Lobby", 0.24f, 0.78f, 0.28f, 0.18f) },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) { Text("+ Chat/Lobby", fontSize = 9.sp, color = NeonOrange, fontWeight = FontWeight.Bold) }
+                    OutlinedButton(
+                        onClick = {
+                            addPresetCover(
+                                name = "Custom ${uiState.gameCoverAreas.size + 1}",
+                                px = 0.50f,
+                                py = 0.50f,
+                                wr = 0.22f,
+                                hr = 0.22f
+                            )
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) { Text("+ Area Custom", fontSize = 9.sp, color = EmeraldGreen, fontWeight = FontWeight.Bold) }
+                }
+
+                if (uiState.gameCoverAreas.isNotEmpty()) {
+                    val activeCover = uiState.gameCoverAreas.firstOrNull { it.id == uiState.activeCoverAreaId }
+                        ?: uiState.gameCoverAreas.first()
+                    uiState.gameCoverAreas.forEach { area ->
+                        val selected = area.id == activeCover.id
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (selected) NeonPurple.copy(alpha = 0.14f) else DarkBackground)
+                                .border(
+                                    0.8.dp,
+                                    if (selected) NeonPurple else DarkCardBorder,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .clickable { engine.selectActiveCoverArea(area.id) }
+                                .padding(horizontal = 8.dp, vertical = 5.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = area.name,
+                                    color = if (area.enabled) Color.White else Color(0xFF64748B),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "Ukuran ${(area.widthRatio * 100).roundToInt()}% × ${(area.heightRatio * 100).roundToInt()}% • Opacity ${(area.opacity * 100).roundToInt()}%",
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 8.sp
+                                )
+                            }
+                            Switch(
+                                checked = area.enabled,
+                                onCheckedChange = { engine.toggleGameCoverAreaEnabled(area.id) },
+                                colors = SwitchDefaults.colors(checkedTrackColor = EmeraldGreen)
+                            )
+                            ConfirmDeleteTextButton(
+                                label = "Hapus",
+                                fontSize = 8.5.sp,
+                                horizontalPadding = 7.dp,
+                                verticalPadding = 5.dp
+                            ) {
+                                engine.deleteGameCoverArea(area.id)
+                            }
+                        }
+                    }
+
+                    if (!uiState.isDevice2SimpleMode) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            PrecisionStepperBar(
+                                label = "Lebar",
+                                valueText = "${(activeCover.widthRatio * 100).roundToInt()}%",
+                                accent = NeonCyan,
+                                onDecrementCoarse = {
+                                    engine.updateGameCoverArea(activeCover.copy(widthRatio = (activeCover.widthRatio - 0.05f).coerceIn(0.03f, 0.96f)))
+                                },
+                                onDecrement = {
+                                    engine.updateGameCoverArea(activeCover.copy(widthRatio = (activeCover.widthRatio - 0.01f).coerceIn(0.03f, 0.96f)))
+                                },
+                                onIncrement = {
+                                    engine.updateGameCoverArea(activeCover.copy(widthRatio = (activeCover.widthRatio + 0.01f).coerceIn(0.03f, 0.96f)))
+                                },
+                                onIncrementCoarse = {
+                                    engine.updateGameCoverArea(activeCover.copy(widthRatio = (activeCover.widthRatio + 0.05f).coerceIn(0.03f, 0.96f)))
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            PrecisionStepperBar(
+                                label = "Tinggi",
+                                valueText = "${(activeCover.heightRatio * 100).roundToInt()}%",
+                                accent = EmeraldGreen,
+                                onDecrementCoarse = {
+                                    engine.updateGameCoverArea(activeCover.copy(heightRatio = (activeCover.heightRatio - 0.05f).coerceIn(0.03f, 0.96f)))
+                                },
+                                onDecrement = {
+                                    engine.updateGameCoverArea(activeCover.copy(heightRatio = (activeCover.heightRatio - 0.01f).coerceIn(0.03f, 0.96f)))
+                                },
+                                onIncrement = {
+                                    engine.updateGameCoverArea(activeCover.copy(heightRatio = (activeCover.heightRatio + 0.01f).coerceIn(0.03f, 0.96f)))
+                                },
+                                onIncrementCoarse = {
+                                    engine.updateGameCoverArea(activeCover.copy(heightRatio = (activeCover.heightRatio + 0.05f).coerceIn(0.03f, 0.96f)))
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        PrecisionStepperBar(
+                            label = "Opacity Area Aktif",
+                            valueText = "${(activeCover.opacity * 100).roundToInt()}%",
+                            accent = NeonOrange,
+                            onDecrement = {
+                                engine.updateGameCoverArea(activeCover.copy(opacity = (activeCover.opacity - 0.05f).coerceIn(0.20f, 1.0f)))
+                            },
+                            onIncrement = {
+                                engine.updateGameCoverArea(activeCover.copy(opacity = (activeCover.opacity + 0.05f).coerceIn(0.20f, 1.0f)))
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -832,6 +1270,7 @@ fun UniversalInteractionScreen(
             }
         }
 
+        if (!uiState.isDevice2SimpleMode) {
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(14.dp),
@@ -849,7 +1288,7 @@ fun UniversalInteractionScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Mencakup semua Pin Challenge, Koreografi, Settingan Cooldown ML, Kunci Sentuh, Posisi HUD, serta pengaturan Server Termux & Event Overlay.",
+                    text = "Mencakup semua Pin Challenge, Koreografi, Delay Global, Tutup Area Game, Cooldown ML, Kunci Sentuh, Posisi HUD, serta pengaturan Server Termux & Event Overlay.",
                     color = Color(0xFF94A3B8),
                     fontSize = 9.sp
                 )
@@ -901,6 +1340,7 @@ fun UniversalInteractionScreen(
                 }
             }
         }
+        }
 
         if (showPasteBackupDialog) {
             AlertDialog(
@@ -948,6 +1388,7 @@ fun UniversalInteractionScreen(
             EditChallengeAndChoreographyDialog(
                 rule = targetRule,
                 allRules = uiState.rules,
+                isDevice2SimpleMode = uiState.isDevice2SimpleMode,
                 engine = engine,
                 onDismiss = { editingRuleInApp = null },
                 onSave = { updated ->
@@ -1007,6 +1448,7 @@ private fun DialogConceptSectionCard(
 private fun EditChallengeAndChoreographyDialog(
     rule: UniversalTriggerRule,
     allRules: List<UniversalTriggerRule> = emptyList(),
+    isDevice2SimpleMode: Boolean = true,
     engine: UniversalTriggerEngine,
     onDismiss: () -> Unit,
     onSave: (UniversalTriggerRule) -> Unit
@@ -1017,7 +1459,7 @@ private fun EditChallengeAndChoreographyDialog(
     var draftChallengeName by remember(rule.id) { mutableStateOf(rule.triggerName) }
     var draftSource by remember(rule.id) { mutableStateOf(rule.triggerSource) }
     var draftTargetGiftName by remember(rule.id) { mutableStateOf(rule.targetGiftName) }
-    var draftDelayBeforeText by remember(rule.id) { mutableStateOf(if (rule.enableDelayBefore) rule.delayBeforeMs.toString() else "0") }
+    var draftDelayBeforeMs by remember(rule.id) { mutableStateOf(if (rule.enableDelayBefore) rule.delayBeforeMs else 0L) }
     var draftSteps by remember(rule.id) { mutableStateOf(rule.actionSequence) }
     var draftEnableVisualCooldown by remember(rule.id) { mutableStateOf(rule.enableVisualCooldownWait) }
     var draftCooldownTargetStepId by remember(rule.id) { mutableStateOf(rule.cooldownTargetStepId) }
@@ -1025,7 +1467,7 @@ private fun EditChallengeAndChoreographyDialog(
     var draftCooldownHeight by remember(rule.id) { mutableStateOf(rule.cooldownAreaHeightRatio.coerceIn(0.025f, 0.55f)) }
     var draftCooldownOffsetX by remember(rule.id) { mutableStateOf(rule.cooldownAreaOffsetX.coerceIn(-0.30f, 0.30f)) }
     var draftCooldownOffsetY by remember(rule.id) { mutableStateOf(rule.cooldownAreaOffsetY.coerceIn(-0.30f, 0.30f)) }
-    var draftCooldownMaxWaitText by remember(rule.id) { mutableStateOf(rule.cooldownMaxWaitMs.toString()) }
+    var draftCooldownMaxWaitMs by remember(rule.id) { mutableStateOf(rule.cooldownMaxWaitMs.coerceIn(1500L, 180_000L)) }
     var cooldownScanTestMsg by remember(rule.id) { mutableStateOf<String?>(null) }
     var showMoreAddMenu by remember(rule.id) { mutableStateOf(false) }
 
@@ -1051,10 +1493,37 @@ private fun EditChallengeAndChoreographyDialog(
     }
 
     fun buildDraftRule(): UniversalTriggerRule {
-        val cleaned = draftSteps.map { it.copy(stepName = it.stepName.trim()) }
-        val delayBeforeParsed = draftDelayBeforeText.toLongOrNull()?.coerceIn(0L, 60_000L) ?: 0L
-        val maxWaitParsed = draftCooldownMaxWaitText.toLongOrNull()?.coerceIn(3_000L, 180_000L)
-            ?: rule.cooldownMaxWaitMs
+        val cleaned = draftSteps.map { s ->
+            when (s.actionType) {
+                ActionType.DELAY, ActionType.WAIT -> {
+                    val ms = s.durationMs.coerceIn(0L, 60_000L)
+                    s.copy(stepName = s.stepName.trim(), durationMs = ms, paramValue = ms.toString())
+                }
+                ActionType.HOME_BACK_GAME -> {
+                    val ms = s.durationMs.coerceIn(0L, 30_000L)
+                    s.copy(stepName = s.stepName.trim(), durationMs = ms, paramValue = ms.toString())
+                }
+                ActionType.SIMULATED_CLICK -> {
+                    s.copy(
+                        stepName = s.stepName.trim(),
+                        durationMs = s.durationMs.coerceIn(0L, 12_000L),
+                        dragDurationMs = s.dragDurationMs.coerceIn(0L, 5000L)
+                    )
+                }
+                ActionType.SIMULATED_SWIPE -> {
+                    s.copy(
+                        stepName = s.stepName.trim(),
+                        durationMs = s.durationMs.coerceIn(0L, 5000L)
+                    )
+                }
+                else -> s.copy(
+                    stepName = s.stepName.trim(),
+                    durationMs = s.durationMs.coerceIn(0L, 60_000L)
+                )
+            }
+        }
+        val delayBeforeParsed = draftDelayBeforeMs.coerceIn(0L, 60_000L)
+        val maxWaitParsed = draftCooldownMaxWaitMs.coerceIn(1500L, 180_000L)
         return rule.copy(
             triggerName = draftChallengeName.trim().ifBlank { "Konsep" },
             triggerSource = draftSource,
@@ -1134,7 +1603,32 @@ private fun EditChallengeAndChoreographyDialog(
                     }
                 }
 
-                // BAGIAN 2: PRA-AKSI (Delay Scan Cooldown ML di atas, Delay Awal di bawah — otomatis disembunyikan jika Delay Scan aktif)
+                // BAGIAN 2: PRA-AKSI (Disembunyikan pada Mode 2-HP Simpel karena dikontrol lewat Web Device 1)
+                if (isDevice2SimpleMode) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(DarkBackground.copy(alpha = 0.7f))
+                            .border(0.8.dp, NeonCyan.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 9.dp, vertical = 7.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "⚙️ Detail timing, delay scan OCR & syarat diatur di Device 1 Web",
+                            color = Color(0xFFCBD5E1),
+                            fontSize = 8.4.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(
+                            onClick = { engine.setDevice2SimpleMode(false) },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text("🎛️ Buka Detail di HP", fontSize = 8.4.sp, color = NeonCyan, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                } else {
                 DialogConceptSectionCard(stepNumber = "2", title = "Pra-Aksi (Sebelum Koreografi)", accent = NeonOrange) {
                     Column(
                         modifier = Modifier
@@ -1233,12 +1727,14 @@ private fun EditChallengeAndChoreographyDialog(
                                 horizontalArrangement = Arrangement.spacedBy(5.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                OutlinedTextField(
-                                    value = draftCooldownMaxWaitText,
-                                    onValueChange = { draftCooldownMaxWaitText = it.filter(Char::isDigit).take(6) },
-                                    label = { Text("Max Tunggu(ms)", fontSize = 8.5.sp) },
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    singleLine = true,
+                                OutlinedMsTextField(
+                                    label = "Max Tunggu(ms)",
+                                    value = draftCooldownMaxWaitMs,
+                                    onValueCommitted = { draftCooldownMaxWaitMs = it },
+                                    minValue = 1500L,
+                                    maxValue = 180_000L,
+                                    maxDigits = 6,
+                                    resetKey = rule.id,
                                     modifier = Modifier.weight(1f)
                                 )
                                 OutlinedButton(
@@ -1281,15 +1777,18 @@ private fun EditChallengeAndChoreographyDialog(
                             fontWeight = FontWeight.SemiBold
                         )
                     } else {
-                        OutlinedTextField(
-                            value = draftDelayBeforeText,
-                            onValueChange = { draftDelayBeforeText = it.filter(Char::isDigit).take(6) },
-                            label = { Text("⏱️ Delay Awal Sebelum Koreografi (ms)", fontSize = 9.sp) },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true,
+                        OutlinedMsTextField(
+                            label = "⏱️ Delay Awal Sebelum Koreografi (ms)",
+                            value = draftDelayBeforeMs,
+                            onValueCommitted = { draftDelayBeforeMs = it },
+                            minValue = 0L,
+                            maxValue = 60_000L,
+                            maxDigits = 5,
+                            resetKey = rule.id,
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
+                }
                 }
 
                 // BAGIAN 3: LANGKAH KOREOGRAFI
@@ -1383,7 +1882,6 @@ private fun EditChallengeAndChoreographyDialog(
                             }
                         }
 
-                        var delayDraft by remember(step.id, step.delayMs) { mutableStateOf(step.delayMs.toString()) }
                         Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                             OutlinedTextField(
                                 value = step.stepName,
@@ -1392,20 +1890,20 @@ private fun EditChallengeAndChoreographyDialog(
                                 singleLine = true,
                                 modifier = Modifier.weight(1.35f).testTag("dialog_step_name_input_${idx + 1}")
                             )
-                            OutlinedTextField(
-                                value = delayDraft,
-                                onValueChange = { raw ->
-                                    val digits = raw.filter(Char::isDigit).take(5)
-                                    delayDraft = digits
-                                    digits.toLongOrNull()?.let { d ->
-                                        updateThisStep { it.copy(delayMs = d.coerceIn(0L, 30_000L)) }
-                                    }
-                                },
-                                label = { Text("Delay(ms)", fontSize = 9.sp) },
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                singleLine = true,
-                                modifier = Modifier.weight(0.65f)
-                            )
+                            if (!isDevice2SimpleMode && step.actionType != ActionType.DELAY && step.actionType != ActionType.WAIT) {
+                                OutlinedMsTextField(
+                                    label = "Delay(ms)",
+                                    value = step.delayMs,
+                                    onValueCommitted = { d ->
+                                        updateThisStep { it.copy(delayMs = d) }
+                                    },
+                                    minValue = 0L,
+                                    maxValue = 60_000L,
+                                    maxDigits = 5,
+                                    resetKey = step.id,
+                                    modifier = Modifier.weight(0.65f)
+                                )
+                            }
                         }
 
                         if (step.actionType == ActionType.SIMULATED_CLICK || step.actionType == ActionType.SIMULATED_SWIPE) {
@@ -1423,95 +1921,116 @@ private fun EditChallengeAndChoreographyDialog(
                                         )
                                     }
                                 }
-                                OutlinedTextField(
-                                    value = step.paramValue,
-                                    onValueChange = { raw -> updateThisStep { it.copy(paramValue = raw) } },
-                                    label = { Text("Arah Geser (LEFT/RIGHT/UP/DOWN/RANDOM/45°/X,Y)", fontSize = 9.sp) },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            }
-
-                            var durDraft by remember(step.id, step.durationMs) { mutableStateOf(step.durationMs.toString()) }
-                            OutlinedTextField(
-                                value = durDraft,
-                                onValueChange = { raw ->
-                                    val digits = raw.filter(Char::isDigit).take(5)
-                                    durDraft = digits
-                                    digits.toLongOrNull()?.let { v ->
-                                        val clamped = if (step.actionType == ActionType.SIMULATED_CLICK) {
-                                            v.coerceIn(0L, 12_000L)
-                                        } else {
-                                            v.coerceIn(60L, 5000L)
-                                        }
-                                        updateThisStep { it.copy(durationMs = clamped, secondaryValue = clamped.toString()) }
-                                    }
-                                },
-                                label = {
-                                    Text(
-                                        if (step.actionType == ActionType.SIMULATED_CLICK) "Tahan(ms, boleh 0)" else "Durasi Geser(ms)",
-                                        fontSize = 9.sp
-                                    )
-                                },
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-
-                            if (step.actionType == ActionType.SIMULATED_CLICK) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text("✊ Tahan + Geser → Lepas", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                                    Switch(
-                                        checked = step.holdAndDrag,
-                                        onCheckedChange = { checked -> updateThisStep { it.copy(holdAndDrag = checked) } }
+                                if (!isDevice2SimpleMode) {
+                                    OutlinedTextField(
+                                        value = step.paramValue,
+                                        onValueChange = { raw -> updateThisStep { it.copy(paramValue = raw) } },
+                                        label = { Text("Arah Geser (LEFT/RIGHT/UP/DOWN/RANDOM/45°/X,Y)", fontSize = 9.sp) },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
                                     )
                                 }
-                                if (step.holdAndDrag) {
-                                    FlowRow(
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                            }
+
+                            if (!isDevice2SimpleMode) {
+                                OutlinedMsTextField(
+                                    label = if (step.actionType == ActionType.SIMULATED_CLICK) "Tahan(ms, boleh 0)" else "Durasi Geser(ms)",
+                                    value = step.durationMs,
+                                    onValueCommitted = { clamped ->
+                                        updateThisStep { it.copy(durationMs = clamped, secondaryValue = clamped.toString()) }
+                                    },
+                                    minValue = 0L,
+                                    maxValue = if (step.actionType == ActionType.SIMULATED_CLICK) 12_000L else 5000L,
+                                    maxDigits = 5,
+                                    resetKey = step.id,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+
+                                if (step.actionType == ActionType.SIMULATED_CLICK) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        listOf("LEFT", "RIGHT", "UP", "DOWN", "RANDOM").forEach { dir ->
-                                            FilterChip(
-                                                selected = step.dragDirection.equals(dir, ignoreCase = true),
-                                                onClick = { updateThisStep { it.copy(dragDirection = dir) } },
-                                                label = { Text(if (dir == "RANDOM") "🎲 RANDOM" else dir, fontSize = 8.5.sp) }
+                                        Text("✊ Tahan + Geser → Lepas", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                        Switch(
+                                            checked = step.holdAndDrag,
+                                            onCheckedChange = { checked -> updateThisStep { it.copy(holdAndDrag = checked) } }
+                                        )
+                                    }
+                                    if (step.holdAndDrag) {
+                                        FlowRow(
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            listOf("LEFT", "RIGHT", "UP", "DOWN", "RANDOM").forEach { dir ->
+                                                FilterChip(
+                                                    selected = step.dragDirection.equals(dir, ignoreCase = true),
+                                                    onClick = { updateThisStep { it.copy(dragDirection = dir) } },
+                                                    label = { Text(if (dir == "RANDOM") "🎲 RANDOM" else dir, fontSize = 8.5.sp) }
+                                                )
+                                            }
+                                        }
+                                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                            OutlinedTextField(
+                                                value = step.dragDirection,
+                                                onValueChange = { raw -> updateThisStep { it.copy(dragDirection = raw) } },
+                                                label = { Text("Arah (45°/X,Y)", fontSize = 8.5.sp) },
+                                                singleLine = true,
+                                                modifier = Modifier.weight(1.2f)
+                                            )
+                                            OutlinedMsTextField(
+                                                label = "Geser(ms)",
+                                                value = step.dragDurationMs,
+                                                onValueCommitted = { v ->
+                                                    updateThisStep { it.copy(dragDurationMs = v) }
+                                                },
+                                                minValue = 0L,
+                                                maxValue = 5000L,
+                                                maxDigits = 4,
+                                                resetKey = step.id,
+                                                modifier = Modifier.weight(0.8f)
                                             )
                                         }
                                     }
-                                    var dragDurDraft by remember(step.id, step.dragDurationMs) {
-                                        mutableStateOf(step.dragDurationMs.toString())
-                                    }
-                                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                                        OutlinedTextField(
-                                            value = step.dragDirection,
-                                            onValueChange = { raw -> updateThisStep { it.copy(dragDirection = raw) } },
-                                            label = { Text("Arah (45°/X,Y)", fontSize = 8.5.sp) },
-                                            singleLine = true,
-                                            modifier = Modifier.weight(1.2f)
-                                        )
-                                        OutlinedTextField(
-                                            value = dragDurDraft,
-                                            onValueChange = { raw ->
-                                                val digits = raw.filter(Char::isDigit).take(4)
-                                                dragDurDraft = digits
-                                                digits.toLongOrNull()?.let { v ->
-                                                    updateThisStep { it.copy(dragDurationMs = v.coerceIn(60L, 5000L)) }
-                                                }
-                                            },
-                                            label = { Text("Geser(ms)", fontSize = 8.5.sp) },
-                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                            singleLine = true,
-                                            modifier = Modifier.weight(0.8f)
-                                        )
-                                    }
                                 }
                             }
+                        } else if (step.actionType == ActionType.DELAY || step.actionType == ActionType.WAIT) {
+                            if (!isDevice2SimpleMode) {
+                                OutlinedMsTextField(
+                                    label = "Durasi Jeda (ms, boleh 0)",
+                                    value = step.durationMs,
+                                    onValueCommitted = { ms ->
+                                        updateThisStep { it.copy(durationMs = ms, paramValue = ms.toString()) }
+                                    },
+                                    minValue = 0L,
+                                    maxValue = 60_000L,
+                                    maxDigits = 5,
+                                    resetKey = step.id,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            } else {
+                                Text(
+                                    text = "⏱️ Jeda saat ini: ${step.durationMs} ms (ubah ms detail di Device 1 Web)",
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 8.5.sp
+                                )
+                            }
                         } else if (step.actionType == ActionType.HOME_BACK_GAME) {
+                            if (!isDevice2SimpleMode) {
+                                OutlinedMsTextField(
+                                    label = "Jeda di Home (ms)",
+                                    value = step.durationMs,
+                                    onValueCommitted = { ms ->
+                                        updateThisStep { it.copy(durationMs = ms, paramValue = ms.toString()) }
+                                    },
+                                    minValue = 0L,
+                                    maxValue = 30_000L,
+                                    maxDigits = 5,
+                                    resetKey = step.id,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
                             var appQuery by remember(step.id) { mutableStateOf("") }
                             var installedApps by remember { mutableStateOf<List<InstalledAppInfo>>(emptyList()) }
                             LaunchedEffect(step.id) {
@@ -1664,81 +2183,80 @@ private fun EditChallengeAndChoreographyDialog(
                                 }
                             }
 
-                            var ovDurDraft by remember(step.id, step.durationMs) { mutableStateOf(step.durationMs.toString()) }
-                            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                                if (!isMemeOrCustomImage && !isAnimation) {
+                            if (!isDevice2SimpleMode) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    if (!isMemeOrCustomImage && !isAnimation) {
+                                        OutlinedTextField(
+                                            value = step.paramValue,
+                                            onValueChange = { raw -> updateThisStep { it.copy(paramValue = raw) } },
+                                            label = { Text(if (isProfileOverlay) "Judul ({user})" else "Teks ({user}/{gift})", fontSize = 8.5.sp) },
+                                            singleLine = true,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
                                     OutlinedTextField(
-                                        value = step.paramValue,
-                                        onValueChange = { raw -> updateThisStep { it.copy(paramValue = raw) } },
-                                        label = { Text(if (isProfileOverlay) "Judul ({user})" else "Teks ({user}/{gift})", fontSize = 8.5.sp) },
+                                        value = step.secondaryValue,
+                                        onValueChange = { raw -> updateThisStep { it.copy(secondaryValue = raw) } },
+                                        label = { Text(if (isMemeOrCustomImage) "Caption (opsional)" else "Subjudul", fontSize = 8.5.sp) },
                                         singleLine = true,
                                         modifier = Modifier.weight(1f)
                                     )
+                                    OutlinedMsTextField(
+                                        label = "Durasi(ms)",
+                                        value = step.durationMs,
+                                        onValueCommitted = { v ->
+                                            updateThisStep { it.copy(durationMs = v) }
+                                        },
+                                        minValue = 0L,
+                                        maxValue = 60_000L,
+                                        maxDigits = 5,
+                                        resetKey = step.id,
+                                        modifier = Modifier.weight(0.75f)
+                                    )
                                 }
-                                OutlinedTextField(
-                                    value = step.secondaryValue,
-                                    onValueChange = { raw -> updateThisStep { it.copy(secondaryValue = raw) } },
-                                    label = { Text(if (isMemeOrCustomImage) "Caption (opsional)" else "Subjudul", fontSize = 8.5.sp) },
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                OutlinedTextField(
-                                    value = ovDurDraft,
-                                    onValueChange = { raw ->
-                                        val digits = raw.filter(Char::isDigit).take(5)
-                                        ovDurDraft = digits
-                                        digits.toLongOrNull()?.let { v ->
-                                            updateThisStep { it.copy(durationMs = v.coerceIn(300L, 30_000L)) }
-                                        }
-                                    },
-                                    label = { Text("Durasi(ms)", fontSize = 8.5.sp) },
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    singleLine = true,
-                                    modifier = Modifier.weight(0.75f)
-                                )
-                            }
 
-                            val sc = step.overlayScale.coerceIn(0.35f, 3.0f)
-                            val curX = (step.posX ?: rule.overlayPosX).coerceIn(0.05f, 0.95f)
-                            val curY = (step.posY ?: rule.overlayPosY).coerceIn(0.05f, 0.95f)
-                            PrecisionStepperBar(
-                                label = "Ukuran Overlay",
-                                valueText = "${(sc * 100).roundToInt()}%",
-                                accent = NeonCyan,
-                                onDecrementCoarse = {
-                                    updateThisStep { it.copy(overlayScale = (sc - 0.25f).coerceIn(0.35f, 3.0f)) }
-                                },
-                                onDecrement = {
-                                    updateThisStep { it.copy(overlayScale = (sc - 0.05f).coerceIn(0.35f, 3.0f)) }
-                                },
-                                onIncrement = {
-                                    updateThisStep { it.copy(overlayScale = (sc + 0.05f).coerceIn(0.35f, 3.0f)) }
-                                },
-                                onIncrementCoarse = {
-                                    updateThisStep { it.copy(overlayScale = (sc + 0.25f).coerceIn(0.35f, 3.0f)) }
+                                val sc = step.overlayScale.coerceIn(0.35f, 3.0f)
+                                val curX = (step.posX ?: rule.overlayPosX).coerceIn(0.05f, 0.95f)
+                                val curY = (step.posY ?: rule.overlayPosY).coerceIn(0.05f, 0.95f)
+                                PrecisionStepperBar(
+                                    label = "Ukuran Overlay",
+                                    valueText = "${(sc * 100).roundToInt()}%",
+                                    accent = NeonCyan,
+                                    onDecrementCoarse = {
+                                        updateThisStep { it.copy(overlayScale = (sc - 0.25f).coerceIn(0.35f, 3.0f)) }
+                                    },
+                                    onDecrement = {
+                                        updateThisStep { it.copy(overlayScale = (sc - 0.05f).coerceIn(0.35f, 3.0f)) }
+                                    },
+                                    onIncrement = {
+                                        updateThisStep { it.copy(overlayScale = (sc + 0.05f).coerceIn(0.35f, 3.0f)) }
+                                    },
+                                    onIncrementCoarse = {
+                                        updateThisStep { it.copy(overlayScale = (sc + 0.25f).coerceIn(0.35f, 3.0f)) }
+                                    }
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    PrecisionStepperBar(
+                                        label = "Posisi X",
+                                        valueText = "${(curX * 100).roundToInt()}%",
+                                        accent = NeonOrange,
+                                        decLabel = "◀",
+                                        incLabel = "▶",
+                                        onDecrement = { updateThisStep { it.copy(posX = (curX - 0.04f).coerceIn(0.05f, 0.95f)) } },
+                                        onIncrement = { updateThisStep { it.copy(posX = (curX + 0.04f).coerceIn(0.05f, 0.95f)) } },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    PrecisionStepperBar(
+                                        label = "Posisi Y",
+                                        valueText = "${(curY * 100).roundToInt()}%",
+                                        accent = NeonPurple,
+                                        decLabel = "▲",
+                                        incLabel = "▼",
+                                        onDecrement = { updateThisStep { it.copy(posY = (curY - 0.04f).coerceIn(0.05f, 0.95f)) } },
+                                        onIncrement = { updateThisStep { it.copy(posY = (curY + 0.04f).coerceIn(0.05f, 0.95f)) } },
+                                        modifier = Modifier.weight(1f)
+                                    )
                                 }
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                PrecisionStepperBar(
-                                    label = "Posisi X",
-                                    valueText = "${(curX * 100).roundToInt()}%",
-                                    accent = NeonOrange,
-                                    decLabel = "◀",
-                                    incLabel = "▶",
-                                    onDecrement = { updateThisStep { it.copy(posX = (curX - 0.04f).coerceIn(0.05f, 0.95f)) } },
-                                    onIncrement = { updateThisStep { it.copy(posX = (curX + 0.04f).coerceIn(0.05f, 0.95f)) } },
-                                    modifier = Modifier.weight(1f)
-                                )
-                                PrecisionStepperBar(
-                                    label = "Posisi Y",
-                                    valueText = "${(curY * 100).roundToInt()}%",
-                                    accent = NeonPurple,
-                                    decLabel = "▲",
-                                    incLabel = "▼",
-                                    onDecrement = { updateThisStep { it.copy(posY = (curY - 0.04f).coerceIn(0.05f, 0.95f)) } },
-                                    onIncrement = { updateThisStep { it.copy(posY = (curY + 0.04f).coerceIn(0.05f, 0.95f)) } },
-                                    modifier = Modifier.weight(1f)
-                                )
                             }
                         } else if (step.actionType == ActionType.PLAY_SOUND || step.actionType == ActionType.CUSTOM_BACKSOUND) {
                             FlowRow(
@@ -1790,17 +2308,19 @@ private fun EditChallengeAndChoreographyDialog(
                             )
                         }
 
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            FilterChip(
-                                selected = step.executionMode == ExecutionMode.SEQUENTIAL,
-                                onClick = { updateThisStep { it.copy(executionMode = ExecutionMode.SEQUENTIAL) } },
-                                label = { Text("Berurutan", fontSize = 8.sp) }
-                            )
-                            FilterChip(
-                                selected = step.executionMode == ExecutionMode.PARALLEL,
-                                onClick = { updateThisStep { it.copy(executionMode = ExecutionMode.PARALLEL) } },
-                                label = { Text("Bersamaan", fontSize = 8.sp) }
-                            )
+                        if (!isDevice2SimpleMode) {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                FilterChip(
+                                    selected = step.executionMode == ExecutionMode.SEQUENTIAL,
+                                    onClick = { updateThisStep { it.copy(executionMode = ExecutionMode.SEQUENTIAL) } },
+                                    label = { Text("Berurutan", fontSize = 8.sp) }
+                                )
+                                FilterChip(
+                                    selected = step.executionMode == ExecutionMode.PARALLEL,
+                                    onClick = { updateThisStep { it.copy(executionMode = ExecutionMode.PARALLEL) } },
+                                    label = { Text("Bersamaan", fontSize = 8.sp) }
+                                )
+                            }
                         }
                     }
                 }

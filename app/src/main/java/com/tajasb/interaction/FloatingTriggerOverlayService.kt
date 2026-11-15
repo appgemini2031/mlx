@@ -291,6 +291,7 @@ class FloatingTriggerOverlayService : Service() {
     private var scanHiddenStage = false
     private var scanHiddenBlockerPill = false
     private val scanHiddenMarkerKeys = mutableSetOf<String>()
+    private val scanHiddenCoverKeys = mutableSetOf<String>()
 
     private val overlayBitmapCache = object : LruCache<String, Bitmap>(24) {}
     private val inFlightRemoteBitmaps = Collections.synchronizedSet(mutableSetOf<String>())
@@ -316,8 +317,17 @@ class FloatingTriggerOverlayService : Service() {
         var lastCrosshairTop: Int = 0
     )
 
+    private data class CoverWindowEntry(
+        val root: FrameLayout,
+        val labelPill: TextView,
+        val resizeHandle: TextView,
+        val params: WindowManager.LayoutParams
+    )
+
     private val markerWindows = linkedMapOf<String, MarkerWindowEntry>()
+    private val coverWindows = linkedMapOf<String, CoverWindowEntry>()
     private var draggingRuleId: String? = null
+    private var draggingCoverId: String? = null
     private var lastState: UniversalEngineUiState = UniversalEngineUiState()
 
     override fun onCreate() {
@@ -447,6 +457,7 @@ class FloatingTriggerOverlayService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         draggingRuleId = null
+        draggingCoverId = null
         isDraggingHud = false
         val relayoutAll = {
             if (!isTemporarilyHiddenForScan) {
@@ -457,6 +468,7 @@ class FloatingTriggerOverlayService : Service() {
                 }
                 renderLiveStage(lastState)
                 syncMarkerWindows(lastState)
+                syncCoverWindows(lastState)
             }
         }
         relayoutAll()
@@ -481,6 +493,7 @@ class FloatingTriggerOverlayService : Service() {
         overlayBitmapCache.evictAll()
         serviceScope.cancel()
         removeAllMarkerWindows()
+        removeAllCoverWindows()
         subMenuComposeOwner?.onDetach()
         subMenuComposeOwner = null
         singleHudView?.let { safeRemoveView(it) }
@@ -504,27 +517,88 @@ class FloatingTriggerOverlayService : Service() {
 
     private fun observeEngineState() {
         serviceScope.launch {
+            var initialized = false
             engine.state.collectLatest { st ->
-                val hiddenChanged = lastState.isFloatingHiddenForLive != st.isFloatingHiddenForLive
-                val cfgRatioChanged = lastAppliedXRatio != st.floatingConfig.hudXRatio ||
+                val prev = lastState
+                val isFirst = !initialized
+                initialized = true
+
+                // Jika baru menekan ▶ Tes 1 konsep, ciutkan dropdown & lepas fokus keyboard seketika agar tidak berkedip
+                if (st.isSingleTestRunning && !prev.isSingleTestRunning) {
+                    if (isSubMenuExpanded) {
+                        isSubMenuExpanded = false
+                    }
+                    setHudFocusableForKeyboard(false)
+                }
+
+                val hiddenChanged = isFirst || prev.isFloatingHiddenForLive != st.isFloatingHiddenForLive
+                val cfgRatioChanged = isFirst ||
+                    lastAppliedXRatio != st.floatingConfig.hudXRatio ||
                     lastAppliedYRatio != st.floatingConfig.hudYRatio
+                val hudChanged = isFirst ||
+                    prev.isFloatingHiddenForLive != st.isFloatingHiddenForLive ||
+                    prev.floatingConfig != st.floatingConfig ||
+                    prev.isPositionEditMode != st.isPositionEditMode ||
+                    prev.isCoverEditMode != st.isCoverEditMode ||
+                    prev.isEngineEnabled != st.isEngineEnabled ||
+                    prev.isEmergencyStopped != st.isEmergencyStopped ||
+                    prev.blockTouchDuringChallenge != st.blockTouchDuringChallenge ||
+                    prev.activePinRuleId != st.activePinRuleId ||
+                    prev.activePinStepId != st.activePinStepId ||
+                    prev.rules != st.rules ||
+                    prev.isSingleTestRunning != st.isSingleTestRunning
+                val stageChanged = isFirst ||
+                    prev.activeOverlays != st.activeOverlays ||
+                    prev.lastSimEvent != st.lastSimEvent ||
+                    prev.isPositionEditMode != st.isPositionEditMode ||
+                    prev.isFloatingHiddenForLive != st.isFloatingHiddenForLive ||
+                    prev.rules != st.rules
+                val markerChanged = isFirst ||
+                    prev.isPositionEditMode != st.isPositionEditMode ||
+                    prev.isFloatingHiddenForLive != st.isFloatingHiddenForLive ||
+                    prev.rules != st.rules ||
+                    prev.activePinRuleId != st.activePinRuleId ||
+                    prev.activePinStepId != st.activePinStepId
+                val coverChanged = isFirst ||
+                    prev.gameCoverAreas != st.gameCoverAreas ||
+                    prev.isCoverEditMode != st.isCoverEditMode ||
+                    prev.activeCoverAreaId != st.activeCoverAreaId
+                val blockerChanged = isFirst ||
+                    prev.blockTouchDuringChallenge != st.blockTouchDuringChallenge ||
+                    prev.isChallengeExecuting != st.isChallengeExecuting ||
+                    prev.isPositionEditMode != st.isPositionEditMode ||
+                    prev.isEmergencyStopped != st.isEmergencyStopped ||
+                    prev.cooldownStatusHint != st.cooldownStatusHint
+
                 lastState = st
+
                 if (!isTemporarilyHiddenForScan) {
-                    refreshSingleHudVisuals()
-                    if (!isDraggingHud && !st.isFloatingHiddenForLive) {
+                    if (hudChanged) {
+                        refreshSingleHudVisuals()
+                    }
+                    if (!isDraggingHud && !st.isFloatingHiddenForLive && (hudChanged || cfgRatioChanged)) {
                         if (cfgRatioChanged) {
                             applyHudPositionFromConfig(st.floatingConfig, forceApply = false)
                         } else {
                             clampHudIntoSafeBounds()
                         }
                     }
-                    renderLiveStage(st)
-                    syncMarkerWindows(st)
+                    if (stageChanged) {
+                        renderLiveStage(st)
+                    }
+                    if (markerChanged) {
+                        syncMarkerWindows(st)
+                    }
+                    if (coverChanged) {
+                        syncCoverWindows(st)
+                    }
                 }
-                updateTouchBlockerState(
-                    st,
-                    temporarilyHiddenForAutomation = isTemporarilyHiddenForScan
-                )
+                if (blockerChanged) {
+                    updateTouchBlockerState(
+                        st,
+                        temporarilyHiddenForAutomation = isTemporarilyHiddenForScan
+                    )
+                }
                 if (hiddenChanged) {
                     updateNotification(st.isFloatingHiddenForLive)
                 }
@@ -667,7 +741,9 @@ class FloatingTriggerOverlayService : Service() {
                     val hh = hud.height.coerceAtLeast(hud.measuredHeight)
                     val hudRect = PixelRect(hParams.x, hParams.y, hParams.x + hw, hParams.y + hh)
                     if (hw > 0 && hh > 0 && ScanRegionGeometry.rectsIntersect(hudRect, holeRect)) {
-                        hud.visibility = View.INVISIBLE
+                        // Jangan ubah visibility menjadi INVISIBLE agar tidak memicu relayout/kedip WindowManager:
+                        // cukup pasang FLAG_NOT_TOUCHABLE + redupkan alpha agar gesture Accessibility menembus bersih.
+                        hud.alpha = 0.15f
                         if ((hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0) {
                             hParams.flags = hParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                             try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
@@ -684,11 +760,11 @@ class FloatingTriggerOverlayService : Service() {
                 val hud = singleHudView
                 val hParams = singleHudParams
                 if (hud != null && hParams != null && !isTemporarilyHiddenForScan && !scanHiddenHud) {
+                    hud.alpha = lastState.floatingConfig.hudOpacity
                     if ((hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) {
                         hParams.flags = hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
                         try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
                     }
-                    refreshSingleHudVisuals()
                 }
             }
             setMarkerWindowsTemporaryHidden(false)
@@ -870,6 +946,8 @@ class FloatingTriggerOverlayService : Service() {
             val scale = ov.scale.coerceIn(0.35f, 3.0f)
             val isProfileOverlay = ov.kind == ActionType.PROFILE_OVERLAY
             val isMemeOrCustomImage = (ov.kind == ActionType.CUSTOM_IMAGE || ov.kind == ActionType.MEME_OVERLAY) && ov.imageUri.isNotBlank()
+            var primaryMediaHeightPx = 0
+            var primaryMediaView: View? = null
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_HORIZONTAL
@@ -888,6 +966,7 @@ class FloatingTriggerOverlayService : Service() {
             }
             if (isProfileOverlay) {
                 val avatarPx = dp(76f * scale).coerceIn(dp(36), dp(220))
+                primaryMediaHeightPx = avatarPx
                 val avatarBmp = ov.imageUri.takeIf { it.isNotBlank() }?.let { uriStr ->
                     resolveOverlayBitmapAsyncAware(uriStr, avatarPx)
                 }
@@ -932,6 +1011,7 @@ class FloatingTriggerOverlayService : Service() {
                             radiusPx = dp(10).toFloat()
                         )
                     }
+                    primaryMediaView = img
                     card.addView(img, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
                 }
             }
@@ -988,11 +1068,23 @@ class FloatingTriggerOverlayService : Service() {
             )
             val cw = card.measuredWidth.coerceAtLeast(dp(60))
             val ch = card.measuredHeight.coerceAtLeast(dp(28))
-            val left = ((ov.posX * screenW) - cw / 2f).roundToInt().coerceIn(0, (screenW - cw).coerceAtLeast(0))
-            val top = ((ov.posY * screenH) - ch / 2f).roundToInt().coerceIn(0, (screenH - ch).coerceAtLeast(0))
+            val resolvedPrimaryMediaH = if (primaryMediaHeightPx > 0) {
+                primaryMediaHeightPx
+            } else {
+                primaryMediaView?.measuredHeight ?: 0
+            }
+            val anchorTopLeft = OverlayAnchorGeometry.computeCardTopLeft(
+                normX = ov.posX,
+                normY = ov.posY,
+                screenW = screenW,
+                screenH = screenH,
+                cardWidthPx = cw,
+                cardHeightPx = ch,
+                primaryMediaHeightPx = resolvedPrimaryMediaH
+            )
             stage.addView(card, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-                leftMargin = left
-                topMargin = top
+                leftMargin = anchorTopLeft.left
+                topMargin = anchorTopLeft.top
             })
         }
 
@@ -1020,13 +1112,22 @@ class FloatingTriggerOverlayService : Service() {
 
     private fun setMarkerWindowsTemporaryHidden(hide: Boolean) {
         updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
-        liveStageView?.visibility = if (hide || isTemporarilyHiddenForScan) View.INVISIBLE else View.VISIBLE
-        val targetVis = if (hide || isTemporarilyHiddenForScan) View.INVISIBLE else View.VISIBLE
+        // liveStageView sudah memiliki FLAG_NOT_TOUCHABLE sehingga tidak pernah memblokir sentuhan;
+        // hanya sembunyikan saat OCR visual scan aktif agar tidak berkedip saat tes/klik berjalan.
+        val stageTargetVis = if (isTemporarilyHiddenForScan) View.INVISIBLE else View.VISIBLE
+        if (liveStageView?.visibility != stageTargetVis) {
+            liveStageView?.visibility = stageTargetVis
+        }
+        val shouldBeNotTouchable = hide || isTemporarilyHiddenForScan
+        val targetVis = if (isTemporarilyHiddenForScan) View.INVISIBLE else View.VISIBLE
+        val targetAlpha = if (hide && !isTemporarilyHiddenForScan) 0.28f else 1.0f
         for (entry in markerWindows.values) {
             if (entry.root.visibility != targetVis) {
                 entry.root.visibility = targetVis
             }
-            val shouldBeNotTouchable = hide || isTemporarilyHiddenForScan
+            if (entry.root.alpha != targetAlpha) {
+                entry.root.alpha = targetAlpha
+            }
             val currentlyNotTouchable = (entry.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
             if (currentlyNotTouchable != shouldBeNotTouchable) {
                 entry.params.flags = if (shouldBeNotTouchable) {
@@ -1065,6 +1166,7 @@ class FloatingTriggerOverlayService : Service() {
             scanHiddenStage = false
             scanHiddenBlockerPill = false
             scanHiddenMarkerKeys.clear()
+            scanHiddenCoverKeys.clear()
 
             val hud = singleHudView
             val hParams = singleHudParams
@@ -1119,6 +1221,17 @@ class FloatingTriggerOverlayService : Service() {
                 }
             }
 
+            for ((key, cEntry) in coverWindows) {
+                if (cEntry.root.visibility != View.VISIBLE) continue
+                val cw = cEntry.params.width.coerceAtLeast(cEntry.root.width)
+                val ch = cEntry.params.height.coerceAtLeast(cEntry.root.height)
+                val cRect = PixelRect(cEntry.params.x, cEntry.params.y, cEntry.params.x + cw, cEntry.params.y + ch)
+                if (cw > 0 && ch > 0 && ScanRegionGeometry.rectsIntersect(cRect, scanRect)) {
+                    cEntry.root.visibility = View.INVISIBLE
+                    scanHiddenCoverKeys += key
+                }
+            }
+
             val blocker = touchBlockerView
             val pill = touchBlockerStatusPill
             if (blocker != null && blocker.visibility == View.VISIBLE && pill != null && pill.visibility == View.VISIBLE) {
@@ -1131,10 +1244,12 @@ class FloatingTriggerOverlayService : Service() {
                 }
             }
 
-            isTemporarilyHiddenForScan = scanHiddenHud || scanHiddenStage || scanHiddenBlockerPill || scanHiddenMarkerKeys.isNotEmpty()
+            isTemporarilyHiddenForScan = scanHiddenHud || scanHiddenStage || scanHiddenBlockerPill ||
+                scanHiddenMarkerKeys.isNotEmpty() || scanHiddenCoverKeys.isNotEmpty()
             return isTemporarilyHiddenForScan
         } else {
-            val wasHidden = isTemporarilyHiddenForScan || scanHiddenHud || scanHiddenStage || scanHiddenBlockerPill || scanHiddenMarkerKeys.isNotEmpty()
+            val wasHidden = isTemporarilyHiddenForScan || scanHiddenHud || scanHiddenStage || scanHiddenBlockerPill ||
+                scanHiddenMarkerKeys.isNotEmpty() || scanHiddenCoverKeys.isNotEmpty()
             isTemporarilyHiddenForScan = false
 
             if (scanHiddenHud) {
@@ -1152,7 +1267,7 @@ class FloatingTriggerOverlayService : Service() {
 
             if (scanHiddenStage) {
                 scanHiddenStage = false
-                liveStageView?.visibility = if (isTemporarilyHiddenForAutomation) View.INVISIBLE else View.VISIBLE
+                liveStageView?.visibility = View.VISIBLE
             }
 
             if (scanHiddenBlockerPill) {
@@ -1165,13 +1280,22 @@ class FloatingTriggerOverlayService : Service() {
                 scanHiddenMarkerKeys.clear()
                 for (key in keys) {
                     val entry = markerWindows[key] ?: continue
+                    entry.root.visibility = View.VISIBLE
                     if (!isTemporarilyHiddenForAutomation) {
-                        entry.root.visibility = View.VISIBLE
+                        entry.root.alpha = 1.0f
                         if ((entry.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) {
                             entry.params.flags = entry.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
                             try { windowManager.updateViewLayout(entry.root, entry.params) } catch (_: Throwable) {}
                         }
                     }
+                }
+            }
+
+            if (scanHiddenCoverKeys.isNotEmpty()) {
+                val keys = scanHiddenCoverKeys.toList()
+                scanHiddenCoverKeys.clear()
+                for (key in keys) {
+                    coverWindows[key]?.root?.visibility = View.VISIBLE
                 }
             }
             return wasHidden
@@ -1181,6 +1305,9 @@ class FloatingTriggerOverlayService : Service() {
     private fun setAllFloatingWindowsHiddenForScan(hide: Boolean) {
         isTemporarilyHiddenForScan = hide
         setMarkerWindowsTemporaryHidden(hide || isTemporarilyHiddenForAutomation)
+        for (cEntry in coverWindows.values) {
+            cEntry.root.visibility = if (hide) View.INVISIBLE else View.VISIBLE
+        }
         val hud = singleHudView
         val hParams = singleHudParams
         if (hud != null && hParams != null) {
@@ -1214,20 +1341,25 @@ class FloatingTriggerOverlayService : Service() {
 
     private fun buildPinDescriptors(st: UniversalEngineUiState): List<PinDescriptor> {
         val list = mutableListOf<PinDescriptor>()
+        val mediaTypes = setOf(ActionType.PROFILE_OVERLAY, ActionType.MEME_OVERLAY, ActionType.CUSTOM_IMAGE)
         for (rule in st.rules) {
             if (!rule.isPinVisible) continue
             val touchSteps = rule.actionSequence.filter {
                 it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
             }
+            val visualSteps = rule.actionSequence.filter {
+                it.enabled && it.actionType in mediaTypes
+            }
             if (touchSteps.isEmpty()) {
+                val primaryVisual = visualSteps.firstOrNull()
                 list += PinDescriptor(
-                    key = "${rule.id}::root",
+                    key = "${rule.id}::${primaryVisual?.id ?: "root"}",
                     rule = rule,
-                    step = null,
+                    step = primaryVisual,
                     stepIndex = 0,
                     totalTouchSteps = 0,
-                    normX = rule.overlayPosX,
-                    normY = rule.overlayPosY
+                    normX = primaryVisual?.posX ?: rule.overlayPosX,
+                    normY = primaryVisual?.posY ?: rule.overlayPosY
                 )
             } else {
                 touchSteps.forEachIndexed { idx, step ->
@@ -1240,6 +1372,25 @@ class FloatingTriggerOverlayService : Service() {
                         normX = step.posX ?: rule.overlayPosX,
                         normY = step.posY ?: rule.overlayPosY
                     )
+                }
+                val rootX = touchSteps.first().posX ?: rule.overlayPosX
+                val rootY = touchSteps.first().posY ?: rule.overlayPosY
+                for (vStep in visualSteps) {
+                    val vx = vStep.posX ?: rule.overlayPosX
+                    val vy = vStep.posY ?: rule.overlayPosY
+                    val isExplicitSelected = st.activePinRuleId == rule.id && st.activePinStepId == vStep.id
+                    val divergesFromRoot = abs(vx - rootX) > 0.025f || abs(vy - rootY) > 0.025f
+                    if (isExplicitSelected || divergesFromRoot) {
+                        list += PinDescriptor(
+                            key = "${rule.id}::${vStep.id}",
+                            rule = rule,
+                            step = vStep,
+                            stepIndex = 0,
+                            totalTouchSteps = touchSteps.size,
+                            normX = vx,
+                            normY = vy
+                        )
+                    }
                 }
             }
         }
@@ -1270,7 +1421,12 @@ class FloatingTriggerOverlayService : Service() {
                 (step == null || st.activePinStepId == null || step.id == st.activePinStepId)
             val ruleColor = rule.accentColorHex.toInt()
             val shortBadge = buildPinBadgeText(desc)
-            val pinSymbol = if (desc.totalTouchSteps > 1) "${desc.stepIndex}" else "⊕"
+            val pinSymbol = when {
+                desc.step?.actionType == ActionType.PROFILE_OVERLAY -> "👤"
+                desc.step?.actionType == ActionType.MEME_OVERLAY || desc.step?.actionType == ActionType.CUSTOM_IMAGE -> "🖼"
+                desc.totalTouchSteps > 1 -> "${desc.stepIndex}"
+                else -> "⊕"
+            }
             val existing = markerWindows[desc.key]
 
             if (existing == null) {
@@ -1362,10 +1518,15 @@ class FloatingTriggerOverlayService : Service() {
         val xPct = (desc.normX * 100).roundToInt()
         val yPct = (desc.normY * 100).roundToInt()
         val cleanName = desc.rule.triggerName.trim().ifBlank { desc.rule.triggerSource.displayName }.take(10)
-        val stepTag = if (desc.totalTouchSteps > 1) " #${desc.stepIndex}" else ""
+        val mediaTag = when (desc.step?.actionType) {
+            ActionType.PROFILE_OVERLAY -> " 👤"
+            ActionType.MEME_OVERLAY, ActionType.CUSTOM_IMAGE -> " 🖼"
+            else -> ""
+        }
+        val stepTag = if (desc.stepIndex > 0 && desc.totalTouchSteps > 1) " #${desc.stepIndex}" else ""
         val swipeTag = if (desc.step?.actionType == ActionType.SIMULATED_SWIPE) " ↗" else ""
         val muteTag = if (desc.rule.enabled) "" else " [OFF]"
-        return "● $cleanName$stepTag$swipeTag$muteTag ($xPct,$yPct)"
+        return "● $cleanName$mediaTag$stepTag$swipeTag$muteTag ($xPct,$yPct)"
     }
 
     private fun crosshairBg(ruleColor: Int, enabled: Boolean, isSelected: Boolean): GradientDrawable {
@@ -1396,7 +1557,12 @@ class FloatingTriggerOverlayService : Service() {
         val ringSize = dp(38)
         val ringHalf = ringSize / 2
         val ruleColor = rule.accentColorHex.toInt()
-        val pinSymbol = if (desc.totalTouchSteps > 1) "${desc.stepIndex}" else "⊕"
+        val pinSymbol = when {
+            desc.step?.actionType == ActionType.PROFILE_OVERLAY -> "👤"
+            desc.step?.actionType == ActionType.MEME_OVERLAY || desc.step?.actionType == ActionType.CUSTOM_IMAGE -> "🖼"
+            desc.stepIndex > 0 && desc.totalTouchSteps > 1 -> "${desc.stepIndex}"
+            else -> "⊕"
+        }
 
         val root = FrameLayout(this).apply {
             clipChildren = false
@@ -1594,6 +1760,270 @@ class FloatingTriggerOverlayService : Service() {
         }
         markerWindows.clear()
         draggingRuleId = null
+    }
+
+    // ==================== Layer 2B: Area Penutup Layar Game (Custom Ukuran & Posisi) ====================
+
+    private fun syncCoverWindows(st: UniversalEngineUiState) {
+        val visibleAreas = if (st.isCoverEditMode) {
+            st.gameCoverAreas
+        } else {
+            st.gameCoverAreas.filter { it.enabled }
+        }
+        val activeIds = visibleAreas.map { it.id }.toSet()
+        val toRemove = coverWindows.keys.filter { it !in activeIds }
+        for (id in toRemove) {
+            coverWindows.remove(id)?.let { safeRemoveView(it.root) }
+        }
+        if (visibleAreas.isEmpty()) return
+
+        val (screenW, screenH) = getDisplaySizePx()
+        val editMode = st.isCoverEditMode
+
+        for (area in visibleAreas) {
+            if (area.id == draggingCoverId) continue
+            val isSelected = editMode && area.id == st.activeCoverAreaId
+            val rect = GameCoverGeometry.computeCoverRectPx(
+                centerNormX = area.posX,
+                centerNormY = area.posY,
+                widthRatio = area.widthRatio,
+                heightRatio = area.heightRatio,
+                screenW = screenW,
+                screenH = screenH,
+                minSizePx = dp(28)
+            )
+            val cw = (rect.right - rect.left).coerceAtLeast(dp(28))
+            val ch = (rect.bottom - rect.top).coerceAtLeast(dp(28))
+            val existing = coverWindows[area.id]
+            val fillAlpha = ((if (editMode && !area.enabled) 0.45f else area.opacity).coerceIn(0.20f, 1.0f) * 255).roundToInt()
+            val baseColor = area.colorHex.toInt()
+            val argbFill = Color.argb(fillAlpha, Color.red(baseColor), Color.green(baseColor), Color.blue(baseColor))
+            val strokeColor = when {
+                isSelected -> Color.rgb(34, 211, 238)
+                editMode -> Color.argb(200, 148, 163, 184)
+                else -> Color.TRANSPARENT
+            }
+
+            if (existing == null) {
+                createCoverWindow(area, rect, cw, ch, editMode, isSelected, argbFill, strokeColor)
+            } else {
+                existing.root.background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(6).toFloat()
+                    setColor(argbFill)
+                    if (editMode) setStroke(dp(if (isSelected) 2f else 1.2f), strokeColor)
+                }
+                existing.labelPill.text = "${area.name} ${(area.widthRatio * 100).roundToInt()}×${(area.heightRatio * 100).roundToInt()}%"
+                existing.labelPill.visibility = if (editMode) View.VISIBLE else View.GONE
+                existing.resizeHandle.visibility = if (editMode) View.VISIBLE else View.GONE
+                val wantNotTouchable = !editMode
+                val isNotTouchable = (existing.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
+                val posOrFlagChanged = existing.params.x != rect.left ||
+                    existing.params.y != rect.top ||
+                    existing.params.width != cw ||
+                    existing.params.height != ch ||
+                    isNotTouchable != wantNotTouchable
+                existing.params.x = rect.left
+                existing.params.y = rect.top
+                existing.params.width = cw
+                existing.params.height = ch
+                existing.params.flags = if (wantNotTouchable) {
+                    existing.params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                } else {
+                    existing.params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                }
+                if (posOrFlagChanged) {
+                    try {
+                        windowManager.updateViewLayout(existing.root, existing.params)
+                    } catch (_: Throwable) {}
+                }
+            }
+        }
+    }
+
+    private fun createCoverWindow(
+        area: GameCoverArea,
+        rect: PixelRect,
+        cw: Int,
+        ch: Int,
+        editMode: Boolean,
+        isSelected: Boolean,
+        argbFill: Int,
+        strokeColor: Int
+    ) {
+        val root = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(6).toFloat()
+                setColor(argbFill)
+                if (editMode) setStroke(dp(if (isSelected) 2f else 1.2f), strokeColor)
+            }
+        }
+
+        val labelPill = TextView(this).apply {
+            text = "${area.name} ${(area.widthRatio * 100).roundToInt()}×${(area.heightRatio * 100).roundToInt()}%"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(6), dp(2), dp(6), dp(2))
+            visibility = if (editMode) View.VISIBLE else View.GONE
+            background = roundedBoxBg(Color.argb(185, 15, 23, 42), Color.argb(140, 34, 211, 238), dp(0.8f), dp(6).toFloat())
+        }
+        root.addView(
+            labelPill,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.START
+            ).apply {
+                leftMargin = dp(4)
+                topMargin = dp(4)
+            }
+        )
+
+        val resizeHandle = TextView(this).apply {
+            text = "↘"
+            setTextColor(Color.BLACK)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            minimumWidth = dp(26)
+            minimumHeight = dp(26)
+            visibility = if (editMode) View.VISIBLE else View.GONE
+            background = roundedBoxBg(Color.rgb(34, 211, 238), Color.WHITE, dp(1f), dp(6).toFloat())
+        }
+        root.addView(
+            resizeHandle,
+            FrameLayout.LayoutParams(dp(26), dp(26), Gravity.BOTTOM or Gravity.END).apply {
+                rightMargin = dp(2)
+                bottomMargin = dp(2)
+            }
+        )
+
+        val baseFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            if (!editMode) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0
+
+        val params = WindowManager.LayoutParams(
+            cw,
+            ch,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            baseFlags,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = rect.left
+            y = rect.top
+            applyCutoutMode(this)
+        }
+
+        // Move gesture on cover body
+        var moveStartX = 0
+        var moveStartY = 0
+        var downRawX = 0f
+        var downRawY = 0f
+        root.setOnTouchListener { _, ev ->
+            if (!lastState.isCoverEditMode) return@setOnTouchListener false
+            val (sw, sh) = getDisplaySizePx()
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    draggingCoverId = area.id
+                    engine.selectActiveCoverArea(area.id)
+                    moveStartX = params.x
+                    moveStartY = params.y
+                    downRawX = ev.rawX
+                    downRawY = ev.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (ev.rawX - downRawX).roundToInt()
+                    val dy = (ev.rawY - downRawY).roundToInt()
+                    params.x = (moveStartX + dx).coerceIn(0, (sw - params.width).coerceAtLeast(0))
+                    params.y = (moveStartY + dy).coerceIn(0, (sh - params.height).coerceAtLeast(0))
+                    try { windowManager.updateViewLayout(root, params) } catch (_: Throwable) {}
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    draggingCoverId = null
+                    val latest = engine.state.value.gameCoverAreas.firstOrNull { it.id == area.id } ?: area
+                    val cx = ((params.x + params.width / 2f) / sw.coerceAtLeast(1).toFloat()).coerceIn(0.01f, 0.99f)
+                    val cy = ((params.y + params.height / 2f) / sh.coerceAtLeast(1).toFloat()).coerceIn(0.01f, 0.99f)
+                    engine.updateGameCoverArea(latest.copy(posX = cx, posY = cy))
+                    true
+                }
+                else -> false
+            }
+        }
+
+        // Resize gesture on bottom-right handle
+        var resizeStartW = cw
+        var resizeStartH = ch
+        var rDownRawX = 0f
+        var rDownRawY = 0f
+        resizeHandle.setOnTouchListener { v, ev ->
+            if (!lastState.isCoverEditMode) return@setOnTouchListener false
+            val (sw, sh) = getDisplaySizePx()
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                    draggingCoverId = area.id
+                    engine.selectActiveCoverArea(area.id)
+                    resizeStartW = params.width
+                    resizeStartH = params.height
+                    rDownRawX = ev.rawX
+                    rDownRawY = ev.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (ev.rawX - rDownRawX).roundToInt()
+                    val dy = (ev.rawY - rDownRawY).roundToInt()
+                    val maxW = (sw - params.x).coerceAtLeast(dp(36))
+                    val maxH = (sh - params.y).coerceAtLeast(dp(36))
+                    params.width = (resizeStartW + dx).coerceIn(dp(36), maxW)
+                    params.height = (resizeStartH + dy).coerceIn(dp(36), maxH)
+                    val wPct = ((params.width / sw.coerceAtLeast(1).toFloat()) * 100).roundToInt()
+                    val hPct = ((params.height / sh.coerceAtLeast(1).toFloat()) * 100).roundToInt()
+                    labelPill.text = "${area.name} ${wPct}×${hPct}%"
+                    try { windowManager.updateViewLayout(root, params) } catch (_: Throwable) {}
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    v.parent?.requestDisallowInterceptTouchEvent(false)
+                    draggingCoverId = null
+                    val latest = engine.state.value.gameCoverAreas.firstOrNull { it.id == area.id } ?: area
+                    val newWRatio = (params.width / sw.coerceAtLeast(1).toFloat()).coerceIn(0.03f, 0.96f)
+                    val newHRatio = (params.height / sh.coerceAtLeast(1).toFloat()).coerceIn(0.03f, 0.96f)
+                    val newCx = ((params.x + params.width / 2f) / sw.coerceAtLeast(1).toFloat()).coerceIn(0.01f, 0.99f)
+                    val newCy = ((params.y + params.height / 2f) / sh.coerceAtLeast(1).toFloat()).coerceIn(0.01f, 0.99f)
+                    engine.updateGameCoverArea(
+                        latest.copy(
+                            posX = newCx,
+                            posY = newCy,
+                            widthRatio = newWRatio,
+                            heightRatio = newHRatio
+                        )
+                    )
+                    true
+                }
+                else -> false
+            }
+        }
+
+        try {
+            windowManager.addView(root, params)
+            coverWindows[area.id] = CoverWindowEntry(root, labelPill, resizeHandle, params)
+        } catch (t: Throwable) {
+            Log.e(TAG, "Gagal tambah cover window: ${t.message}")
+        }
+    }
+
+    private fun removeAllCoverWindows() {
+        for (entry in coverWindows.values) {
+            safeRemoveView(entry.root)
+        }
+        coverWindows.clear()
+        draggingCoverId = null
     }
 
     // ==================== Layer 3: ONE Safe-Bounded Draggable Floating + Precision D-Pad + Dropdown ====================
@@ -2008,10 +2438,16 @@ class FloatingTriggerOverlayService : Service() {
     }
 
     private fun resolveActiveDpadStep(rule: UniversalTriggerRule, st: UniversalEngineUiState): UniversalActionStep? {
+        val explicit = st.activePinStepId?.let { id ->
+            rule.actionSequence.firstOrNull { it.enabled && it.id == id }
+        }
+        if (explicit != null) return explicit
         val touchSteps = rule.actionSequence.filter {
             it.enabled && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
         }
-        return touchSteps.firstOrNull { it.id == st.activePinStepId } ?: touchSteps.firstOrNull()
+        return touchSteps.firstOrNull() ?: rule.actionSequence.firstOrNull {
+            it.enabled && (it.actionType == ActionType.PROFILE_OVERLAY || it.actionType == ActionType.MEME_OVERLAY || it.actionType == ActionType.CUSTOM_IMAGE)
+        }
     }
 
     private fun nudgeActivePin(dx: Float, dy: Float) {
@@ -2244,11 +2680,15 @@ class FloatingTriggerOverlayService : Service() {
             hud.visibility = View.GONE
             return
         }
-        if (touchHiddenHudForHole || scanHiddenHud || isTemporarilyHiddenForScan) {
+        if (scanHiddenHud || isTemporarilyHiddenForScan) {
             hud.visibility = View.INVISIBLE
             return
         }
         hud.visibility = View.VISIBLE
+        if (touchHiddenHudForHole) {
+            hud.alpha = 0.15f
+            return
+        }
 
         val s = cfg.hudScale.coerceIn(0.65f, 1.35f)
         val collapsedBubble = cfg.hudCollapsed

@@ -255,6 +255,8 @@ fun FloatingInteractionPanelContent(
                             allRules = uiState.rules,
                             activePinStepId = uiState.activePinStepId,
                             isNewEmpty = activeEditRule.actionSequence.isEmpty(),
+                            isDevice2SimpleMode = uiState.isDevice2SimpleMode,
+                            onSetSimpleMode = { engine.setDevice2SimpleMode(it) },
                             onSelectStepPin = { stepId -> engine.selectActivePin(activeEditRule.id, stepId) },
                             onSaveDraftOnly = { updated -> engine.addOrUpdateRule(updated) },
                             onSave = { updated ->
@@ -827,6 +829,8 @@ private fun DropdownConceptEditor(
     allRules: List<UniversalTriggerRule>,
     activePinStepId: String?,
     isNewEmpty: Boolean,
+    isDevice2SimpleMode: Boolean = true,
+    onSetSimpleMode: (Boolean) -> Unit = {},
     onSelectStepPin: (String?) -> Unit,
     onSaveDraftOnly: (UniversalTriggerRule) -> Unit,
     onSave: (UniversalTriggerRule) -> Unit,
@@ -844,9 +848,9 @@ private fun DropdownConceptEditor(
     var draftSource by remember(rule.id) { mutableStateOf(rule.triggerSource) }
     var draftColorHex by remember(rule.id, rule.accentColorHex) { mutableStateOf(rule.accentColorHex) }
     var draftPinVisible by remember(rule.id, rule.isPinVisible) { mutableStateOf(rule.isPinVisible) }
-    var delayBeforeText by remember(rule.id) { mutableStateOf(if (rule.enableDelayBefore) rule.delayBeforeMs.toString() else "0") }
-    var cooldownText by remember(rule.id) { mutableStateOf(if (rule.enableCooldown) rule.cooldownMs.toString() else "0") }
-    var minQtyText by remember(rule.id) { mutableStateOf(if (rule.enableMinimumQuantity) rule.minimumQuantity.toString() else "1") }
+    var draftDelayBeforeMs by remember(rule.id) { mutableStateOf(if (rule.enableDelayBefore) rule.delayBeforeMs else 0L) }
+    var draftCooldownMs by remember(rule.id) { mutableStateOf(if (rule.enableCooldown) rule.cooldownMs else 0L) }
+    var draftMinQty by remember(rule.id) { mutableStateOf(if (rule.enableMinimumQuantity) rule.minimumQuantity.coerceAtLeast(1) else 1) }
     var fineNudge by remember { mutableStateOf(true) }
 
     var draftEnableVisualCooldown by remember(rule.id) { mutableStateOf(rule.enableVisualCooldownWait) }
@@ -855,7 +859,7 @@ private fun DropdownConceptEditor(
     var draftCooldownHeightRatio by remember(rule.id) { mutableStateOf(rule.cooldownAreaHeightRatio.coerceIn(0.025f, 0.55f)) }
     var draftCooldownOffsetX by remember(rule.id) { mutableStateOf(rule.cooldownAreaOffsetX.coerceIn(-0.30f, 0.30f)) }
     var draftCooldownOffsetY by remember(rule.id) { mutableStateOf(rule.cooldownAreaOffsetY.coerceIn(-0.30f, 0.30f)) }
-    var draftCooldownMaxWaitText by remember(rule.id) { mutableStateOf(rule.cooldownMaxWaitMs.toString()) }
+    var draftCooldownMaxWaitMs by remember(rule.id) { mutableStateOf(rule.cooldownMaxWaitMs.coerceIn(1500L, 180_000L)) }
     var showCooldownScanSection by remember(rule.id) { mutableStateOf(rule.enableVisualCooldownWait) }
     var cooldownScanTestMsg by remember(rule.id) { mutableStateOf<String?>(null) }
 
@@ -906,7 +910,7 @@ private fun DropdownConceptEditor(
             when (s.actionType) {
                 ActionType.SIMULATED_CLICK -> {
                     val hold = s.durationMs.coerceIn(0L, 12_000L)
-                    val dragDur = s.dragDurationMs.coerceIn(60L, 5000L)
+                    val dragDur = s.dragDurationMs.coerceIn(0L, 5000L)
                     s.copy(
                         enabled = true,
                         stepName = s.stepName.trim(),
@@ -923,7 +927,7 @@ private fun DropdownConceptEditor(
                     )
                 }
                 ActionType.SIMULATED_SWIPE -> {
-                    val dur = s.durationMs.coerceIn(60L, 5000L)
+                    val dur = s.durationMs.coerceIn(0L, 5000L)
                     s.copy(
                         enabled = true,
                         stepName = s.stepName.trim(),
@@ -936,8 +940,8 @@ private fun DropdownConceptEditor(
                         posY = sy
                     )
                 }
-                ActionType.DELAY -> {
-                    val ms = s.durationMs.coerceIn(50L, 60_000L)
+                ActionType.DELAY, ActionType.WAIT -> {
+                    val ms = s.durationMs.coerceIn(0L, 60_000L)
                     s.copy(
                         enabled = true,
                         stepName = s.stepName.trim(),
@@ -947,7 +951,7 @@ private fun DropdownConceptEditor(
                     )
                 }
                 ActionType.HOME_BACK_GAME -> {
-                    val ms = s.durationMs.coerceIn(200L, 30_000L)
+                    val ms = s.durationMs.coerceIn(0L, 30_000L)
                     s.copy(
                         enabled = true,
                         stepName = s.stepName.trim(),
@@ -960,6 +964,7 @@ private fun DropdownConceptEditor(
                 else -> s.copy(
                     enabled = true,
                     stepName = s.stepName.trim(),
+                    durationMs = s.durationMs.coerceIn(0L, 60_000L),
                     delayMs = s.delayMs.coerceIn(0L, 60_000L),
                     posX = sx,
                     posY = sy,
@@ -970,10 +975,10 @@ private fun DropdownConceptEditor(
         val firstPin = normalized.firstOrNull {
             it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
         }
-        val delayBeforeVal = delayBeforeText.toLongOrNull()?.coerceIn(0L, 60_000L) ?: 0L
-        val cd = cooldownText.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
-        val minQ = minQtyText.toIntOrNull()?.coerceAtLeast(1) ?: 1
-        val maxWait = draftCooldownMaxWaitText.toLongOrNull()?.coerceIn(1500L, 180_000L) ?: 35_000L
+        val delayBeforeVal = draftDelayBeforeMs.coerceIn(0L, 60_000L)
+        val cd = draftCooldownMs.coerceAtLeast(0L)
+        val minQ = draftMinQty.coerceAtLeast(1)
+        val maxWait = draftCooldownMaxWaitMs.coerceIn(1500L, 180_000L)
         rule.copy(
             enabled = true,
             isPinVisible = draftPinVisible,
@@ -1001,9 +1006,18 @@ private fun DropdownConceptEditor(
     }
 
     val buildRule: () -> UniversalTriggerRule = { buildRuleWithSteps(draftSteps) }
-    val hasTouchPins = draftSteps.any {
-        it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
-    }
+    fun isPinDraggableStep(step: UniversalActionStep): Boolean =
+        step.actionType == ActionType.SIMULATED_CLICK ||
+            step.actionType == ActionType.SIMULATED_SWIPE ||
+            step.actionType == ActionType.PROFILE_OVERLAY ||
+            step.actionType == ActionType.MEME_OVERLAY ||
+            step.actionType == ActionType.CUSTOM_IMAGE ||
+            step.actionType == ActionType.TEXT_OVERLAY ||
+            step.actionType == ActionType.SHOW_OVERLAY ||
+            step.actionType == ActionType.ANIMATION ||
+            step.actionType == ActionType.TIER_OVERLAY
+
+    val hasTouchPins = draftSteps.any { isPinDraggableStep(it) }
 
     fun appendDynamicStep(type: ActionType) {
         val lastTouch = draftSteps.lastOrNull {
@@ -1074,8 +1088,8 @@ private fun DropdownConceptEditor(
                 paramValue = "{user}",
                 secondaryValue = "Gift {gift} x{qty}",
                 durationMs = 2800L,
-                posX = 0.50f,
-                posY = 0.22f,
+                posX = bx,
+                posY = by,
                 executionMode = ExecutionMode.PARALLEL
             )
             ActionType.CUSTOM_IMAGE -> UniversalActionStep(
@@ -1096,8 +1110,8 @@ private fun DropdownConceptEditor(
                 paramValue = "{user} • {gift} x{qty}",
                 secondaryValue = "{source}",
                 durationMs = 2500L,
-                posX = 0.50f,
-                posY = 0.25f,
+                posX = bx,
+                posY = by,
                 executionMode = ExecutionMode.PARALLEL
             )
             ActionType.ANIMATION -> UniversalActionStep(
@@ -1107,8 +1121,8 @@ private fun DropdownConceptEditor(
                 paramValue = "BOUNCE",
                 secondaryValue = "{user}!",
                 durationMs = 2200L,
-                posX = 0.50f,
-                posY = 0.35f,
+                posX = bx,
+                posY = by,
                 executionMode = ExecutionMode.PARALLEL
             )
             ActionType.TIER_OVERLAY -> UniversalActionStep(
@@ -1118,8 +1132,8 @@ private fun DropdownConceptEditor(
                 paramValue = "VIP • {user}",
                 secondaryValue = "{gift} ({coins} koin)",
                 durationMs = 2800L,
-                posX = 0.50f,
-                posY = 0.22f,
+                posX = bx,
+                posY = by,
                 executionMode = ExecutionMode.PARALLEL
             )
             ActionType.PLAY_SOUND -> UniversalActionStep(
@@ -1135,8 +1149,8 @@ private fun DropdownConceptEditor(
                 actionType = ActionType.RANDOM_SELECTION,
                 paramValue = "Serang|Recall|Emote|Kabur",
                 durationMs = 2200L,
-                posX = 0.50f,
-                posY = 0.28f,
+                posX = bx,
+                posY = by,
                 executionMode = ExecutionMode.SEQUENTIAL
             )
             ActionType.VOLUME_CONTROL -> UniversalActionStep(
@@ -1205,9 +1219,9 @@ private fun DropdownConceptEditor(
                 if (hasTouchPins) {
                     TextChip("📍 Pin", NeonPurple, Color.White) {
                         val targetStep = draftSteps.firstOrNull {
-                            it.id == expandedStepId && (it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE)
+                            it.id == expandedStepId && isPinDraggableStep(it)
                         } ?: draftSteps.firstOrNull {
-                            it.actionType == ActionType.SIMULATED_CLICK || it.actionType == ActionType.SIMULATED_SWIPE
+                            isPinDraggableStep(it)
                         }
                         onDragExternalStepPin(buildRule(), targetStep?.id)
                     }
@@ -1253,13 +1267,13 @@ private fun DropdownConceptEditor(
                         if (showEventDrop) showConditionDrop = false
                     }
                 }
-                Box(modifier = Modifier.weight(0.85f)) {
-                    val mq = minQtyText.toIntOrNull() ?: 1
-                    val cd = cooldownText.toLongOrNull() ?: 0L
-                    val condLabel = if (mq > 1 || cd > 0L) "Syarat: Aktif" else "Syarat Event"
-                    SubDropdownHeader(condLabel, showConditionDrop) {
-                        showConditionDrop = !showConditionDrop
-                        if (showConditionDrop) showEventDrop = false
+                if (!isDevice2SimpleMode) {
+                    Box(modifier = Modifier.weight(0.85f)) {
+                        val condLabel = if (draftMinQty > 1 || draftCooldownMs > 0L) "Syarat: Aktif" else "Syarat Event"
+                        SubDropdownHeader(condLabel, showConditionDrop) {
+                            showConditionDrop = !showConditionDrop
+                            if (showConditionDrop) showEventDrop = false
+                        }
                     }
                 }
             }
@@ -1298,21 +1312,27 @@ private fun DropdownConceptEditor(
                 )
             }
 
-            if (showConditionDrop) {
+            if (!isDevice2SimpleMode && showConditionDrop) {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    ComfortableInput(
+                    ComfortableMsInput(
                         label = "Min Qty",
-                        value = minQtyText,
-                        onValueChange = { minQtyText = it.filter(Char::isDigit) },
-                        keyboardType = KeyboardType.Number,
+                        value = draftMinQty.toLong(),
+                        onValueCommitted = { draftMinQty = it.toInt().coerceIn(1, 99_999) },
+                        minValue = 1L,
+                        maxValue = 99_999L,
+                        maxDigits = 5,
+                        resetKey = rule.id,
                         onFocusChange = onKeyboardFocusChanged,
                         modifier = Modifier.weight(0.8f)
                     )
-                    ComfortableInput(
+                    ComfortableMsInput(
                         label = "Jeda Antar Trigger (ms)",
-                        value = cooldownText,
-                        onValueChange = { cooldownText = it.filter(Char::isDigit) },
-                        keyboardType = KeyboardType.Number,
+                        value = draftCooldownMs,
+                        onValueCommitted = { draftCooldownMs = it },
+                        minValue = 0L,
+                        maxValue = 600_000L,
+                        maxDigits = 6,
+                        resetKey = rule.id,
                         onFocusChange = onKeyboardFocusChanged,
                         modifier = Modifier.weight(1.2f)
                     )
@@ -1320,7 +1340,29 @@ private fun DropdownConceptEditor(
             }
         }
 
-        // BAGIAN 2: PRA-AKSI (Delay Scan Cooldown ML atau Delay Awal)
+        // BAGIAN 2: PRA-AKSI (Disembunyikan di Mode 2-HP Simpel; diatur lewat Device 1 Web)
+        if (isDevice2SimpleMode) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(DarkSurface)
+                    .border(0.8.dp, NeonCyan.copy(alpha = 0.45f), RoundedCornerShape(7.dp))
+                    .padding(horizontal = 7.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "⚙️ Detail timing, scan OCR & syarat diatur di Web Device 1",
+                    color = Color(0xFFCBD5E1),
+                    fontSize = 7.8.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                TextChip("🎛️ Buka Detail", NeonCyan, Color.Black) {
+                    onSetSimpleMode(false)
+                }
+            }
+        } else {
         ConceptSectionCard(stepNumber = "2", title = "Pra-Aksi (Sebelum Koreografi)", accent = NeonOrange) {
             Column(
                 modifier = Modifier
@@ -1459,11 +1501,14 @@ private fun DropdownConceptEditor(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        ComfortableInput(
+                        ComfortableMsInput(
                             label = "Max Tunggu(ms)",
-                            value = draftCooldownMaxWaitText,
-                            onValueChange = { draftCooldownMaxWaitText = it.filter(Char::isDigit).take(6) },
-                            keyboardType = KeyboardType.Number,
+                            value = draftCooldownMaxWaitMs,
+                            onValueCommitted = { draftCooldownMaxWaitMs = it },
+                            minValue = 1500L,
+                            maxValue = 180_000L,
+                            maxDigits = 6,
+                            resetKey = rule.id,
                             onFocusChange = onKeyboardFocusChanged,
                             modifier = Modifier.weight(1f)
                         )
@@ -1499,14 +1544,18 @@ private fun DropdownConceptEditor(
                     fontWeight = FontWeight.SemiBold
                 )
             } else {
-                ComfortableInput(
+                ComfortableMsInput(
                     label = "⏱️ Delay Awal Sebelum Koreografi (ms)",
-                    value = delayBeforeText,
-                    onValueChange = { delayBeforeText = it.filter(Char::isDigit).take(6) },
-                    keyboardType = KeyboardType.Number,
+                    value = draftDelayBeforeMs,
+                    onValueCommitted = { draftDelayBeforeMs = it },
+                    minValue = 0L,
+                    maxValue = 60_000L,
+                    maxDigits = 5,
+                    resetKey = rule.id,
                     onFocusChange = onKeyboardFocusChanged
                 )
             }
+        }
         }
 
         // BAGIAN 3: LANGKAH KOREOGRAFI
@@ -1620,9 +1669,6 @@ private fun DropdownConceptEditor(
                             draftSteps = draftSteps.map { if (it.id == step.id) transform(it) else it }
                         }
 
-                        var stepDelayDraft by remember(step.id, step.delayMs) {
-                            mutableStateOf(step.delayMs.toString())
-                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             ComfortableInput(
                                 label = "Nama Langkah",
@@ -1631,18 +1677,17 @@ private fun DropdownConceptEditor(
                                 onFocusChange = onKeyboardFocusChanged,
                                 modifier = Modifier.weight(1.35f)
                             )
-                            if (step.actionType != ActionType.DELAY && step.actionType != ActionType.WAIT) {
-                                ComfortableInput(
+                            if (!isDevice2SimpleMode && step.actionType != ActionType.DELAY && step.actionType != ActionType.WAIT) {
+                                ComfortableMsInput(
                                     label = "Delay(ms)",
-                                    value = stepDelayDraft,
-                                    onValueChange = { raw ->
-                                        val digits = raw.filter(Char::isDigit).take(5)
-                                        stepDelayDraft = digits
-                                        digits.toLongOrNull()?.let { v ->
-                                            updateCurrentStep { it.copy(delayMs = v.coerceIn(0L, 60_000L)) }
-                                        }
+                                    value = step.delayMs,
+                                    onValueCommitted = { v ->
+                                        updateCurrentStep { it.copy(delayMs = v) }
                                     },
-                                    keyboardType = KeyboardType.Number,
+                                    minValue = 0L,
+                                    maxValue = 60_000L,
+                                    maxDigits = 5,
+                                    resetKey = step.id,
                                     onFocusChange = onKeyboardFocusChanged,
                                     modifier = Modifier.weight(0.65f)
                                 )
@@ -1671,151 +1716,134 @@ private fun DropdownConceptEditor(
                                             }
                                         }
                                     }
-                                    ComfortableInput(
-                                        label = "Arah Custom (opsional: 45° atau X,Y mis. 0.80,0.40)",
-                                        value = step.paramValue,
-                                        onValueChange = { raw -> updateCurrentStep { it.copy(paramValue = raw) } },
-                                        onFocusChange = onKeyboardFocusChanged
-                                    )
+                                    if (!isDevice2SimpleMode) {
+                                        ComfortableInput(
+                                            label = "Arah Custom (opsional: 45° atau X,Y mis. 0.80,0.40)",
+                                            value = step.paramValue,
+                                            onValueChange = { raw -> updateCurrentStep { it.copy(paramValue = raw) } },
+                                            onFocusChange = onKeyboardFocusChanged
+                                        )
+                                    }
                                 }
 
-                                var durationDraft by remember(step.id, step.durationMs) {
-                                    mutableStateOf(step.durationMs.toString())
-                                }
-                                var repeatDraft by remember(step.id, step.repeatCount) {
-                                    mutableStateOf(step.repeatCount.toString())
-                                }
-
-                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    ComfortableInput(
-                                        label = if (step.actionType == ActionType.SIMULATED_SWIPE) "Durasi(ms)" else "Tahan(ms, 0=Klik)",
-                                        value = durationDraft,
-                                        onValueChange = { raw ->
-                                            val digits = raw.filter(Char::isDigit).take(5)
-                                            durationDraft = digits
-                                            digits.toLongOrNull()?.let { v ->
-                                                val c = if (step.actionType == ActionType.SIMULATED_CLICK) {
-                                                    v.coerceIn(0L, 12_000L)
-                                                } else {
-                                                    v.coerceIn(60L, 5000L)
-                                                }
+                                if (!isDevice2SimpleMode) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        ComfortableMsInput(
+                                            label = if (step.actionType == ActionType.SIMULATED_SWIPE) "Durasi(ms)" else "Tahan(ms, 0=Klik)",
+                                            value = step.durationMs,
+                                            onValueCommitted = { c ->
                                                 updateCurrentStep {
                                                     it.copy(durationMs = c, secondaryValue = c.toString())
                                                 }
-                                            }
-                                        },
-                                        keyboardType = KeyboardType.Number,
-                                        onFocusChange = onKeyboardFocusChanged,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    ComfortableInput(
-                                        label = "Ulang(x)",
-                                        value = repeatDraft,
-                                        onValueChange = { raw ->
-                                            val digits = raw.filter(Char::isDigit).take(2)
-                                            repeatDraft = digits
-                                            digits.toIntOrNull()?.let { v ->
-                                                updateCurrentStep { it.copy(repeatCount = v.coerceIn(1, 20)) }
-                                            }
-                                        },
-                                        keyboardType = KeyboardType.Number,
-                                        onFocusChange = onKeyboardFocusChanged,
-                                        modifier = Modifier.weight(0.75f)
-                                    )
-                                }
-
-                                if (step.actionType == ActionType.SIMULATED_CLICK) {
-                                    FlowRow(
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
-                                        SelectPill("0ms (Klik)", step.durationMs == 0L) {
-                                            durationDraft = "0"
-                                            updateCurrentStep { it.copy(durationMs = 0L, secondaryValue = "0") }
-                                        }
-                                        SelectPill("400ms", step.durationMs == 400L) {
-                                            durationDraft = "400"
-                                            updateCurrentStep { it.copy(durationMs = 400L, secondaryValue = "400") }
-                                        }
-                                        SelectPill("1000ms", step.durationMs == 1000L) {
-                                            durationDraft = "1000"
-                                            updateCurrentStep { it.copy(durationMs = 1000L, secondaryValue = "1000") }
-                                        }
-                                    }
-
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(DarkBackground.copy(alpha = 0.65f))
-                                            .padding(horizontal = 7.dp, vertical = 4.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = "✊ Tahan + Geser → Lepas",
-                                                color = if (step.holdAndDrag) NeonCyan else Color(0xFFCBD5E1),
-                                                fontSize = 8.8.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                            Text(
-                                                text = "Tahan (${step.durationMs}ms), lalu geser arah pilihan tanpa melepas jari.",
-                                                color = Color(0xFF94A3B8),
-                                                fontSize = 7.4.sp
-                                            )
-                                        }
-                                        Switch(
-                                            checked = step.holdAndDrag,
-                                            onCheckedChange = { checked ->
-                                                updateCurrentStep { it.copy(holdAndDrag = checked) }
                                             },
-                                            colors = SwitchDefaults.colors(checkedTrackColor = NeonCyan)
+                                            minValue = 0L,
+                                            maxValue = if (step.actionType == ActionType.SIMULATED_CLICK) 12_000L else 5000L,
+                                            maxDigits = 5,
+                                            resetKey = step.id,
+                                            onFocusChange = onKeyboardFocusChanged,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        ComfortableMsInput(
+                                            label = "Ulang(x)",
+                                            value = step.repeatCount.toLong(),
+                                            onValueCommitted = { v ->
+                                                updateCurrentStep { it.copy(repeatCount = v.toInt().coerceIn(1, 20)) }
+                                            },
+                                            minValue = 1L,
+                                            maxValue = 20L,
+                                            maxDigits = 2,
+                                            resetKey = step.id,
+                                            onFocusChange = onKeyboardFocusChanged,
+                                            modifier = Modifier.weight(0.75f)
                                         )
                                     }
 
-                                    if (step.holdAndDrag) {
+                                    if (step.actionType == ActionType.SIMULATED_CLICK) {
                                         FlowRow(
                                             horizontalArrangement = Arrangement.spacedBy(4.dp),
                                             verticalArrangement = Arrangement.spacedBy(4.dp)
                                         ) {
-                                            listOf(
-                                                "LEFT" to "⬅ Kiri",
-                                                "RIGHT" to "➡ Kanan",
-                                                "UP" to "⬆ Atas",
-                                                "DOWN" to "⬇ Bawah",
-                                                "RANDOM" to "🎲 Random"
-                                            ).forEach { (dir, label) ->
-                                                SelectPill(label, step.dragDirection.equals(dir, ignoreCase = true)) {
-                                                    updateCurrentStep { it.copy(dragDirection = dir) }
-                                                }
+                                            SelectPill("0ms (Klik)", step.durationMs == 0L) {
+                                                updateCurrentStep { it.copy(durationMs = 0L, secondaryValue = "0") }
+                                            }
+                                            SelectPill("400ms", step.durationMs == 400L) {
+                                                updateCurrentStep { it.copy(durationMs = 400L, secondaryValue = "400") }
+                                            }
+                                            SelectPill("1000ms", step.durationMs == 1000L) {
+                                                updateCurrentStep { it.copy(durationMs = 1000L, secondaryValue = "1000") }
                                             }
                                         }
-                                        var dragDurDraft by remember(step.id, step.dragDurationMs) {
-                                            mutableStateOf(step.dragDurationMs.toString())
-                                        }
-                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                            ComfortableInput(
-                                                label = "Arah Geser (atau 45° / X,Y)",
-                                                value = step.dragDirection,
-                                                onValueChange = { raw -> updateCurrentStep { it.copy(dragDirection = raw) } },
-                                                onFocusChange = onKeyboardFocusChanged,
-                                                modifier = Modifier.weight(1.25f)
-                                            )
-                                            ComfortableInput(
-                                                label = "Durasi Geser(ms)",
-                                                value = dragDurDraft,
-                                                onValueChange = { raw ->
-                                                    val digits = raw.filter(Char::isDigit).take(4)
-                                                    dragDurDraft = digits
-                                                    digits.toLongOrNull()?.let { v ->
-                                                        updateCurrentStep { it.copy(dragDurationMs = v.coerceIn(60L, 5000L)) }
-                                                    }
+
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(DarkBackground.copy(alpha = 0.65f))
+                                                .padding(horizontal = 7.dp, vertical = 4.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = "✊ Tahan + Geser → Lepas",
+                                                    color = if (step.holdAndDrag) NeonCyan else Color(0xFFCBD5E1),
+                                                    fontSize = 8.8.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Text(
+                                                    text = "Tahan (${step.durationMs}ms), lalu geser arah pilihan tanpa melepas jari.",
+                                                    color = Color(0xFF94A3B8),
+                                                    fontSize = 7.4.sp
+                                                )
+                                            }
+                                            Switch(
+                                                checked = step.holdAndDrag,
+                                                onCheckedChange = { checked ->
+                                                    updateCurrentStep { it.copy(holdAndDrag = checked) }
                                                 },
-                                                keyboardType = KeyboardType.Number,
-                                                onFocusChange = onKeyboardFocusChanged,
-                                                modifier = Modifier.weight(0.85f)
+                                                colors = SwitchDefaults.colors(checkedTrackColor = NeonCyan)
                                             )
+                                        }
+
+                                        if (step.holdAndDrag) {
+                                            FlowRow(
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                listOf(
+                                                    "LEFT" to "⬅ Kiri",
+                                                    "RIGHT" to "➡ Kanan",
+                                                    "UP" to "⬆ Atas",
+                                                    "DOWN" to "⬇ Bawah",
+                                                    "RANDOM" to "🎲 Random"
+                                                ).forEach { (dir, label) ->
+                                                    SelectPill(label, step.dragDirection.equals(dir, ignoreCase = true)) {
+                                                        updateCurrentStep { it.copy(dragDirection = dir) }
+                                                    }
+                                                }
+                                            }
+                                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                ComfortableInput(
+                                                    label = "Arah Geser (atau 45° / X,Y)",
+                                                    value = step.dragDirection,
+                                                    onValueChange = { raw -> updateCurrentStep { it.copy(dragDirection = raw) } },
+                                                    onFocusChange = onKeyboardFocusChanged,
+                                                    modifier = Modifier.weight(1.25f)
+                                                )
+                                                ComfortableMsInput(
+                                                    label = "Durasi Geser(ms)",
+                                                    value = step.dragDurationMs,
+                                                    onValueCommitted = { v ->
+                                                        updateCurrentStep { it.copy(dragDurationMs = v) }
+                                                    },
+                                                    minValue = 0L,
+                                                    maxValue = 5000L,
+                                                    maxDigits = 4,
+                                                    resetKey = step.id,
+                                                    onFocusChange = onKeyboardFocusChanged,
+                                                    modifier = Modifier.weight(0.85f)
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -1859,17 +1887,26 @@ private fun DropdownConceptEditor(
                             }
 
                             ActionType.DELAY, ActionType.WAIT -> {
-                                ComfortableInput(
-                                    label = "Durasi Jeda (ms)",
-                                    value = step.durationMs.toString(),
-                                    onValueChange = { raw ->
-                                        val v = raw.filter(Char::isDigit).toLongOrNull() ?: 500L
-                                        val c = v.coerceIn(50L, 60_000L)
-                                        updateCurrentStep { it.copy(durationMs = c, paramValue = c.toString()) }
-                                    },
-                                    keyboardType = KeyboardType.Number,
-                                    onFocusChange = onKeyboardFocusChanged
-                                )
+                                if (!isDevice2SimpleMode) {
+                                    ComfortableMsInput(
+                                        label = "Durasi Jeda (ms)",
+                                        value = step.durationMs,
+                                        onValueCommitted = { c ->
+                                            updateCurrentStep { it.copy(durationMs = c, paramValue = c.toString()) }
+                                        },
+                                        minValue = 0L,
+                                        maxValue = 60_000L,
+                                        maxDigits = 5,
+                                        resetKey = step.id,
+                                        onFocusChange = onKeyboardFocusChanged
+                                    )
+                                } else {
+                                    Text(
+                                        text = "⏱️ Jeda: ${step.durationMs} ms (ubah ms detail di Device 1 Web)",
+                                        color = Color(0xFF94A3B8),
+                                        fontSize = 8.sp
+                                    )
+                                }
                             }
 
                             ActionType.HOME_BACK_GAME -> {
@@ -1897,17 +1934,20 @@ private fun DropdownConceptEditor(
                                     }
                                 }
 
-                                ComfortableInput(
-                                    label = "Jeda di Home (ms)",
-                                    value = step.durationMs.toString(),
-                                    onValueChange = { raw ->
-                                        val v = raw.filter(Char::isDigit).toLongOrNull() ?: 1500L
-                                        val c = v.coerceIn(200L, 30_000L)
-                                        updateCurrentStep { it.copy(durationMs = c, paramValue = c.toString()) }
-                                    },
-                                    keyboardType = KeyboardType.Number,
-                                    onFocusChange = onKeyboardFocusChanged
-                                )
+                                if (!isDevice2SimpleMode) {
+                                    ComfortableMsInput(
+                                        label = "Jeda di Home (ms)",
+                                        value = step.durationMs,
+                                        onValueCommitted = { c ->
+                                            updateCurrentStep { it.copy(durationMs = c, paramValue = c.toString()) }
+                                        },
+                                        minValue = 0L,
+                                        maxValue = 30_000L,
+                                        maxDigits = 5,
+                                        resetKey = step.id,
+                                        onFocusChange = onKeyboardFocusChanged
+                                    )
+                                }
 
                                 Row(
                                     modifier = Modifier
@@ -2123,117 +2163,152 @@ private fun DropdownConceptEditor(
                                     }
                                 }
 
-                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    if (!isMemeOrCustomImage && !isAnimation) {
+                                if (!isDevice2SimpleMode) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        if (!isMemeOrCustomImage && !isAnimation) {
+                                            ComfortableInput(
+                                                label = if (isProfileOverlay) "Judul ({user})" else "Teks ({user}/{gift})",
+                                                value = step.paramValue,
+                                                onValueChange = { raw -> updateCurrentStep { it.copy(paramValue = raw) } },
+                                                onFocusChange = onKeyboardFocusChanged,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
                                         ComfortableInput(
-                                            label = if (isProfileOverlay) "Judul ({user})" else "Teks ({user}/{gift})",
-                                            value = step.paramValue,
-                                            onValueChange = { raw -> updateCurrentStep { it.copy(paramValue = raw) } },
+                                            label = if (isMemeOrCustomImage) "Caption (opsional)" else "Subjudul",
+                                            value = step.secondaryValue,
+                                            onValueChange = { raw -> updateCurrentStep { it.copy(secondaryValue = raw) } },
                                             onFocusChange = onKeyboardFocusChanged,
                                             modifier = Modifier.weight(1f)
                                         )
+                                        ComfortableMsInput(
+                                            label = "Durasi(ms)",
+                                            value = step.durationMs,
+                                            onValueCommitted = { v ->
+                                                updateCurrentStep { it.copy(durationMs = v) }
+                                            },
+                                            minValue = 0L,
+                                            maxValue = 60_000L,
+                                            maxDigits = 5,
+                                            resetKey = step.id,
+                                            onFocusChange = onKeyboardFocusChanged,
+                                            modifier = Modifier.weight(0.65f)
+                                        )
                                     }
-                                    ComfortableInput(
-                                        label = if (isMemeOrCustomImage) "Caption (opsional)" else "Subjudul",
-                                        value = step.secondaryValue,
-                                        onValueChange = { raw -> updateCurrentStep { it.copy(secondaryValue = raw) } },
-                                        onFocusChange = onKeyboardFocusChanged,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    ComfortableInput(
-                                        label = "Durasi(ms)",
-                                        value = step.durationMs.toString(),
-                                        onValueChange = { raw ->
-                                            val v = raw.filter(Char::isDigit).toLongOrNull() ?: 2500L
-                                            updateCurrentStep { it.copy(durationMs = v.coerceIn(300L, 30_000L)) }
-                                        },
-                                        keyboardType = KeyboardType.Number,
-                                        onFocusChange = onKeyboardFocusChanged,
-                                        modifier = Modifier.weight(0.65f)
-                                    )
-                                }
 
-                                val curScale = step.overlayScale.coerceIn(0.35f, 3.0f)
-                                val curX = (step.posX ?: rule.overlayPosX).coerceIn(0.05f, 0.95f)
-                                val curY = (step.posY ?: rule.overlayPosY).coerceIn(0.05f, 0.95f)
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(5.dp))
-                                        .background(DarkBackground.copy(alpha = 0.7f))
-                                        .padding(horizontal = 5.dp, vertical = 3.dp),
-                                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                                ) {
-                                    PrecisionStepperBar(
-                                        label = "Ukuran",
-                                        valueText = "${(curScale * 100).roundToInt()}%",
-                                        accent = NeonCyan,
-                                        onDecrementCoarse = {
-                                            updateCurrentStep { it.copy(overlayScale = (curScale - 0.25f).coerceIn(0.35f, 3.0f)) }
-                                        },
-                                        onDecrement = {
-                                            updateCurrentStep { it.copy(overlayScale = (curScale - 0.05f).coerceIn(0.35f, 3.0f)) }
-                                        },
-                                        onIncrement = {
-                                            updateCurrentStep { it.copy(overlayScale = (curScale + 0.05f).coerceIn(0.35f, 3.0f)) }
-                                        },
-                                        onIncrementCoarse = {
-                                            updateCurrentStep { it.copy(overlayScale = (curScale + 0.25f).coerceIn(0.35f, 3.0f)) }
+                                    val curScale = step.overlayScale.coerceIn(0.35f, 3.0f)
+                                    val curX = (step.posX ?: rule.overlayPosX).coerceIn(0.05f, 0.95f)
+                                    val curY = (step.posY ?: rule.overlayPosY).coerceIn(0.05f, 0.95f)
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(5.dp))
+                                            .background(DarkBackground.copy(alpha = 0.7f))
+                                            .padding(horizontal = 5.dp, vertical = 3.dp),
+                                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                                    ) {
+                                        PrecisionStepperBar(
+                                            label = "Ukuran",
+                                            valueText = "${(curScale * 100).roundToInt()}%",
+                                            accent = NeonCyan,
+                                            onDecrementCoarse = {
+                                                updateCurrentStep { it.copy(overlayScale = (curScale - 0.25f).coerceIn(0.35f, 3.0f)) }
+                                            },
+                                            onDecrement = {
+                                                updateCurrentStep { it.copy(overlayScale = (curScale - 0.05f).coerceIn(0.35f, 3.0f)) }
+                                            },
+                                            onIncrement = {
+                                                updateCurrentStep { it.copy(overlayScale = (curScale + 0.05f).coerceIn(0.35f, 3.0f)) }
+                                            },
+                                            onIncrementCoarse = {
+                                                updateCurrentStep { it.copy(overlayScale = (curScale + 0.25f).coerceIn(0.35f, 3.0f)) }
+                                            }
+                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            SelectPill("55%", curScale < 0.75f) {
+                                                updateCurrentStep { it.copy(overlayScale = 0.55f) }
+                                            }
+                                            SelectPill("100%", curScale in 0.75f..1.3f) {
+                                                updateCurrentStep { it.copy(overlayScale = 1.0f) }
+                                            }
+                                            SelectPill("165%", curScale > 1.3f && curScale < 2.1f) {
+                                                updateCurrentStep { it.copy(overlayScale = 1.65f) }
+                                            }
+                                            SelectPill("240%", curScale >= 2.1f) {
+                                                updateCurrentStep { it.copy(overlayScale = 2.4f) }
+                                            }
+                                            Spacer(modifier = Modifier.weight(1f))
+                                            SelectPill("Atas", curY < 0.35f) {
+                                                updateCurrentStep { it.copy(posX = 0.5f, posY = 0.22f) }
+                                            }
+                                            SelectPill("Tengah", curY in 0.35f..0.65f) {
+                                                updateCurrentStep { it.copy(posX = 0.5f, posY = 0.50f) }
+                                            }
+                                            SelectPill("Bawah", curY > 0.65f) {
+                                                updateCurrentStep { it.copy(posX = 0.5f, posY = 0.78f) }
+                                            }
                                         }
-                                    )
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            PrecisionStepperBar(
+                                                label = "X",
+                                                valueText = "${(curX * 100).roundToInt()}%",
+                                                accent = NeonOrange,
+                                                onDecrement = {
+                                                    updateCurrentStep { it.copy(posX = (curX - 0.04f).coerceIn(0.05f, 0.95f)) }
+                                                },
+                                                onIncrement = {
+                                                    updateCurrentStep { it.copy(posX = (curX + 0.04f).coerceIn(0.05f, 0.95f)) }
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            PrecisionStepperBar(
+                                                label = "Y",
+                                                valueText = "${(curY * 100).roundToInt()}%",
+                                                accent = NeonPurple,
+                                                onDecrement = {
+                                                    updateCurrentStep { it.copy(posY = (curY - 0.04f).coerceIn(0.05f, 0.95f)) }
+                                                },
+                                                onIncrement = {
+                                                    updateCurrentStep { it.copy(posY = (curY + 0.04f).coerceIn(0.05f, 0.95f)) }
+                                                },
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "Media tepat memusat di titik pin (${(curX * 100).roundToInt()}%, ${(curY * 100).roundToInt()}%)",
+                                                color = Color(0xFF94A3B8),
+                                                fontSize = 7.3.sp,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            TextChip("📍 Geser Pin", NeonPurple, Color.White) {
+                                                onDragExternalStepPin(buildRule(), step.id)
+                                            }
+                                        }
+                                    }
+                                } else {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        SelectPill("55%", curScale < 0.75f) {
-                                            updateCurrentStep { it.copy(overlayScale = 0.55f) }
-                                        }
-                                        SelectPill("100%", curScale in 0.75f..1.3f) {
-                                            updateCurrentStep { it.copy(overlayScale = 1.0f) }
-                                        }
-                                        SelectPill("165%", curScale > 1.3f && curScale < 2.1f) {
-                                            updateCurrentStep { it.copy(overlayScale = 1.65f) }
-                                        }
-                                        SelectPill("240%", curScale >= 2.1f) {
-                                            updateCurrentStep { it.copy(overlayScale = 2.4f) }
-                                        }
-                                        Spacer(modifier = Modifier.weight(1f))
-                                        SelectPill("Atas", curY < 0.35f) {
-                                            updateCurrentStep { it.copy(posX = 0.5f, posY = 0.22f) }
-                                        }
-                                        SelectPill("Tengah", curY in 0.35f..0.65f) {
-                                            updateCurrentStep { it.copy(posX = 0.5f, posY = 0.50f) }
-                                        }
-                                        SelectPill("Bawah", curY > 0.65f) {
-                                            updateCurrentStep { it.copy(posX = 0.5f, posY = 0.78f) }
-                                        }
-                                    }
-                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        PrecisionStepperBar(
-                                            label = "X",
-                                            valueText = "${(curX * 100).roundToInt()}%",
-                                            accent = NeonOrange,
-                                            onDecrement = {
-                                                updateCurrentStep { it.copy(posX = (curX - 0.04f).coerceIn(0.05f, 0.95f)) }
-                                            },
-                                            onIncrement = {
-                                                updateCurrentStep { it.copy(posX = (curX + 0.04f).coerceIn(0.05f, 0.95f)) }
-                                            },
+                                        Text(
+                                            text = "📍 Posisi tampil tepat di pin (${(((step.posX ?: rule.overlayPosX) * 100).roundToInt())}%, ${(((step.posY ?: rule.overlayPosY) * 100).roundToInt())}%)",
+                                            color = Color(0xFF94A3B8),
+                                            fontSize = 7.5.sp,
                                             modifier = Modifier.weight(1f)
                                         )
-                                        PrecisionStepperBar(
-                                            label = "Y",
-                                            valueText = "${(curY * 100).roundToInt()}%",
-                                            accent = NeonPurple,
-                                            onDecrement = {
-                                                updateCurrentStep { it.copy(posY = (curY - 0.04f).coerceIn(0.05f, 0.95f)) }
-                                            },
-                                            onIncrement = {
-                                                updateCurrentStep { it.copy(posY = (curY + 0.04f).coerceIn(0.05f, 0.95f)) }
-                                            },
-                                            modifier = Modifier.weight(1f)
-                                        )
+                                        TextChip("📍 Geser Pin", NeonPurple, Color.White) {
+                                            onDragExternalStepPin(buildRule(), step.id)
+                                        }
                                     }
                                 }
                             }
@@ -2320,16 +2395,18 @@ private fun DropdownConceptEditor(
                             }
                         }
 
-                        // Opsi urutan eksekusi langkah (Berurutan vs Bersamaan)
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(3.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            SelectPill("Berurutan", step.executionMode == ExecutionMode.SEQUENTIAL) {
-                                updateCurrentStep { it.copy(executionMode = ExecutionMode.SEQUENTIAL) }
-                            }
-                            SelectPill("Bersamaan", step.executionMode == ExecutionMode.PARALLEL) {
-                                updateCurrentStep { it.copy(executionMode = ExecutionMode.PARALLEL) }
+                        // Opsi urutan eksekusi langkah (Berurutan vs Bersamaan - di Mode Simpel diatur lewat Device 1 Web)
+                        if (!isDevice2SimpleMode) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                SelectPill("Berurutan", step.executionMode == ExecutionMode.SEQUENTIAL) {
+                                    updateCurrentStep { it.copy(executionMode = ExecutionMode.SEQUENTIAL) }
+                                }
+                                SelectPill("Bersamaan", step.executionMode == ExecutionMode.PARALLEL) {
+                                    updateCurrentStep { it.copy(executionMode = ExecutionMode.PARALLEL) }
+                                }
                             }
                         }
                     }
@@ -2649,8 +2726,47 @@ private fun DropdownLiveSettingsSection(
     val relayConfig by prefs.config.collectAsState()
     val relayStatus by receiver.connectionStatus.collectAsState()
     var hostInput by remember(relayConfig.serverHost) { mutableStateOf(relayConfig.serverHost) }
+    val controllerUrl = "http://${relayConfig.serverHost}:${relayConfig.serverPort}/controller"
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        // Toggle Mode Kerja: 📱 Simpel (2-HP) ↔ 🎛️ Lengkap
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(DarkSurface)
+                .border(
+                    0.7.dp,
+                    if (uiState.isDevice2SimpleMode) NeonCyan.copy(alpha = 0.6f) else NeonPurple.copy(alpha = 0.6f),
+                    RoundedCornerShape(6.dp)
+                )
+                .padding(horizontal = 7.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (uiState.isDevice2SimpleMode) "📱 Mode: 2-HP Simpel" else "🎛️ Mode: 1-HP Lengkap",
+                    color = if (uiState.isDevice2SimpleMode) NeonCyan else NeonPurple,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Black
+                )
+                Text(
+                    text = if (uiState.isDevice2SimpleMode) "Detail timing & OCR diatur via Web Device 1" else "Semua menu detail aktif di HP ini",
+                    color = Color(0xFF94A3B8),
+                    fontSize = 7.3.sp
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                SelectPill("Simpel", uiState.isDevice2SimpleMode) {
+                    engine.setDevice2SimpleMode(true)
+                }
+                SelectPill("Lengkap", !uiState.isDevice2SimpleMode) {
+                    engine.setDevice2SimpleMode(false)
+                }
+            }
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2708,6 +2824,13 @@ private fun DropdownLiveSettingsSection(
                     }
                 }
             }
+            Text(
+                text = "🎛️ Web Device 1: $controllerUrl",
+                color = EmeraldGreen,
+                fontSize = 7.8.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -2761,7 +2884,7 @@ private fun DropdownLiveSettingsSection(
             Column(modifier = Modifier.weight(1f)) {
                 Text("🔒 Blokir Sentuhan Layar Saat Challenge", color = Color.White, fontSize = 8.8.sp, fontWeight = FontWeight.Bold)
                 Text(
-                    text = "Sentuhan manual terkunci penuh selama challenge & antrian aktif.",
+                    text = "Sentuhan manual terkunci penuh selama challenge aktif berjalan.",
                     color = Color(0xFF94A3B8),
                     fontSize = 7.3.sp
                 )
@@ -2773,6 +2896,231 @@ private fun DropdownLiveSettingsSection(
             )
         }
 
+        // Delay Global Sebelum & Sesudah Aksi (hanya di Mode Lengkap)
+        if (!uiState.isDevice2SimpleMode) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(DarkSurface)
+                .border(
+                    0.7.dp,
+                    if (uiState.globalDelayBeforeMs > 0L || uiState.globalDelayAfterMs > 0L) NeonCyan.copy(alpha = 0.7f) else DarkCardBorder,
+                    RoundedCornerShape(6.dp)
+                )
+                .padding(horizontal = 7.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = "⏱️ Delay Global (Sebelum & Sesudah Aksi)",
+                color = NeonCyan,
+                fontSize = 8.8.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                ComfortableMsInput(
+                    label = "Sebelum (ms)",
+                    value = uiState.globalDelayBeforeMs,
+                    onValueCommitted = { v -> engine.setGlobalDelaySettings(beforeMs = v) },
+                    minValue = 0L,
+                    maxValue = 60_000L,
+                    maxDigits = 5,
+                    resetKey = "hud_global_before",
+                    onFocusChange = onKeyboardFocusChanged,
+                    modifier = Modifier.weight(1f)
+                )
+                ComfortableMsInput(
+                    label = "Sesudah (ms)",
+                    value = uiState.globalDelayAfterMs,
+                    onValueCommitted = { v -> engine.setGlobalDelaySettings(afterMs = v) },
+                    minValue = 0L,
+                    maxValue = 60_000L,
+                    maxDigits = 5,
+                    resetKey = "hud_global_after",
+                    onFocusChange = onKeyboardFocusChanged,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Kecualikan konsep dgn Delay Scan Cooldown ML",
+                    color = Color(0xFFCBD5E1),
+                    fontSize = 7.6.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                Switch(
+                    checked = uiState.globalDelayExcludeCooldownRules,
+                    onCheckedChange = { engine.setGlobalDelaySettings(excludeCooldownRules = it) },
+                    colors = SwitchDefaults.colors(checkedTrackColor = NeonCyan)
+                )
+            }
+        }
+        }
+
+        // Area Penutup Layar Game (Custom Ukuran)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(DarkSurface)
+                .border(
+                    0.7.dp,
+                    if (uiState.isCoverEditMode || uiState.gameCoverAreas.any { it.enabled }) NeonPurple.copy(alpha = 0.7f) else DarkCardBorder,
+                    RoundedCornerShape(6.dp)
+                )
+                .padding(horizontal = 7.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "🛡️ Tutup Area Game (${uiState.gameCoverAreas.count { it.enabled }}/${uiState.gameCoverAreas.size})",
+                    color = NeonPurple,
+                    fontSize = 8.8.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                TextChip(
+                    label = if (uiState.isCoverEditMode) "✓ Selesai Atur" else "✥ Geser/Resize",
+                    bg = if (uiState.isCoverEditMode) EmeraldGreen else Color(0xFF334155),
+                    fg = if (uiState.isCoverEditMode) Color.Black else Color.White
+                ) {
+                    engine.setCoverEditMode(!uiState.isCoverEditMode)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextChip("+ Minimap", NeonCyan.copy(alpha = 0.22f), NeonCyan) {
+                    engine.addGameCoverArea(
+                        name = "Minimap",
+                        posX = 0.12f,
+                        posY = 0.22f,
+                        widthRatio = 0.16f,
+                        heightRatio = 0.26f
+                    )
+                    engine.setCoverEditMode(true)
+                }
+                TextChip("+ Chat/Lobby", NeonOrange.copy(alpha = 0.22f), NeonOrange) {
+                    engine.addGameCoverArea(
+                        name = "Chat/Lobby",
+                        posX = 0.24f,
+                        posY = 0.78f,
+                        widthRatio = 0.28f,
+                        heightRatio = 0.18f
+                    )
+                    engine.setCoverEditMode(true)
+                }
+                TextChip("+ Custom", EmeraldGreen.copy(alpha = 0.22f), EmeraldGreen) {
+                    engine.addGameCoverArea(
+                        name = "Custom ${uiState.gameCoverAreas.size + 1}",
+                        posX = 0.50f,
+                        posY = 0.50f,
+                        widthRatio = 0.22f,
+                        heightRatio = 0.22f
+                    )
+                    engine.setCoverEditMode(true)
+                }
+            }
+            if (uiState.gameCoverAreas.isNotEmpty()) {
+                val activeCover = uiState.gameCoverAreas.firstOrNull { it.id == uiState.activeCoverAreaId }
+                    ?: uiState.gameCoverAreas.first()
+                uiState.gameCoverAreas.forEach { area ->
+                    val selected = area.id == activeCover.id
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(if (selected) NeonPurple.copy(alpha = 0.16f) else DarkBackground)
+                            .border(
+                                0.6.dp,
+                                if (selected) NeonPurple else DarkCardBorder,
+                                RoundedCornerShape(5.dp)
+                            )
+                            .clickable { engine.selectActiveCoverArea(area.id) }
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "${area.name} (${(area.widthRatio * 100).roundToInt()}%×${(area.heightRatio * 100).roundToInt()}%)",
+                            color = if (area.enabled) Color.White else Color(0xFF64748B),
+                            fontSize = 8.2.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        ActionPillButton(
+                            text = if (area.enabled) "ON" else "OFF",
+                            tint = if (area.enabled) EmeraldGreen else Color(0xFF64748B)
+                        ) {
+                            engine.toggleGameCoverAreaEnabled(area.id)
+                        }
+                        ConfirmDeleteActionPill(text = "✕") {
+                            engine.deleteGameCoverArea(area.id)
+                        }
+                    }
+                }
+                if (!uiState.isDevice2SimpleMode) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        PrecisionStepperBar(
+                            label = "Lebar",
+                            valueText = "${(activeCover.widthRatio * 100).roundToInt()}%",
+                            accent = NeonCyan,
+                            onDecrementCoarse = {
+                                engine.updateGameCoverArea(activeCover.copy(widthRatio = (activeCover.widthRatio - 0.05f).coerceIn(0.03f, 0.96f)))
+                            },
+                            onDecrement = {
+                                engine.updateGameCoverArea(activeCover.copy(widthRatio = (activeCover.widthRatio - 0.01f).coerceIn(0.03f, 0.96f)))
+                            },
+                            onIncrement = {
+                                engine.updateGameCoverArea(activeCover.copy(widthRatio = (activeCover.widthRatio + 0.01f).coerceIn(0.03f, 0.96f)))
+                            },
+                            onIncrementCoarse = {
+                                engine.updateGameCoverArea(activeCover.copy(widthRatio = (activeCover.widthRatio + 0.05f).coerceIn(0.03f, 0.96f)))
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        PrecisionStepperBar(
+                            label = "Tinggi",
+                            valueText = "${(activeCover.heightRatio * 100).roundToInt()}%",
+                            accent = EmeraldGreen,
+                            onDecrementCoarse = {
+                                engine.updateGameCoverArea(activeCover.copy(heightRatio = (activeCover.heightRatio - 0.05f).coerceIn(0.03f, 0.96f)))
+                            },
+                            onDecrement = {
+                                engine.updateGameCoverArea(activeCover.copy(heightRatio = (activeCover.heightRatio - 0.01f).coerceIn(0.03f, 0.96f)))
+                            },
+                            onIncrement = {
+                                engine.updateGameCoverArea(activeCover.copy(heightRatio = (activeCover.heightRatio + 0.01f).coerceIn(0.03f, 0.96f)))
+                            },
+                            onIncrementCoarse = {
+                                engine.updateGameCoverArea(activeCover.copy(heightRatio = (activeCover.heightRatio + 0.05f).coerceIn(0.03f, 0.96f)))
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    PrecisionStepperBar(
+                        label = "Opacity Penutup",
+                        valueText = "${(activeCover.opacity * 100).roundToInt()}%",
+                        accent = NeonOrange,
+                        onDecrement = {
+                            engine.updateGameCoverArea(activeCover.copy(opacity = (activeCover.opacity - 0.05f).coerceIn(0.20f, 1.0f)))
+                        },
+                        onIncrement = {
+                            engine.updateGameCoverArea(activeCover.copy(opacity = (activeCover.opacity + 0.05f).coerceIn(0.20f, 1.0f)))
+                        }
+                    )
+                }
+            }
+        }
+
+        if (!uiState.isDevice2SimpleMode) {
         // Pengaturan Ukuran & Transparansi Overlay Floating (dengan Tombol Presisi)
         Column(
             modifier = Modifier
@@ -2872,6 +3220,7 @@ private fun DropdownLiveSettingsSection(
                     )
                 }
             }
+        }
         }
 
         Row(

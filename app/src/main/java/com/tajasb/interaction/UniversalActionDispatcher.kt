@@ -85,7 +85,10 @@ class UniversalActionDispatcher(
         rule: UniversalTriggerRule,
         event: LiveInteractionEvent,
         counterCount: Int,
-        isMlbbMatchActive: Boolean
+        isMlbbMatchActive: Boolean,
+        globalDelayBeforeMs: Long = 0L,
+        globalDelayAfterMs: Long = 0L,
+        enableTouchLock: Boolean = true
     ): String {
         val startEpoch = emergencyEpoch.get()
         val enabledSteps = rule.actionSequence.filter { it.enabled }
@@ -93,8 +96,9 @@ class UniversalActionDispatcher(
             return "Rule tanpa action aktif"
         }
 
-        // 1. Delay Before & Random Delay
-        val totalBeforeDelay = buildBeforeDelay(rule)
+        // 1. Global Delay Sebelum + Delay Sebelum Rule + Random Delay
+        //    (Global delay sudah mengecualikan rule Scan Cooldown ML oleh caller)
+        val totalBeforeDelay = globalDelayBeforeMs.coerceIn(0L, 60_000L) + buildBeforeDelay(rule)
         if (totalBeforeDelay > 0L) {
             delay(totalBeforeDelay)
             if (isAborted(startEpoch)) return "Dihentikan darurat sebelum eksekusi"
@@ -130,14 +134,30 @@ class UniversalActionDispatcher(
                         val jobs = mutableListOf<Job>()
                         for (pStep in parallelGroup) {
                             jobs += launch {
-                                val label = executeSingleStep(rule, pStep, event, counterCount, isMlbbMatchActive, startEpoch)
+                                val label = executeSingleStep(
+                                    rule = rule,
+                                    step = pStep,
+                                    event = event,
+                                    counterCount = counterCount,
+                                    isMlbbMatchActive = isMlbbMatchActive,
+                                    startEpoch = startEpoch,
+                                    enableTouchLock = enableTouchLock
+                                )
                                 synchronized(executedLabels) { executedLabels.add(label) }
                             }
                         }
                         jobs.forEach { it.join() }
                     }
                 } else {
-                    val label = executeSingleStep(rule, step, event, counterCount, isMlbbMatchActive, startEpoch)
+                    val label = executeSingleStep(
+                        rule = rule,
+                        step = step,
+                        event = event,
+                        counterCount = counterCount,
+                        isMlbbMatchActive = isMlbbMatchActive,
+                        startEpoch = startEpoch,
+                        enableTouchLock = enableTouchLock
+                    )
                     executedLabels.add(label)
                     i++
                 }
@@ -152,9 +172,11 @@ class UniversalActionDispatcher(
             }
         }
 
-        // 3. Delay After
-        if (!isAborted(startEpoch) && rule.enableDelayAfter && rule.delayAfterMs > 0L) {
-            delay(rule.delayAfterMs.coerceAtMost(60_000L))
+        // 3. Delay Sesudah Rule + Global Delay Sesudah Aksi
+        val afterRuleDelay = if (rule.enableDelayAfter) rule.delayAfterMs.coerceIn(0L, 60_000L) else 0L
+        val totalAfterDelay = afterRuleDelay + globalDelayAfterMs.coerceIn(0L, 60_000L)
+        if (!isAborted(startEpoch) && totalAfterDelay > 0L) {
+            delay(totalAfterDelay)
         }
 
         return executedLabels.joinToString(" → ").ifBlank { "Selesai" }
@@ -166,7 +188,8 @@ class UniversalActionDispatcher(
         event: LiveInteractionEvent,
         counterCount: Int,
         isMlbbMatchActive: Boolean,
-        startEpoch: Long
+        startEpoch: Long,
+        enableTouchLock: Boolean = true
     ): String {
         if (isAborted(startEpoch)) return "${step.actionType.displayName} (Batal)"
 
@@ -176,15 +199,15 @@ class UniversalActionDispatcher(
         }
 
         val effectiveDur = if (rule.enableDuration) {
-            rule.durationMs.coerceIn(200L, 60_000L)
+            rule.durationMs.coerceIn(0L, 60_000L)
         } else {
-            step.durationMs.coerceIn(200L, 60_000L)
+            step.durationMs.coerceIn(0L, 60_000L)
         }
         val repeats = step.repeatCount.coerceIn(1, 20)
         var summary = step.actionType.displayName
 
-        // Kunci layar HANYA selama aksi sentuh / navigasi nyata sedang dikerjakan (bukan saat delay/cooldown)
-        val acquiresTouchLock = !isMlbbMatchActive && (
+        // Kunci layar HANYA selama aksi sentuh / navigasi nyata sedang dikerjakan (bukan saat delay/cooldown/tes 1 konsep)
+        val acquiresTouchLock = enableTouchLock && !isMlbbMatchActive && (
             step.actionType == ActionType.SIMULATED_CLICK ||
                 step.actionType == ActionType.SIMULATED_SWIPE ||
                 step.actionType == ActionType.HOME_BACK_GAME
@@ -246,33 +269,35 @@ class UniversalActionDispatcher(
                         rule.overlayScale
                     }).coerceIn(0.35f, 3.0f)
 
-                    val overlay = ActiveVisualOverlay(
-                        kind = step.actionType,
-                        title = titleText,
-                        subtitle = subText,
-                        imageUri = imgUri,
-                        animationStyle = anim,
-                        expiresAtMs = System.currentTimeMillis() + effectiveDur,
-                        posX = targetX,
-                        posY = targetY,
-                        scale = targetScale
-                    )
-                    sink.onShowOverlay(overlay)
-
-                    if (rule.broadcastToVirtualCamera) {
-                        OverlayBannerBroadcaster.broadcastShow(
-                            context = context,
-                            senderName = event.senderName,
-                            content = titleText,
-                            isGift = event.source == UniversalTriggerSource.GIFT || event.source == UniversalTriggerSource.GIFT_QUANTITY,
-                            bannerType = "COMMENT",
-                            iconMode = "PRAYER",
-                            customPrefix = step.actionType.displayName,
-                            durationMs = effectiveDur,
-                            posXpct = targetX,
-                            posYpct = targetY,
+                    if (effectiveDur > 0L) {
+                        val overlay = ActiveVisualOverlay(
+                            kind = step.actionType,
+                            title = titleText,
+                            subtitle = subText,
+                            imageUri = imgUri,
+                            animationStyle = anim,
+                            expiresAtMs = System.currentTimeMillis() + effectiveDur,
+                            posX = targetX,
+                            posY = targetY,
                             scale = targetScale
                         )
+                        sink.onShowOverlay(overlay)
+
+                        if (rule.broadcastToVirtualCamera) {
+                            OverlayBannerBroadcaster.broadcastShow(
+                                context = context,
+                                senderName = event.senderName,
+                                content = titleText,
+                                isGift = event.source == UniversalTriggerSource.GIFT || event.source == UniversalTriggerSource.GIFT_QUANTITY,
+                                bannerType = "COMMENT",
+                                iconMode = "PRAYER",
+                                customPrefix = step.actionType.displayName,
+                                durationMs = effectiveDur,
+                                posXpct = targetX,
+                                posYpct = targetY,
+                                scale = targetScale
+                            )
+                        }
                     }
                     summary = "${step.actionType.displayName}($titleText)"
                 }
@@ -331,9 +356,11 @@ class UniversalActionDispatcher(
 
                 // ---------------- TIMING ----------------
                 ActionType.DELAY, ActionType.WAIT, ActionType.DURATION -> {
-                    val ms = resolvedParam.toLongOrNull()?.coerceIn(50L, 60_000L)
-                        ?: step.durationMs.coerceIn(50L, 60_000L)
-                    delay(ms)
+                    val ms = resolvedParam.toLongOrNull()?.coerceIn(0L, 60_000L)
+                        ?: step.durationMs.coerceIn(0L, 60_000L)
+                    if (ms > 0L) {
+                        delay(ms)
+                    }
                     summary = "${step.actionType.displayName}(${ms}ms)"
                 }
 
@@ -347,21 +374,23 @@ class UniversalActionDispatcher(
                     val choices = resolvedParam.split("|").map { it.trim() }.filter { it.isNotEmpty() }
                     if (choices.isNotEmpty()) {
                         val picked = choices[Random.nextInt(choices.size)]
-                        sink.onShowOverlay(
-                            ActiveVisualOverlay(
-                                kind = ActionType.TEXT_OVERLAY,
-                                title = picked,
-                                subtitle = "Random Selection • ${event.senderName}",
-                                expiresAtMs = System.currentTimeMillis() + effectiveDur,
-                                posX = (step.posX ?: rule.overlayPosX).coerceIn(0.05f, 0.95f),
-                                posY = (step.posY ?: rule.overlayPosY).coerceIn(0.05f, 0.95f),
-                                scale = (if (step.overlayScale != 1.0f || rule.overlayScale == 1.0f) {
-                                    step.overlayScale
-                                } else {
-                                    rule.overlayScale
-                                }).coerceIn(0.35f, 3.0f)
+                        if (effectiveDur > 0L) {
+                            sink.onShowOverlay(
+                                ActiveVisualOverlay(
+                                    kind = ActionType.TEXT_OVERLAY,
+                                    title = picked,
+                                    subtitle = "Random Selection • ${event.senderName}",
+                                    expiresAtMs = System.currentTimeMillis() + effectiveDur,
+                                    posX = (step.posX ?: rule.overlayPosX).coerceIn(0.05f, 0.95f),
+                                    posY = (step.posY ?: rule.overlayPosY).coerceIn(0.05f, 0.95f),
+                                    scale = (if (step.overlayScale != 1.0f || rule.overlayScale == 1.0f) {
+                                        step.overlayScale
+                                    } else {
+                                        rule.overlayScale
+                                    }).coerceIn(0.35f, 3.0f)
+                                )
                             )
-                        )
+                        }
                         summary = "Random($picked)"
                     }
                 }
@@ -491,13 +520,15 @@ class UniversalActionDispatcher(
                         )
                         summary = "Home → Game (Dijeda)"
                     } else {
-                        val homeDelayMs = resolvedParam.toLongOrNull()?.coerceIn(200L, 30_000L)
-                            ?: step.durationMs.coerceIn(200L, 30_000L)
+                        val homeDelayMs = resolvedParam.toLongOrNull()?.coerceIn(0L, 30_000L)
+                            ?: step.durationMs.coerceIn(0L, 30_000L)
                         val targetPkg = resolvedSecondary.trim()
                         val svc = MlbbGestureAccessibilityService.peekInstance()
                         if (svc != null) {
                             val wentHome = svc.goHome()
-                            delay(homeDelayMs)
+                            if (homeDelayMs > 0L) {
+                                delay(homeDelayMs)
+                            }
                             val returned = if (!isAborted(startEpoch)) {
                                 svc.bringGameToFront(context, targetPkg)
                             } else {

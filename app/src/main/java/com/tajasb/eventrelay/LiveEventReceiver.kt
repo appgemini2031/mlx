@@ -282,16 +282,31 @@ class LiveEventReceiver private constructor(private val context: Context) {
         }
 
         fun encodeMaskedClientFrame(opcode: Int, payload: ByteArray, maskKey: ByteArray? = null): ByteArray? {
-            if (payload.size > 65535) return null
+            if (payload.size > 4 * 1024 * 1024) return null
             val key = maskKey ?: ByteArray(4).apply { SecureRandom().nextBytes(this) }
-            val out = ByteArrayOutputStream(payload.size + 8)
+            val extraHeader = when {
+                payload.size <= 125 -> 6
+                payload.size <= 65535 -> 8
+                else -> 14
+            }
+            val out = ByteArrayOutputStream(payload.size + extraHeader)
             out.write(0x80 or (opcode and 0x0F))
-            if (payload.size <= 125) {
-                out.write(0x80 or payload.size)
-            } else {
-                out.write(0x80 or 126)
-                out.write((payload.size shr 8) and 0xFF)
-                out.write(payload.size and 0xFF)
+            when {
+                payload.size <= 125 -> {
+                    out.write(0x80 or payload.size)
+                }
+                payload.size <= 65535 -> {
+                    out.write(0x80 or 126)
+                    out.write((payload.size shr 8) and 0xFF)
+                    out.write(payload.size and 0xFF)
+                }
+                else -> {
+                    out.write(0x80 or 127)
+                    val lenLong = payload.size.toLong()
+                    for (shift in 56 downTo 0 step 8) {
+                        out.write(((lenLong ushr shift) and 0xFFL).toInt())
+                    }
+                }
             }
             out.write(key)
             for (i in payload.indices) {
@@ -570,6 +585,14 @@ class LiveEventReceiver private constructor(private val context: Context) {
 
     private val _connectionDetails = MutableStateFlow("Belum Terhubung")
     val connectionDetails: StateFlow<String> = _connectionDetails.asStateFlow()
+
+    @Volatile
+    var onBrokerConnected: (() -> Unit)? = null
+
+    @Volatile
+    var onMlbbControlReceived: ((JSONObject) -> Unit)? = null
+
+    fun currentServerConfig(): LiveEventConfig = prefs.config.value
 
     private val _termuxLogs = MutableStateFlow<List<String>>(listOf("🟢 [Termux] Siap menerima event live..."))
     val termuxLogs: StateFlow<List<String>> = _termuxLogs.asStateFlow()
@@ -1134,6 +1157,15 @@ class LiveEventReceiver private constructor(private val context: Context) {
         return sendWebSocketTextFrameAsync(jsonMsg)
     }
 
+    fun sendMlbbStateSync(syncPayload: JSONObject): Boolean {
+        val jsonMsg = JSONObject().apply {
+            put("action", "mlbb_state_sync")
+            put("timestamp", System.currentTimeMillis())
+            put("data", syncPayload)
+        }.toString()
+        return sendWebSocketTextFrameAsync(jsonMsg)
+    }
+
     private suspend fun runConnectionLoop() {
         var retryDelayMs = 2000L
         while (scope.isActive && !isUserInitiatedDisconnect) {
@@ -1187,6 +1219,7 @@ class LiveEventReceiver private constructor(private val context: Context) {
                     }.toString()
                     sendWebSocketTextFrame(initMsg)
                 }
+                onBrokerConnected?.invoke()
 
                 // 2. Loop pembacaan frame WebSocket
                 while (scope.isActive && !isUserInitiatedDisconnect) {
@@ -1814,6 +1847,13 @@ class LiveEventReceiver private constructor(private val context: Context) {
                 }
                 "flash_sale", "shop_flash_sale", "shopflashsale" -> {
                     addTermuxLog("⚡ [JUALAN/FLASH_SALE] Flash sale toko dimulai")
+                }
+                "mlbb_control" -> {
+                    val ctrlPayload = if (dataObj.has("cmd")) dataObj else json
+                    onMlbbControlReceived?.invoke(ctrlPayload)
+                }
+                "mlbb_request_sync" -> {
+                    onBrokerConnected?.invoke()
                 }
             }
         } catch (e: Exception) {

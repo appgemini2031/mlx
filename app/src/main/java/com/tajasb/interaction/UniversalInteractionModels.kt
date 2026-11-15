@@ -373,6 +373,7 @@ data class UniversalEngineUiState(
     val isCoverEditMode: Boolean = false,
     val activeCoverAreaId: String? = null,
     val cooldownStatusHint: String = "",
+    val touchConflictHint: String = "",
     val isEmergencyStopped: Boolean = false,
     val isFloatingOverlayRunning: Boolean = false,
     val isFloatingHiddenForLive: Boolean = false,

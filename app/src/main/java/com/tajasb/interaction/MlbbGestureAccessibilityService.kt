@@ -19,6 +19,7 @@ import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import androidx.annotation.RequiresApi
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -125,6 +126,12 @@ sealed class ScreenCaptureResult {
     data class Error(val reason: String) : ScreenCaptureResult()
 }
 
+enum class GestureOutcome {
+    COMPLETED,
+    CANCELLED_BY_TOUCH,
+    FAILED
+}
+
 data class ScanRegionSpec(
     val centerNormX: Float,
     val centerNormY: Float,
@@ -159,6 +166,9 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
 
         @Volatile
         var onPrepareScreenForScanRegion: ((region: ScanRegionSpec?, hideForScan: Boolean) -> Boolean)? = null
+
+        @Volatile
+        var onSyncTouchLockOverlay: ((locked: Boolean) -> Unit)? = null
 
         fun peekInstance(): MlbbGestureAccessibilityService? = activeInstance
 
@@ -316,28 +326,77 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         )
     }
 
+    private suspend fun awaitMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            try {
+                block()
+            } catch (_: Throwable) {}
+            return
+        }
+        val done = CompletableDeferred<Unit>()
+        mainHandler.post {
+            try {
+                block()
+            } catch (_: Throwable) {
+            } finally {
+                done.complete(Unit)
+            }
+        }
+        withTimeoutOrNull(450L) { done.await() }
+    }
+
+    suspend fun syncTouchLockOverlayNow(locked: Boolean) {
+        val hook = onSyncTouchLockOverlay ?: return
+        awaitMain { hook(locked) }
+        if (locked) {
+            // Beri 34ms agar panel pemblokir sentuhan terpasang penuh di SurfaceFlinger sebelum gesture masuk
+            delay(34L)
+        }
+    }
+
+    private suspend fun prepareTouchWindow(holeRect: PixelRect?) {
+        val prepareRegion = onPrepareScreenForTouchRegion
+        val prepareFallback = onPrepareScreenForTouch
+        if (prepareRegion != null) {
+            awaitMain { prepareRegion(holeRect, true) }
+            delay(28L)
+        } else if (prepareFallback != null) {
+            awaitMain { prepareFallback(true) }
+            delay(65L)
+        }
+    }
+
+    private suspend fun releaseTouchWindow() {
+        val prepareRegion = onPrepareScreenForTouchRegion
+        val prepareFallback = onPrepareScreenForTouch
+        if (prepareRegion != null) {
+            awaitMain { prepareRegion(null, false) }
+        } else if (prepareFallback != null) {
+            awaitMain { prepareFallback(false) }
+        }
+    }
+
     suspend fun dispatchTap(
         normX: Float,
         normY: Float,
         holdMs: Long = 0L,
         tapCount: Int = 1
-    ): Boolean {
+    ): Boolean = dispatchTapOutcome(normX, normY, holdMs, tapCount) == GestureOutcome.COMPLETED
+
+    suspend fun dispatchTapOutcome(
+        normX: Float,
+        normY: Float,
+        holdMs: Long = 0L,
+        tapCount: Int = 1
+    ): GestureOutcome {
         val (screenW, screenH) = getRealScreenSizePx()
         val (px, py) = ScreenCoordinateMapper.toScreenPx(normX, normY, screenW, screenH)
         val safeHold = if (holdMs <= 0L) 38L else holdMs.coerceIn(38L, 12_000L)
         val repeats = tapCount.coerceIn(1, 10)
         val holeRect = buildTouchHoleRect(listOf(px to py), screenW, screenH)
 
-        var allOk = true
-        val prepareRegion = onPrepareScreenForTouchRegion
-        val prepareFallback = onPrepareScreenForTouch
-        if (prepareRegion != null) {
-            mainHandler.post { prepareRegion(holeRect, true) }
-            delay(40L)
-        } else if (prepareFallback != null) {
-            mainHandler.post { prepareFallback(true) }
-            delay(85L)
-        }
+        var lastOutcome = GestureOutcome.COMPLETED
+        prepareTouchWindow(holeRect)
         try {
             for (i in 0 until repeats) {
                 val path = Path().apply {
@@ -345,18 +404,19 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
                 }
                 val stroke = GestureDescription.StrokeDescription(path, 0L, safeHold)
                 val gesture = GestureDescription.Builder().addStroke(stroke).build()
-                val ok = dispatchGestureAsync(gesture, safeHold + 900L)
-                if (!ok) allOk = false
+                val outcome = dispatchGestureOutcomeAsync(gesture, safeHold + 900L)
+                if (outcome != GestureOutcome.COMPLETED) {
+                    lastOutcome = outcome
+                    if (outcome == GestureOutcome.CANCELLED_BY_TOUCH) {
+                        return GestureOutcome.CANCELLED_BY_TOUCH
+                    }
+                }
                 if (i < repeats - 1) delay(60L)
             }
         } finally {
-            if (prepareRegion != null) {
-                mainHandler.post { prepareRegion(null, false) }
-            } else if (prepareFallback != null) {
-                mainHandler.post { prepareFallback(false) }
-            }
+            releaseTouchWindow()
         }
-        return allOk
+        return lastOutcome
     }
 
     /**
@@ -370,12 +430,28 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         holdAndDrag: Boolean,
         dragSpec: String,
         dragDurationMs: Long = 220L
-    ): Boolean {
+    ): Boolean = dispatchHoldAndDragOutcome(
+        normX = normX,
+        normY = normY,
+        holdMs = holdMs,
+        holdAndDrag = holdAndDrag,
+        dragSpec = dragSpec,
+        dragDurationMs = dragDurationMs
+    ) == GestureOutcome.COMPLETED
+
+    suspend fun dispatchHoldAndDragOutcome(
+        normX: Float,
+        normY: Float,
+        holdMs: Long,
+        holdAndDrag: Boolean,
+        dragSpec: String,
+        dragDurationMs: Long = 220L
+    ): GestureOutcome {
         if (!holdAndDrag) {
-            return dispatchTap(normX, normY, holdMs = holdMs, tapCount = 1)
+            return dispatchTapOutcome(normX, normY, holdMs = holdMs, tapCount = 1)
         }
         if (holdMs <= 0L) {
-            return dispatchSwipe(normX, normY, dragSpec, durationMs = dragDurationMs)
+            return dispatchSwipeOutcome(normX, normY, dragSpec, durationMs = dragDurationMs)
         }
 
         val (screenW, screenH) = getRealScreenSizePx()
@@ -392,15 +468,7 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         val midY = start.second
         val holeRect = buildTouchHoleRect(listOf(start, midX to midY, end), screenW, screenH)
 
-        val prepareRegion = onPrepareScreenForTouchRegion
-        val prepareFallback = onPrepareScreenForTouch
-        if (prepareRegion != null) {
-            mainHandler.post { prepareRegion(holeRect, true) }
-            delay(40L)
-        } else if (prepareFallback != null) {
-            mainHandler.post { prepareFallback(true) }
-            delay(85L)
-        }
+        prepareTouchWindow(holeRect)
         return try {
             val holdPath = Path().apply {
                 moveTo(start.first, start.second)
@@ -408,24 +476,62 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
             }
             val holdStroke = GestureDescription.StrokeDescription(holdPath, 0L, safeHold, true)
             val holdGesture = GestureDescription.Builder().addStroke(holdStroke).build()
-            val holdOk = dispatchGestureAsync(holdGesture, safeHold + 1000L)
-            if (!holdOk) {
-                false
-            } else {
-                val dragPath = Path().apply {
-                    moveTo(midX, midY)
-                    lineTo(end.first, end.second)
+            val dragPath = Path().apply {
+                moveTo(midX, midY)
+                lineTo(end.first, end.second)
+            }
+            // Rangkai continueStroke langsung di dalam onCompleted mainHandler tanpa jeda coroutine
+            withTimeoutOrNull(safeHold + safeDrag + 1600L) {
+                suspendCancellableCoroutine { cont ->
+                    mainHandler.post {
+                        val acceptedHold = try {
+                            dispatchGesture(
+                                holdGesture,
+                                object : GestureResultCallback() {
+                                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                                        val dragStroke = holdStroke.continueStroke(dragPath, 0L, safeDrag, false)
+                                        val dragGesture = GestureDescription.Builder().addStroke(dragStroke).build()
+                                        val acceptedDrag = try {
+                                            dispatchGesture(
+                                                dragGesture,
+                                                object : GestureResultCallback() {
+                                                    override fun onCompleted(gd: GestureDescription?) {
+                                                        if (cont.isActive) cont.resume(GestureOutcome.COMPLETED)
+                                                    }
+
+                                                    override fun onCancelled(gd: GestureDescription?) {
+                                                        if (cont.isActive) cont.resume(GestureOutcome.CANCELLED_BY_TOUCH)
+                                                    }
+                                                },
+                                                mainHandler
+                                            )
+                                        } catch (t: Throwable) {
+                                            Log.e(TAG, "continueStroke drag error: ${t.message}")
+                                            false
+                                        }
+                                        if (!acceptedDrag && cont.isActive) {
+                                            cont.resume(GestureOutcome.FAILED)
+                                        }
+                                    }
+
+                                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                                        if (cont.isActive) cont.resume(GestureOutcome.CANCELLED_BY_TOUCH)
+                                    }
+                                },
+                                mainHandler
+                            )
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "dispatchHoldAndDrag error: ${t.message}")
+                            false
+                        }
+                        if (!acceptedHold && cont.isActive) {
+                            cont.resume(GestureOutcome.FAILED)
+                        }
+                    }
                 }
-                val dragStroke = holdStroke.continueStroke(dragPath, 0L, safeDrag, false)
-                val dragGesture = GestureDescription.Builder().addStroke(dragStroke).build()
-                dispatchGestureAsync(dragGesture, safeDrag + 1000L)
-            }
+            } ?: GestureOutcome.FAILED
         } finally {
-            if (prepareRegion != null) {
-                mainHandler.post { prepareRegion(null, false) }
-            } else if (prepareFallback != null) {
-                mainHandler.post { prepareFallback(false) }
-            }
+            releaseTouchWindow()
         }
     }
 
@@ -434,7 +540,14 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         startNormY: Float,
         spec: String,
         durationMs: Long = 220L
-    ): Boolean {
+    ): Boolean = dispatchSwipeOutcome(startNormX, startNormY, spec, durationMs) == GestureOutcome.COMPLETED
+
+    suspend fun dispatchSwipeOutcome(
+        startNormX: Float,
+        startNormY: Float,
+        spec: String,
+        durationMs: Long = 220L
+    ): GestureOutcome {
         val (screenW, screenH) = getRealScreenSizePx()
         val (start, end) = ScreenCoordinateMapper.resolveSwipePoints(
             startNormX = startNormX,
@@ -446,15 +559,7 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         val safeDur = durationMs.coerceIn(60L, 5000L)
         val holeRect = buildTouchHoleRect(listOf(start, end), screenW, screenH)
 
-        val prepareRegion = onPrepareScreenForTouchRegion
-        val prepareFallback = onPrepareScreenForTouch
-        if (prepareRegion != null) {
-            mainHandler.post { prepareRegion(holeRect, true) }
-            delay(40L)
-        } else if (prepareFallback != null) {
-            mainHandler.post { prepareFallback(true) }
-            delay(85L)
-        }
+        prepareTouchWindow(holeRect)
         return try {
             val path = Path().apply {
                 moveTo(start.first, start.second)
@@ -462,13 +567,9 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
             }
             val stroke = GestureDescription.StrokeDescription(path, 0L, safeDur)
             val gesture = GestureDescription.Builder().addStroke(stroke).build()
-            dispatchGestureAsync(gesture, safeDur + 900L)
+            dispatchGestureOutcomeAsync(gesture, safeDur + 900L)
         } finally {
-            if (prepareRegion != null) {
-                mainHandler.post { prepareRegion(null, false) }
-            } else if (prepareFallback != null) {
-                mainHandler.post { prepareFallback(false) }
-            }
+            releaseTouchWindow()
         }
     }
 
@@ -579,10 +680,10 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         } ?: ScreenCaptureResult.Error("Timeout ambil screenshot layar")
     }
 
-    private suspend fun dispatchGestureAsync(
+    private suspend fun dispatchGestureOutcomeAsync(
         gesture: GestureDescription,
         timeoutMs: Long
-    ): Boolean {
+    ): GestureOutcome {
         return withTimeoutOrNull(timeoutMs) {
             suspendCancellableCoroutine { cont ->
                 mainHandler.post {
@@ -591,11 +692,11 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
                             gesture,
                             object : GestureResultCallback() {
                                 override fun onCompleted(gestureDescription: GestureDescription?) {
-                                    if (cont.isActive) cont.resume(true)
+                                    if (cont.isActive) cont.resume(GestureOutcome.COMPLETED)
                                 }
 
                                 override fun onCancelled(gestureDescription: GestureDescription?) {
-                                    if (cont.isActive) cont.resume(false)
+                                    if (cont.isActive) cont.resume(GestureOutcome.CANCELLED_BY_TOUCH)
                                 }
                             },
                             mainHandler
@@ -605,11 +706,11 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
                         false
                     }
                     if (!accepted && cont.isActive) {
-                        cont.resume(false)
+                        cont.resume(GestureOutcome.FAILED)
                     }
                 }
             }
-        } ?: false
+        } ?: GestureOutcome.FAILED
     }
 
     private fun getRealScreenSizePx(): Pair<Int, Int> {

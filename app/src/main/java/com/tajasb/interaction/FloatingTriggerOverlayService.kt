@@ -290,6 +290,9 @@ class FloatingTriggerOverlayService : Service() {
     @Volatile
     private var isTemporarilyHiddenForScan = false
 
+    @Volatile
+    private var forceTouchLockActive = false
+
     private var scanHiddenHud = false
     private var scanHiddenStage = false
     private var scanHiddenBlockerPill = false
@@ -368,6 +371,10 @@ class FloatingTriggerOverlayService : Service() {
         }
         MlbbGestureAccessibilityService.onPrepareScreenForScanRegion = { region, hideForScan ->
             setFloatingWindowsHiddenForScanRegion(region, hideForScan)
+        }
+        MlbbGestureAccessibilityService.onSyncTouchLockOverlay = { locked ->
+            forceTouchLockActive = locked
+            updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
         }
 
         engine.setFloatingOverlayRunning(true)
@@ -498,6 +505,10 @@ class FloatingTriggerOverlayService : Service() {
         if (MlbbGestureAccessibilityService.onPrepareScreenForScanRegion != null) {
             MlbbGestureAccessibilityService.onPrepareScreenForScanRegion = null
         }
+        if (MlbbGestureAccessibilityService.onSyncTouchLockOverlay != null) {
+            MlbbGestureAccessibilityService.onSyncTouchLockOverlay = null
+        }
+        forceTouchLockActive = false
         overlayBitmapCache.evictAll()
         serviceScope.cancel()
         removeAllMarkerWindows()
@@ -576,7 +587,8 @@ class FloatingTriggerOverlayService : Service() {
                     prev.isChallengeExecuting != st.isChallengeExecuting ||
                     prev.isPositionEditMode != st.isPositionEditMode ||
                     prev.isEmergencyStopped != st.isEmergencyStopped ||
-                    prev.cooldownStatusHint != st.cooldownStatusHint
+                    prev.cooldownStatusHint != st.cooldownStatusHint ||
+                    prev.touchConflictHint != st.touchConflictHint
 
                 lastState = st
 
@@ -804,10 +816,11 @@ class FloatingTriggerOverlayService : Service() {
         // Saat scan OCR berlangsung (isTemporarilyHiddenForScan), blocker dilepas sementara agar OCR bersih.
         // Saat challenge menjalankan klik/tahan/geser (activeTouchHolePx != null), blocker TETAP MENGUNCI SENTUHAN USER
         // melalui 4 panel di luar lubang gesture, sementara Accessibility gesture bebas menyentuh game MLBB.
+        val isExecutingNow = st.isChallengeExecuting || forceTouchLockActive
         val shouldLock = !isTemporarilyHiddenForScan &&
             !temporarilyHiddenForAutomation &&
             st.blockTouchDuringChallenge &&
-            st.isChallengeExecuting &&
+            isExecutingNow &&
             !st.isPositionEditMode &&
             !st.isEmergencyStopped
 
@@ -826,10 +839,16 @@ class FloatingTriggerOverlayService : Service() {
         if (blocker.visibility != View.VISIBLE) {
             blocker.visibility = View.VISIBLE
         }
-        if (st.cooldownStatusHint.isNotBlank()) {
-            touchBlockerStatusPill?.text = "🔒 Layar Terkunci • ${st.cooldownStatusHint}"
-        } else {
-            touchBlockerStatusPill?.text = "🔒 Layar Terkunci — Aksi ML Sedang Berjalan"
+        when {
+            st.touchConflictHint.isNotBlank() -> {
+                touchBlockerStatusPill?.text = st.touchConflictHint
+            }
+            st.cooldownStatusHint.isNotBlank() -> {
+                touchBlockerStatusPill?.text = "🔒 Layar Terkunci • ${st.cooldownStatusHint}"
+            }
+            else -> {
+                touchBlockerStatusPill?.text = "🔒 Layar Terkunci — Aksi ML Sedang Berjalan"
+            }
         }
 
         val hole = activeTouchHolePx

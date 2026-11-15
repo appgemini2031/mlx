@@ -47,7 +47,10 @@ data class LiveEventItem(
     val productName: String = "",
     val productPrice: String = "",
     val productQuantity: Int = 1,
-    val productId: String = ""
+    val productId: String = "",
+    // Delta sebenarnya per event untuk streak gift agar pemicu trigger tidak terakumulasi ganda
+    val deltaGiftCount: Int = giftCount,
+    val deltaDiamondCount: Int = diamondCount
 )
 
 data class LiveEventConfig(

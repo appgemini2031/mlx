@@ -9,9 +9,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -549,6 +553,18 @@ class LiveEventReceiver private constructor(private val context: Context) {
 
     private val _lastEvent = MutableStateFlow<LiveEventItem?>(null)
     val lastEvent: StateFlow<LiveEventItem?> = _lastEvent.asStateFlow()
+
+    private val _eventStream = MutableSharedFlow<LiveEventItem>(
+        replay = 0,
+        extraBufferCapacity = 512,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val eventStream: SharedFlow<LiveEventItem> = _eventStream.asSharedFlow()
+
+    private fun publishLiveEvent(item: LiveEventItem) {
+        _lastEvent.value = item
+        _eventStream.tryEmit(item)
+    }
 
     private val _viewerCount = MutableStateFlow(0)
     val viewerCount: StateFlow<Int> = _viewerCount.asStateFlow()
@@ -1367,7 +1383,7 @@ class LiveEventReceiver private constructor(private val context: Context) {
                         text = msgText,
                         avatarUrl = avatarUrl
                     )
-                    _lastEvent.value = item
+                    publishLiveEvent(item)
                     _totalChatsAccumulated.update { it + 1 }
                     val tagPlat = if (isBigo) "[BIGO CHAT]" else "[CHAT]"
                     addTermuxLog("💬 $tagPlat $sName: $msgText")
@@ -1483,9 +1499,11 @@ class LiveEventReceiver private constructor(private val context: Context) {
                             giftCount = gCount,
                             diamondCount = totalCoinsInEvent,
                             text = giftContent,
-                            avatarUrl = avatarUrl
+                            avatarUrl = avatarUrl,
+                            deltaGiftCount = deltaGifts.coerceAtLeast(1),
+                            deltaDiamondCount = deltaCoins.coerceAtLeast(0)
                         )
-                        _lastEvent.value = item
+                        publishLiveEvent(item)
                         val tagPlat = if (isBigo) "[BIGO GIFT]" else "[GIFT]"
                         addTermuxLog("🎁 $tagPlat $sName kirim $giftContent")
                         if (deltaGifts > 0) {
@@ -1551,7 +1569,7 @@ class LiveEventReceiver private constructor(private val context: Context) {
                         text = likeContent,
                         avatarUrl = avatarUrl
                     )
-                    _lastEvent.value = item
+                    publishLiveEvent(item)
                     _totalLikesAccumulated.update { it + lCount }
                     val tagLikePlat = if (isBigo) "[BIGO LIKE]" else "[LIKE]"
                     addTermuxLog("❤️ $tagLikePlat $sName: +$lCount Like (Total: $totalL)")
@@ -1610,7 +1628,7 @@ class LiveEventReceiver private constructor(private val context: Context) {
                         text = "Masuk Siaran",
                         avatarUrl = avatarUrl
                     )
-                    _lastEvent.value = item
+                    publishLiveEvent(item)
                     _totalJoinsAccumulated.update { it + 1 }
                     val tagJoinPlat = if (isBigo) "[BIGO JOIN]" else "[JOIN]"
                     addTermuxLog("👋 $tagJoinPlat $sName masuk siaran")
@@ -1653,7 +1671,7 @@ class LiveEventReceiver private constructor(private val context: Context) {
                         text = "Mengikuti Siaran",
                         avatarUrl = avatarUrl
                     )
-                    _lastEvent.value = item
+                    publishLiveEvent(item)
                     _totalFollowsAccumulated.update { it + 1 }
                     val tagFollowPlat = if (isBigo) "[BIGO FOLLOW]" else "[FOLLOW]"
                     addTermuxLog("➕ $tagFollowPlat $sName mengikuti")
@@ -1696,7 +1714,7 @@ class LiveEventReceiver private constructor(private val context: Context) {
                         text = "Membagikan Siaran",
                         avatarUrl = avatarUrl
                     )
-                    _lastEvent.value = item
+                    publishLiveEvent(item)
                     _totalSharesAccumulated.update { it + 1 }
                     val tagSharePlat = if (isBigo) "[BIGO SHARE]" else "[SHARE]"
                     addTermuxLog("🔄 $tagSharePlat $sName membagikan siaran")
@@ -1776,7 +1794,7 @@ class LiveEventReceiver private constructor(private val context: Context) {
                         productId = pId,
                         avatarUrl = avatarUrl
                     )
-                    _lastEvent.value = item
+                    publishLiveEvent(item)
 
                     // Saklar Jualan: Pembeli Checkout
                     if (cfg.enableShopOrder) {

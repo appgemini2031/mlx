@@ -20,7 +20,10 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.util.LinkedHashMap
 import java.util.Locale
@@ -398,15 +401,91 @@ object UniversalRuleEvaluator {
     }
 }
 
-private data class QueuedDispatchTask(
+internal data class QueuedDispatchTask(
     val seq: Long,
     val priority: Int,
     val rule: UniversalTriggerRule,
     val event: LiveInteractionEvent,
     val counterSnapshot: TriggerCounterState,
     val matchActiveSnapshot: Boolean,
-    val detailNote: String
+    val detailNote: String,
+    val enqueuedAtMs: Long = 0L
 )
+
+internal data class QueueAdmissionResult(
+    val admittedCount: Int,
+    val evictedCount: Int,
+    val droppedIncomingCount: Int
+)
+
+/**
+ * Manajemen antrean prioritas terbatas (JVM-testable) agar trafik tinggi tidak membuat antrean membludak,
+ * Gift tetap diprioritaskan di atas banjir Like/Chat, dan worker tidak macet mengeksekusi spam usang.
+ */
+internal object TriggerQueueManager {
+    const val MAX_TOTAL_QUEUE = 40
+    const val MAX_PENDING_PER_HIGH_PRIO_RULE = 10
+    const val MAX_PENDING_PER_LOW_PRIO_RULE = 3
+
+    fun isHighValueSource(source: UniversalTriggerSource): Boolean =
+        source == UniversalTriggerSource.GIFT ||
+            source == UniversalTriggerSource.GIFT_QUANTITY ||
+            source == UniversalTriggerSource.SHOP_ORDER
+
+    fun maxPendingForRule(source: UniversalTriggerSource): Int =
+        if (isHighValueSource(source)) MAX_PENDING_PER_HIGH_PRIO_RULE else MAX_PENDING_PER_LOW_PRIO_RULE
+
+    private val queueComparator = compareByDescending<QueuedDispatchTask> { it.priority }
+        .thenByDescending { isHighValueSource(it.event.source) }
+        .thenBy { it.seq }
+
+    private fun shouldReplaceVictim(incoming: QueuedDispatchTask, victim: QueuedDispatchTask): Boolean {
+        if (incoming.priority != victim.priority) return incoming.priority > victim.priority
+        val incHigh = isHighValueSource(incoming.event.source)
+        val vicHigh = isHighValueSource(victim.event.source)
+        return incHigh && !vicHigh
+    }
+
+    fun enqueueBounded(
+        queue: MutableList<QueuedDispatchTask>,
+        incoming: List<QueuedDispatchTask>
+    ): QueueAdmissionResult {
+        var admitted = 0
+        var evicted = 0
+        var dropped = 0
+
+        for (task in incoming) {
+            val ruleCap = maxPendingForRule(task.event.source)
+            val sameRuleCount = queue.count { it.rule.id == task.rule.id }
+            if (sameRuleCount >= ruleCap) {
+                dropped++
+                continue
+            }
+
+            if (queue.size >= MAX_TOTAL_QUEUE) {
+                val victim = queue.minWithOrNull(
+                    compareBy<QueuedDispatchTask> { it.priority }
+                        .thenBy { isHighValueSource(it.event.source) }
+                        .thenBy { it.seq }
+                )
+                if (victim != null && shouldReplaceVictim(task, victim)) {
+                    queue.remove(victim)
+                    evicted++
+                    queue.add(task)
+                    admitted++
+                } else {
+                    dropped++
+                }
+            } else {
+                queue.add(task)
+                admitted++
+            }
+        }
+
+        queue.sortWith(queueComparator)
+        return QueueAdmissionResult(admittedCount = admitted, evictedCount = evicted, droppedIncomingCount = dropped)
+    }
+}
 
 /**
  * Single Trigger Engine untuk Universal Interaction Mapping System (MLBB Special Mode).
@@ -455,18 +534,20 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
     val uiState: StateFlow<UniversalEngineUiState>
         get() = state
 
+    private val evalLock = Any()
     private val queueLock = Any()
+    private val hardwareExecutionMutex = Mutex()
     private val pendingQueue = mutableListOf<QueuedDispatchTask>()
     private val queueSeq = AtomicLong(0L)
     private val isWorkerRunning = AtomicBoolean(false)
     private val isSingleTestRunningGuard = AtomicBoolean(false)
     private val activeChallengeCount = AtomicInteger(0)
 
-    private val recentEventIds = object : LinkedHashMap<String, Long>(128, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean = size > 180
+    private val recentEventIds = object : LinkedHashMap<String, Long>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean = size > 300
     }
-    private val recentRelayIds = object : LinkedHashMap<String, Long>(128, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean = size > 200
+    private val recentRelayIds = object : LinkedHashMap<String, Long>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean = size > 400
     }
 
     private var lastObservedRelayEventId: String? = null
@@ -551,9 +632,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         }
         scope.launch {
             try {
-                receiver.lastEvent.collect { item ->
-                    if (item == null) return@collect
-                    if (item.id == lastObservedRelayEventId) return@collect
+                receiver.eventStream.collect { item ->
                     synchronized(recentRelayIds) {
                         if (recentRelayIds.containsKey(item.id)) return@collect
                         recentRelayIds[item.id] = System.currentTimeMillis()
@@ -595,7 +674,7 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                 }
                 .distinctUntilChanged()
                 .collectLatest {
-                    delay(150L)
+                    delay(260L)
                     val receiver = LiveEventReceiver.getInstance(appContext)
                     if (receiver.connectionStatus.value == ConnectionStatus.CONNECTED) {
                         sendCurrentSyncToBroker()
@@ -933,8 +1012,8 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                 )
             }
             LiveEventType.GIFT -> {
-                val giftQty = item.giftCount.coerceAtLeast(1)
-                val coins = item.diamondCount.coerceAtLeast(0)
+                val giftQty = item.deltaGiftCount.coerceAtLeast(1)
+                val coins = item.deltaDiamondCount.coerceAtLeast(0)
                 if (currentRules.any { it.enabled && it.triggerSource == UniversalTriggerSource.GIFT }) {
                     dispatchEvent(
                         LiveInteractionEvent(
@@ -1013,11 +1092,6 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
      * Menjamin simulasi menggunakan konfigurasi tersimpan yang identik dengan live stream.
      */
     fun dispatchEvent(event: LiveInteractionEvent): List<TriggerExecutionRecord> {
-        val snapshot = _state.value
-        if (!snapshot.isEngineEnabled || snapshot.isEmergencyStopped) {
-            return emptyList()
-        }
-
         val now = System.currentTimeMillis()
         // Duplicate protection
         synchronized(recentEventIds) {
@@ -1039,93 +1113,112 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             recentEventIds[event.id] = now
         }
 
-        val matchingRules = snapshot.rules.filter { it.enabled && it.triggerSource == event.source }
-        if (matchingRules.isEmpty()) {
-            val emptyRec = TriggerExecutionRecord(
-                timestampMs = now,
-                ruleId = "-",
-                ruleName = "Belum ada trigger untuk ${event.source.displayName}",
-                source = event.source,
-                senderName = event.senderName,
-                quantity = event.quantity,
-                status = DispatchStatus.SKIPPED_CONDITION,
-                detail = "Buat & aktifkan rule untuk sumber ${event.source.displayName} di Builder."
-            )
-            appendHistory(emptyRec)
-            return listOf(emptyRec)
-        }
-
-        val sortedRules = matchingRules.sortedByDescending {
-            if (it.enablePriority) it.priority else 5
-        }
-
         val immediateRecords = mutableListOf<TriggerExecutionRecord>()
-        val updatedCounters = snapshot.counters.toMutableMap()
-        val tasksToEnqueue = mutableListOf<QueuedDispatchTask>()
+        var admittedCount = 0
+        var qSizeAfter = 0
 
-        for (rule in sortedRules) {
-            val eval = UniversalRuleEvaluator.evaluateCounterAndEligibility(
-                rule = rule,
-                currentCounter = updatedCounters[rule.id],
-                event = event,
-                isMlbbMatchActive = snapshot.isMlbbMatchActive,
-                nowMs = now
-            )
-            updatedCounters[rule.id] = eval.updatedCounter
+        synchronized(evalLock) {
+            val snapshot = _state.value
+            if (!snapshot.isEngineEnabled || snapshot.isEmergencyStopped) {
+                return emptyList()
+            }
 
-            if (eval.shouldExecute) {
-                val prio = if (rule.enablePriority) rule.priority else 5
-                tasksToEnqueue += QueuedDispatchTask(
-                    seq = queueSeq.incrementAndGet(),
-                    priority = prio,
+            val matchingRules = snapshot.rules.filter { it.enabled && it.triggerSource == event.source }
+            if (matchingRules.isEmpty()) {
+                val emptyRec = TriggerExecutionRecord(
+                    timestampMs = now,
+                    ruleId = "-",
+                    ruleName = "Belum ada trigger untuk ${event.source.displayName}",
+                    source = event.source,
+                    senderName = event.senderName,
+                    quantity = event.quantity,
+                    status = DispatchStatus.SKIPPED_CONDITION,
+                    detail = "Buat & aktifkan rule untuk sumber ${event.source.displayName} di Builder."
+                )
+                appendHistory(emptyRec)
+                return listOf(emptyRec)
+            }
+
+            val sortedRules = matchingRules.sortedByDescending {
+                if (it.enablePriority) it.priority else 5
+            }
+
+            val updatedCounters = snapshot.counters.toMutableMap()
+            val tasksToEnqueue = mutableListOf<QueuedDispatchTask>()
+
+            for (rule in sortedRules) {
+                val eval = UniversalRuleEvaluator.evaluateCounterAndEligibility(
                     rule = rule,
+                    currentCounter = updatedCounters[rule.id],
                     event = event,
-                    counterSnapshot = eval.updatedCounter,
-                    matchActiveSnapshot = snapshot.isMlbbMatchActive,
-                    detailNote = eval.detail
+                    isMlbbMatchActive = snapshot.isMlbbMatchActive,
+                    nowMs = now
                 )
-                immediateRecords += TriggerExecutionRecord(
-                    timestampMs = now,
-                    ruleId = rule.id,
-                    ruleName = rule.triggerName,
-                    source = event.source,
-                    senderName = event.senderName,
-                    quantity = event.quantity,
-                    status = DispatchStatus.QUEUED,
-                    detail = "${eval.detail} • Antrean Prio $prio"
-                )
+                updatedCounters[rule.id] = eval.updatedCounter
+
+                if (eval.shouldExecute) {
+                    val prio = if (rule.enablePriority) rule.priority else 5
+                    tasksToEnqueue += QueuedDispatchTask(
+                        seq = queueSeq.incrementAndGet(),
+                        priority = prio,
+                        rule = rule,
+                        event = event,
+                        counterSnapshot = eval.updatedCounter,
+                        matchActiveSnapshot = snapshot.isMlbbMatchActive,
+                        detailNote = eval.detail,
+                        enqueuedAtMs = now
+                    )
+                    immediateRecords += TriggerExecutionRecord(
+                        timestampMs = now,
+                        ruleId = rule.id,
+                        ruleName = rule.triggerName,
+                        source = event.source,
+                        senderName = event.senderName,
+                        quantity = event.quantity,
+                        status = DispatchStatus.QUEUED,
+                        detail = "${eval.detail} • Antrean Prio $prio"
+                    )
+                } else {
+                    val skipRec = TriggerExecutionRecord(
+                        timestampMs = now,
+                        ruleId = rule.id,
+                        ruleName = rule.triggerName,
+                        source = event.source,
+                        senderName = event.senderName,
+                        quantity = event.quantity,
+                        status = eval.status,
+                        detail = eval.detail
+                    )
+                    immediateRecords += skipRec
+                }
+            }
+
+            if (tasksToEnqueue.isNotEmpty()) {
+                synchronized(queueLock) {
+                    val admission = TriggerQueueManager.enqueueBounded(pendingQueue, tasksToEnqueue)
+                    admittedCount = admission.admittedCount
+                    qSizeAfter = pendingQueue.size
+                    if (admission.droppedIncomingCount > 0 || admission.evictedCount > 0) {
+                        Log.i(
+                            TAG,
+                            "Queue pressure (${event.source.name}): admitted=${admission.admittedCount}, evicted=${admission.evictedCount}, capped=${admission.droppedIncomingCount}, size=$qSizeAfter"
+                        )
+                    }
+                }
             } else {
-                val skipRec = TriggerExecutionRecord(
-                    timestampMs = now,
-                    ruleId = rule.id,
-                    ruleName = rule.triggerName,
-                    source = event.source,
-                    senderName = event.senderName,
-                    quantity = event.quantity,
-                    status = eval.status,
-                    detail = eval.detail
+                qSizeAfter = synchronized(queueLock) { pendingQueue.size }
+            }
+
+            _state.update { st ->
+                st.copy(
+                    counters = updatedCounters,
+                    queueSize = qSizeAfter,
+                    history = (immediateRecords.reversed() + st.history).take(MAX_HISTORY)
                 )
-                immediateRecords += skipRec
             }
         }
 
-        if (tasksToEnqueue.isNotEmpty()) {
-            synchronized(queueLock) {
-                pendingQueue.addAll(tasksToEnqueue)
-                pendingQueue.sortWith(compareByDescending<QueuedDispatchTask> { it.priority }.thenBy { it.seq })
-            }
-        }
-
-        val qSize = synchronized(queueLock) { pendingQueue.size }
-        _state.update { st ->
-            st.copy(
-                counters = updatedCounters,
-                queueSize = qSize,
-                history = (immediateRecords.reversed() + st.history).take(MAX_HISTORY)
-            )
-        }
-
-        if (tasksToEnqueue.isNotEmpty()) {
+        if (admittedCount > 0) {
             ensureQueueWorkerRunning()
         }
 
@@ -1196,35 +1289,43 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         _state.update { it.copy(isSingleTestRunning = true, isEmergencyStopped = false) }
         scope.launch {
             val summary = try {
-                // Beri waktu 95ms agar panel submenu/keyboard floating menutup dulu & WindowManager stabil (zero blink)
-                delay(95L)
-                val cooldownNote = waitForSkillCooldownIfNeeded(rule)
-                if (_state.value.isEmergencyStopped) {
-                    "Dihentikan darurat saat tunggu cooldown"
-                } else {
-                    val snapshot = _state.value
-                    val (gBefore, gAfter) = UniversalRuleEvaluator.resolveGlobalDelayPairMs(
-                        rule = rule,
-                        globalBeforeMs = snapshot.globalDelayBeforeMs,
-                        globalAfterMs = snapshot.globalDelayAfterMs,
-                        excludeCooldownRules = snapshot.globalDelayExcludeCooldownRules
-                    )
-                    val execSummary = dispatcher.dispatchRuleActions(
-                        rule = rule.copy(enabled = true),
-                        event = event,
-                        counterCount = (snapshot.counters[rule.id]?.accumulatedCount ?: 0) + 1,
-                        isMlbbMatchActive = false,
-                        globalDelayBeforeMs = gBefore,
-                        globalDelayAfterMs = gAfter,
-                        enableTouchLock = false
-                    )
-                    if (!cooldownNote.isNullOrBlank()) "$cooldownNote • $execSummary" else execSummary
+                hardwareExecutionMutex.withLock {
+                    // Beri waktu 95ms agar panel submenu/keyboard floating menutup dulu & WindowManager stabil (zero blink)
+                    delay(95L)
+                    val cooldownNote = waitForSkillCooldownIfNeeded(rule)
+                    if (_state.value.isEmergencyStopped) {
+                        "Dihentikan darurat saat tunggu cooldown"
+                    } else {
+                        val snapshot = _state.value
+                        val (gBefore, gAfter) = UniversalRuleEvaluator.resolveGlobalDelayPairMs(
+                            rule = rule,
+                            globalBeforeMs = snapshot.globalDelayBeforeMs,
+                            globalAfterMs = snapshot.globalDelayAfterMs,
+                            excludeCooldownRules = snapshot.globalDelayExcludeCooldownRules
+                        )
+                        val execSummary = dispatcher.dispatchRuleActions(
+                            rule = rule.copy(enabled = true),
+                            event = event,
+                            counterCount = (snapshot.counters[rule.id]?.accumulatedCount ?: 0) + 1,
+                            isMlbbMatchActive = false,
+                            globalDelayBeforeMs = gBefore,
+                            globalDelayAfterMs = gAfter,
+                            enableTouchLock = false
+                        )
+                        if (!cooldownNote.isNullOrBlank()) "$cooldownNote • $execSummary" else execSummary
+                    }
                 }
             } catch (t: Throwable) {
                 "Error: ${t.message}"
             } finally {
                 isSingleTestRunningGuard.set(false)
-                _state.update { it.copy(cooldownStatusHint = "", isSingleTestRunning = false) }
+                _state.update {
+                    it.copy(
+                        cooldownStatusHint = "",
+                        touchConflictHint = "",
+                        isSingleTestRunning = false
+                    )
+                }
             }
             val a11yOk = MlbbGestureAccessibilityService.peekInstance() != null
             val needsA11y = rule.actionSequence.any {
@@ -1346,19 +1447,24 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         val maxWait = rule.cooldownMaxWaitMs.coerceIn(1500L, 180_000L)
         var maxCooldownSeenSec: Double? = null
         var lastCooldownSeenSec: Double? = null
+        var lastCooldownSeenAtMs: Long = 0L
         var reconfirmedReady = false
+        var consecutiveUnavailable = 0
 
         while (!_state.value.isEmergencyStopped && (System.currentTimeMillis() - startedMs) < maxWait) {
             when (val scanResult = scanRuleCooldownRaw(rule)) {
                 is SkillCooldownScanResult.RateLimited -> {
-                    delay(scanResult.retryAfterMs.coerceIn(300L, 1250L))
+                    delay(scanResult.retryAfterMs.coerceIn(280L, 1250L))
                 }
                 is SkillCooldownScanResult.Ready -> {
+                    consecutiveUnavailable = 0
                     val lastSec = lastCooldownSeenSec
+                    val elapsedSinceSeen = if (lastCooldownSeenAtMs > 0L) System.currentTimeMillis() - lastCooldownSeenAtMs else Long.MAX_VALUE
                     val remainingWindow = maxWait - (System.currentTimeMillis() - startedMs)
-                    if (lastSec != null && lastSec > 1.8 && !reconfirmedReady && remainingWindow > 1200L) {
+                    val cooldownStillExpected = lastSec != null && lastSec > 0.85 && elapsedSinceSeen < (lastSec * 820.0).toLong()
+                    if (cooldownStillExpected && !reconfirmedReady && remainingWindow > 1150L) {
                         reconfirmedReady = true
-                        delay(1080L)
+                        delay(1060L)
                         continue
                     }
                     _state.update { it.copy(cooldownStatusHint = "") }
@@ -1367,8 +1473,10 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                     }
                 }
                 is SkillCooldownScanResult.OnCooldown -> {
+                    consecutiveUnavailable = 0
                     reconfirmedReady = false
                     lastCooldownSeenSec = scanResult.secondsRemaining
+                    lastCooldownSeenAtMs = System.currentTimeMillis()
                     maxCooldownSeenSec = maxOf(maxCooldownSeenSec ?: 0.0, scanResult.secondsRemaining)
                     val secText = String.format(Locale.US, "%.1f", scanResult.secondsRemaining)
                     _state.update {
@@ -1380,12 +1488,19 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                         scanResult.secondsRemaining > 8.0 ->
                             (scanResult.secondsRemaining * 420.0).toLong().coerceIn(2200L, 4200L)
                         scanResult.secondsRemaining > 3.0 ->
-                            ((scanResult.secondsRemaining - 1.2) * 550.0).toLong().coerceIn(1350L, 2400L)
+                            ((scanResult.secondsRemaining - 1.2) * 550.0).toLong().coerceIn(1300L, 2300L)
                         else -> 1080L
                     }
                     delay(waitStep)
                 }
                 is SkillCooldownScanResult.Unavailable -> {
+                    consecutiveUnavailable++
+                    val hardFailure = scanResult.reason.contains("Aksesibilitas", ignoreCase = true) ||
+                        scanResult.reason.contains("Android 11", ignoreCase = true)
+                    if (!hardFailure && consecutiveUnavailable <= 2) {
+                        delay(260L)
+                        continue
+                    }
                     _state.update { it.copy(cooldownStatusHint = "") }
                     return scanResult.reason
                 }
@@ -1401,10 +1516,13 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             return
         }
         scope.launch {
-            var res = scanRuleCooldownRaw(rule)
-            if (res is SkillCooldownScanResult.RateLimited) {
-                delay(res.retryAfterMs.coerceIn(300L, 1250L))
-                res = scanRuleCooldownRaw(rule)
+            val res = hardwareExecutionMutex.withLock {
+                var r = scanRuleCooldownRaw(rule)
+                if (r is SkillCooldownScanResult.RateLimited) {
+                    delay(r.retryAfterMs.coerceIn(300L, 1250L))
+                    r = scanRuleCooldownRaw(rule)
+                }
+                r
             }
             val msg = when (res) {
                 is SkillCooldownScanResult.Ready -> "✅ Skill SIAP / Aktif (angka cooldown tidak terdeteksi)"
@@ -1423,8 +1541,11 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             try {
                 while (true) {
                     val nextTask = synchronized(queueLock) {
-                        if (pendingQueue.isEmpty() || _state.value.isEmergencyStopped) null
-                        else pendingQueue.removeAt(0)
+                        if (pendingQueue.isEmpty() || _state.value.isEmergencyStopped || !_state.value.isEngineEnabled) {
+                            null
+                        } else {
+                            pendingQueue.removeAt(0)
+                        }
                     }
                     if (nextTask == null) break
 
@@ -1432,33 +1553,54 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                         st.copy(queueSize = synchronized(queueLock) { pendingQueue.size })
                     }
 
+                    // Ambil definisi rule terbaru agar perubahan rule/delete/mute segera berlaku
+                    val currentState = _state.value
+                    val liveRule = currentState.rules.firstOrNull { it.id == nextTask.rule.id }
+                    if (liveRule == null || !liveRule.enabled) {
+                        continue
+                    }
+
+                    val taskBudgetMs = ((if (liveRule.enableVisualCooldownWait) liveRule.cooldownMaxWaitMs else 0L) + 120_000L)
+                        .coerceIn(30_000L, 320_000L)
+
                     val summary = try {
-                        val cooldownNote = waitForSkillCooldownIfNeeded(nextTask.rule)
-                        if (_state.value.isEmergencyStopped) {
-                            "Dihentikan darurat saat tunggu cooldown"
-                        } else {
-                            val snapshot = _state.value
-                            val (gBefore, gAfter) = UniversalRuleEvaluator.resolveGlobalDelayPairMs(
-                                rule = nextTask.rule,
-                                globalBeforeMs = snapshot.globalDelayBeforeMs,
-                                globalAfterMs = snapshot.globalDelayAfterMs,
-                                excludeCooldownRules = snapshot.globalDelayExcludeCooldownRules
-                            )
-                            val execSummary = dispatcher.dispatchRuleActions(
-                                rule = nextTask.rule,
-                                event = nextTask.event,
-                                counterCount = nextTask.counterSnapshot.accumulatedCount,
-                                isMlbbMatchActive = snapshot.isMlbbMatchActive,
-                                globalDelayBeforeMs = gBefore,
-                                globalDelayAfterMs = gAfter,
-                                enableTouchLock = snapshot.blockTouchDuringChallenge
-                            )
-                            if (!cooldownNote.isNullOrBlank()) "$cooldownNote • $execSummary" else execSummary
-                        }
+                        withTimeoutOrNull(taskBudgetMs) {
+                            hardwareExecutionMutex.withLock {
+                                val cooldownNote = waitForSkillCooldownIfNeeded(liveRule)
+                                if (_state.value.isEmergencyStopped) {
+                                    "Dihentikan darurat saat tunggu cooldown"
+                                } else {
+                                    val snapshot = _state.value
+                                    val (gBefore, gAfter) = UniversalRuleEvaluator.resolveGlobalDelayPairMs(
+                                        rule = liveRule,
+                                        globalBeforeMs = snapshot.globalDelayBeforeMs,
+                                        globalAfterMs = snapshot.globalDelayAfterMs,
+                                        excludeCooldownRules = snapshot.globalDelayExcludeCooldownRules
+                                    )
+                                    val execSummary = dispatcher.dispatchRuleActions(
+                                        rule = liveRule,
+                                        event = nextTask.event,
+                                        counterCount = nextTask.counterSnapshot.accumulatedCount,
+                                        isMlbbMatchActive = snapshot.isMlbbMatchActive,
+                                        globalDelayBeforeMs = gBefore,
+                                        globalDelayAfterMs = gAfter,
+                                        enableTouchLock = snapshot.blockTouchDuringChallenge
+                                    )
+                                    if (!cooldownNote.isNullOrBlank()) "$cooldownNote • $execSummary" else execSummary
+                                }
+                            }
+                        } ?: "Timeout eksekusi tugas antrean"
                     } catch (t: Throwable) {
                         "Error eksekusi: ${t.message}"
                     } finally {
-                        _state.update { it.copy(cooldownStatusHint = "") }
+                        activeChallengeCount.set(0)
+                        _state.update {
+                            it.copy(
+                                isChallengeExecuting = false,
+                                cooldownStatusHint = "",
+                                touchConflictHint = ""
+                            )
+                        }
                     }
 
                     val execStatus = if (_state.value.isEmergencyStopped) {
@@ -1469,8 +1611,8 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                     appendHistory(
                         TriggerExecutionRecord(
                             timestampMs = System.currentTimeMillis(),
-                            ruleId = nextTask.rule.id,
-                            ruleName = nextTask.rule.triggerName,
+                            ruleId = liveRule.id,
+                            ruleName = liveRule.triggerName,
                             source = nextTask.event.source,
                             senderName = nextTask.event.senderName,
                             quantity = nextTask.event.quantity,
@@ -1481,8 +1623,17 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                 }
             } finally {
                 isWorkerRunning.set(false)
+                activeChallengeCount.set(0)
+                _state.update {
+                    it.copy(
+                        isChallengeExecuting = false,
+                        cooldownStatusHint = "",
+                        touchConflictHint = "",
+                        queueSize = synchronized(queueLock) { pendingQueue.size }
+                    )
+                }
                 val hasMore = synchronized(queueLock) {
-                    pendingQueue.isNotEmpty() && !_state.value.isEmergencyStopped
+                    pendingQueue.isNotEmpty() && !_state.value.isEmergencyStopped && _state.value.isEngineEnabled
                 }
                 if (hasMore) {
                     ensureQueueWorkerRunning()
@@ -1707,7 +1858,13 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             pendingQueue.clear()
         }
         activeChallengeCount.set(0)
+        isSingleTestRunningGuard.set(false)
         dispatcher.emergencyStopAll()
+        scope.launch(Dispatchers.Main) {
+            try { MlbbGestureAccessibilityService.onSyncTouchLockOverlay?.invoke(false) } catch (_: Throwable) {}
+            try { MlbbGestureAccessibilityService.onPrepareScreenForTouchRegion?.invoke(null, false) } catch (_: Throwable) {}
+            try { MlbbGestureAccessibilityService.onPrepareScreenForScanRegion?.invoke(null, false) } catch (_: Throwable) {}
+        }
         val rec = TriggerExecutionRecord(
             timestampMs = System.currentTimeMillis(),
             ruleId = "EMERGENCY",
@@ -1722,7 +1879,9 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             st.copy(
                 isEmergencyStopped = true,
                 isChallengeExecuting = false,
+                isSingleTestRunning = false,
                 cooldownStatusHint = "",
+                touchConflictHint = "",
                 queueSize = 0,
                 activeOverlays = emptyList(),
                 lastSimEvent = null,
@@ -2543,6 +2702,19 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             enterChallengeExecution()
         } else {
             exitChallengeExecution()
+        }
+    }
+
+    override suspend fun ensureTouchLockSynchronized(locked: Boolean) {
+        MlbbGestureAccessibilityService.peekInstance()?.syncTouchLockOverlayNow(locked)
+            ?: withContext(Dispatchers.Main) {
+                try { MlbbGestureAccessibilityService.onSyncTouchLockOverlay?.invoke(locked) } catch (_: Throwable) {}
+            }
+    }
+
+    override fun onTouchConflictChanged(hint: String) {
+        _state.update { st ->
+            if (st.touchConflictHint == hint) st else st.copy(touchConflictHint = hint)
         }
     }
 

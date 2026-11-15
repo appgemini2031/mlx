@@ -15,12 +15,77 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.PI
 import kotlin.math.exp
 import kotlin.math.sin
 import kotlin.random.Random
+
+/**
+ * Pure JVM helper for gesture retry timings when physical user touch (joystick/basic attack) cancels Android dispatchGesture.
+ */
+object GestureRetryPolicy {
+    const val MAX_TOUCH_CONFLICT_RETRIES = 36
+
+    fun backoffDelayMs(attemptIndex: Int): Long = when {
+        attemptIndex < 12 -> 35L
+        attemptIndex < 24 -> 50L
+        else -> 75L
+    }
+
+    fun shouldRetry(
+        outcome: GestureOutcome,
+        attemptIndex: Int,
+        aborted: Boolean
+    ): Boolean = outcome == GestureOutcome.CANCELLED_BY_TOUCH && !aborted && attemptIndex < MAX_TOUCH_CONFLICT_RETRIES
+}
+
+/**
+ * Pure JVM helper computing which step indices should keep Screen Touch Lock continuously engaged
+ * so inter-step gaps in touch choreography cannot be interrupted by accidental screen taps.
+ */
+object TouchExecutionPlanner {
+    private const val MAX_BRIDGE_GAP_MS = 2500L
+
+    fun isHardwareTouchAction(type: ActionType): Boolean =
+        type == ActionType.SIMULATED_CLICK ||
+            type == ActionType.SIMULATED_SWIPE ||
+            type == ActionType.HOME_BACK_GAME
+
+    fun computeLockedStepIndices(steps: List<UniversalActionStep>): Set<Int> {
+        val touchIndices = steps.indices.filter { isHardwareTouchAction(steps[it].actionType) }
+        if (touchIndices.isEmpty()) return emptySet()
+        val locked = touchIndices.toMutableSet()
+        for (k in 0 until touchIndices.lastIndex) {
+            val startIdx = touchIndices[k]
+            val endIdx = touchIndices[k + 1]
+            var totalGapMs = 0L
+            var hasBlockingWait = false
+            for (idx in (startIdx + 1) until endIdx) {
+                val st = steps[idx]
+                totalGapMs += st.delayMs.coerceAtLeast(0L)
+                if (st.actionType == ActionType.DELAY || st.actionType == ActionType.WAIT || st.actionType == ActionType.DURATION) {
+                    val waitMs = st.paramValue.trim().toLongOrNull() ?: st.durationMs
+                    totalGapMs += waitMs.coerceAtLeast(0L)
+                }
+                if (totalGapMs > MAX_BRIDGE_GAP_MS) {
+                    hasBlockingWait = true
+                    break
+                }
+            }
+            val nextStepDelay = steps[endIdx].delayMs.coerceAtLeast(0L)
+            if (!hasBlockingWait && (totalGapMs + nextStepDelay) <= MAX_BRIDGE_GAP_MS) {
+                for (idx in startIdx..endIdx) {
+                    locked.add(idx)
+                }
+            }
+        }
+        return locked
+    }
+}
 
 /**
  * Callback untuk mempublikasikan hasil visual/simulasi/scene ke UI Engine secara real-time.
@@ -32,6 +97,8 @@ interface ActionDispatchSink {
     fun onInteractionTestSimulated(simEvent: InteractionTestSimEvent)
     fun onRecordStepDetail(rule: UniversalTriggerRule, event: LiveInteractionEvent, status: DispatchStatus, detail: String)
     fun onTouchLockChanged(locked: Boolean)
+    suspend fun ensureTouchLockSynchronized(locked: Boolean) {}
+    fun onTouchConflictChanged(hint: String) {}
 }
 
 /**
@@ -51,6 +118,7 @@ class UniversalActionDispatcher(
     private val activeSoundTracks = CopyOnWriteArrayList<AudioTrack>()
     private var customClipPlayer: MediaPlayer? = null
     private val clipLock = Any()
+    private val hardwareTouchMutex = Mutex()
     private val emergencyEpoch = AtomicLong(0L)
     @Volatile
     private var actionVolume: Float = 0.85f
@@ -58,6 +126,7 @@ class UniversalActionDispatcher(
     fun emergencyStopAll() {
         emergencyEpoch.incrementAndGet()
         stopAllSounds()
+        sink.onTouchConflictChanged("")
         sink.onHideOverlay("ALL")
     }
 
@@ -114,57 +183,101 @@ class UniversalActionDispatcher(
         val ruleRepeats = if (rule.enableRepeat) rule.repeatCount.coerceIn(1, 30) else 1
         val intervalMs = if (rule.enableInterval) rule.intervalMs.coerceIn(0L, 60_000L) else 0L
         val executedLabels = mutableListOf<String>()
+        val lockedStepIndices = if (enableTouchLock && !isMlbbMatchActive) {
+            TouchExecutionPlanner.computeLockedStepIndices(stepsToRun)
+        } else {
+            emptySet()
+        }
 
         for (repeatIdx in 0 until ruleRepeats) {
             if (isAborted(startEpoch)) break
 
-            var i = 0
-            while (i < stepsToRun.size) {
-                if (isAborted(startEpoch)) break
-                val step = stepsToRun[i]
+            var isSpanTouchLocked = false
+            try {
+                var i = 0
+                while (i < stepsToRun.size) {
+                    if (isAborted(startEpoch)) break
+                    val step = stepsToRun[i]
 
-                if (step.executionMode == ExecutionMode.PARALLEL) {
-                    // Kumpulkan seluruh langkah PARALLEL berurutan agar berjalan bersamaan bila kompatibel
-                    val parallelGroup = mutableListOf<UniversalActionStep>()
-                    while (i < stepsToRun.size && stepsToRun[i].executionMode == ExecutionMode.PARALLEL) {
-                        parallelGroup.add(stepsToRun[i])
+                    val shouldKeepLockedHere = enableTouchLock && !isMlbbMatchActive && (i in lockedStepIndices)
+                    if (shouldKeepLockedHere && !isSpanTouchLocked) {
+                        sink.onTouchLockChanged(true)
+                        sink.ensureTouchLockSynchronized(true)
+                        isSpanTouchLocked = true
+                    } else if (!shouldKeepLockedHere && isSpanTouchLocked) {
+                        sink.ensureTouchLockSynchronized(false)
+                        sink.onTouchLockChanged(false)
+                        isSpanTouchLocked = false
+                    }
+
+                    if (step.executionMode == ExecutionMode.PARALLEL) {
+                        // Kumpulkan seluruh langkah PARALLEL berurutan agar berjalan bersamaan bila kompatibel
+                        val parallelGroup = mutableListOf<UniversalActionStep>()
+                        val groupStartIdx = i
+                        while (i < stepsToRun.size && stepsToRun[i].executionMode == ExecutionMode.PARALLEL) {
+                            parallelGroup.add(stepsToRun[i])
+                            i++
+                        }
+                        val groupTouchesScreen = enableTouchLock && !isMlbbMatchActive &&
+                            (groupStartIdx until i).any { it in lockedStepIndices }
+                        if (groupTouchesScreen && !isSpanTouchLocked) {
+                            sink.onTouchLockChanged(true)
+                            sink.ensureTouchLockSynchronized(true)
+                            isSpanTouchLocked = true
+                        }
+                        coroutineScope {
+                            val jobs = mutableListOf<Job>()
+                            for (pStep in parallelGroup) {
+                                jobs += launch {
+                                    val label = executeSingleStep(
+                                        rule = rule,
+                                        step = pStep,
+                                        event = event,
+                                        counterCount = counterCount,
+                                        isMlbbMatchActive = isMlbbMatchActive,
+                                        startEpoch = startEpoch,
+                                        enableTouchLock = enableTouchLock,
+                                        alreadySpanLocked = isSpanTouchLocked
+                                    )
+                                    synchronized(executedLabels) { executedLabels.add(label) }
+                                }
+                            }
+                            jobs.forEach { it.join() }
+                        }
+                    } else {
+                        val label = executeSingleStep(
+                            rule = rule,
+                            step = step,
+                            event = event,
+                            counterCount = counterCount,
+                            isMlbbMatchActive = isMlbbMatchActive,
+                            startEpoch = startEpoch,
+                            enableTouchLock = enableTouchLock,
+                            alreadySpanLocked = isSpanTouchLocked
+                        )
+                        executedLabels.add(label)
                         i++
                     }
-                    coroutineScope {
-                        val jobs = mutableListOf<Job>()
-                        for (pStep in parallelGroup) {
-                            jobs += launch {
-                                val label = executeSingleStep(
-                                    rule = rule,
-                                    step = pStep,
-                                    event = event,
-                                    counterCount = counterCount,
-                                    isMlbbMatchActive = isMlbbMatchActive,
-                                    startEpoch = startEpoch,
-                                    enableTouchLock = enableTouchLock
-                                )
-                                synchronized(executedLabels) { executedLabels.add(label) }
-                            }
-                        }
-                        jobs.forEach { it.join() }
-                    }
-                } else {
-                    val label = executeSingleStep(
-                        rule = rule,
-                        step = step,
-                        event = event,
-                        counterCount = counterCount,
-                        isMlbbMatchActive = isMlbbMatchActive,
-                        startEpoch = startEpoch,
-                        enableTouchLock = enableTouchLock
-                    )
-                    executedLabels.add(label)
-                    i++
-                }
 
-                if (intervalMs > 0L && i < stepsToRun.size) {
-                    delay(intervalMs)
+                    // Lepas kunci layar bila langkah berikutnya tidak berada dalam blok sentuh kontinu
+                    val nextShouldLock = enableTouchLock && !isMlbbMatchActive && (i in lockedStepIndices)
+                    if (isSpanTouchLocked && !nextShouldLock) {
+                        sink.ensureTouchLockSynchronized(false)
+                        sink.onTouchLockChanged(false)
+                        isSpanTouchLocked = false
+                    }
+
+                    if (intervalMs > 0L && i < stepsToRun.size) {
+                        delay(intervalMs)
+                    }
                 }
+            } finally {
+                if (isSpanTouchLocked) {
+                    sink.ensureTouchLockSynchronized(false)
+                    sink.onTouchLockChanged(false)
+                    isSpanTouchLocked = false
+                }
+                sink.onTouchConflictChanged("")
             }
 
             if (intervalMs > 0L && repeatIdx < ruleRepeats - 1) {
@@ -189,7 +302,8 @@ class UniversalActionDispatcher(
         counterCount: Int,
         isMlbbMatchActive: Boolean,
         startEpoch: Long,
-        enableTouchLock: Boolean = true
+        enableTouchLock: Boolean = true,
+        alreadySpanLocked: Boolean = false
     ): String {
         if (isAborted(startEpoch)) return "${step.actionType.displayName} (Batal)"
 
@@ -207,13 +321,11 @@ class UniversalActionDispatcher(
         var summary = step.actionType.displayName
 
         // Kunci layar HANYA selama aksi sentuh / navigasi nyata sedang dikerjakan (bukan saat delay/cooldown/tes 1 konsep)
-        val acquiresTouchLock = enableTouchLock && !isMlbbMatchActive && (
-            step.actionType == ActionType.SIMULATED_CLICK ||
-                step.actionType == ActionType.SIMULATED_SWIPE ||
-                step.actionType == ActionType.HOME_BACK_GAME
-            )
+        val acquiresTouchLock = !alreadySpanLocked && enableTouchLock && !isMlbbMatchActive &&
+            TouchExecutionPlanner.isHardwareTouchAction(step.actionType)
         if (acquiresTouchLock) {
             sink.onTouchLockChanged(true)
+            sink.ensureTouchLockSynchronized(true)
         }
         try {
             for (r in 0 until repeats) {
@@ -441,18 +553,29 @@ class UniversalActionDispatcher(
                         )
                         val svc = MlbbGestureAccessibilityService.peekInstance()
                         if (svc != null) {
-                            val ok = svc.dispatchHoldAndDrag(
-                                normX = px,
-                                normY = py,
-                                holdMs = holdMs,
-                                holdAndDrag = step.holdAndDrag,
-                                dragSpec = step.dragDirection,
-                                dragDurationMs = step.dragDurationMs
-                            )
-                            summary = if (ok) {
-                                "$modeLabel (${(px * 100).toInt()}%, ${(py * 100).toInt()}%)"
-                            } else {
-                                "$modeLabel gagal di (${(px * 100).toInt()}%, ${(py * 100).toInt()}%)"
+                            val (outcome, tries) = dispatchWithTouchRetry(
+                                startEpoch = startEpoch,
+                                allowRetry = true,
+                                enableLockOnConflict = enableTouchLock && !isMlbbMatchActive
+                            ) {
+                                svc.dispatchHoldAndDragOutcome(
+                                    normX = px,
+                                    normY = py,
+                                    holdMs = holdMs,
+                                    holdAndDrag = step.holdAndDrag,
+                                    dragSpec = step.dragDirection,
+                                    dragDurationMs = step.dragDurationMs
+                                )
+                            }
+                            summary = when {
+                                outcome == GestureOutcome.COMPLETED && tries > 1 ->
+                                    "$modeLabel (${(px * 100).toInt()}%, ${(py * 100).toInt()}% • retry ${tries - 1}x)"
+                                outcome == GestureOutcome.COMPLETED ->
+                                    "$modeLabel (${(px * 100).toInt()}%, ${(py * 100).toInt()}%)"
+                                outcome == GestureOutcome.CANCELLED_BY_TOUCH ->
+                                    "$modeLabel dibatalkan sentuhan aktif (layar dikunci)"
+                                else ->
+                                    "$modeLabel gagal di (${(px * 100).toInt()}%, ${(py * 100).toInt()}%)"
                             }
                         } else {
                             sink.onRecordStepDetail(
@@ -492,11 +615,22 @@ class UniversalActionDispatcher(
                         )
                         val svc = MlbbGestureAccessibilityService.peekInstance()
                         if (svc != null) {
-                            val ok = svc.dispatchSwipe(startX, startY, swipeSpec, durationMs = durMs)
-                            summary = if (ok) {
-                                "Swipe ML (${swipeSpec.uppercase()})"
-                            } else {
-                                "Swipe ML gagal"
+                            val (outcome, tries) = dispatchWithTouchRetry(
+                                startEpoch = startEpoch,
+                                allowRetry = true,
+                                enableLockOnConflict = enableTouchLock && !isMlbbMatchActive
+                            ) {
+                                svc.dispatchSwipeOutcome(startX, startY, swipeSpec, durationMs = durMs)
+                            }
+                            summary = when {
+                                outcome == GestureOutcome.COMPLETED && tries > 1 ->
+                                    "Swipe ML (${swipeSpec.uppercase()} • retry ${tries - 1}x)"
+                                outcome == GestureOutcome.COMPLETED ->
+                                    "Swipe ML (${swipeSpec.uppercase()})"
+                                outcome == GestureOutcome.CANCELLED_BY_TOUCH ->
+                                    "Swipe ML dibatalkan sentuhan aktif (layar dikunci)"
+                                else ->
+                                    "Swipe ML gagal"
                             }
                         } else {
                             sink.onRecordStepDetail(
@@ -525,20 +659,22 @@ class UniversalActionDispatcher(
                         val targetPkg = resolvedSecondary.trim()
                         val svc = MlbbGestureAccessibilityService.peekInstance()
                         if (svc != null) {
-                            val wentHome = svc.goHome()
-                            if (homeDelayMs > 0L) {
-                                delay(homeDelayMs)
-                            }
-                            val returned = if (!isAborted(startEpoch)) {
-                                svc.bringGameToFront(context, targetPkg)
-                            } else {
-                                false
-                            }
-                            summary = when {
-                                isAborted(startEpoch) -> "Home → Back (Batal)"
-                                wentHome && returned -> "Home ${homeDelayMs}ms → ${targetPkg.ifBlank { "Balik APK" }}"
-                                wentHome -> "Home ${homeDelayMs}ms (APK tujuan belum ditemukan)"
-                                else -> "Gagal ke Home"
+                            summary = hardwareTouchMutex.withLock {
+                                val wentHome = svc.goHome()
+                                if (homeDelayMs > 0L) {
+                                    delay(homeDelayMs)
+                                }
+                                val returned = if (!isAborted(startEpoch)) {
+                                    svc.bringGameToFront(context, targetPkg)
+                                } else {
+                                    false
+                                }
+                                when {
+                                    isAborted(startEpoch) -> "Home → Back (Batal)"
+                                    wentHome && returned -> "Home ${homeDelayMs}ms → ${targetPkg.ifBlank { "Balik APK" }}"
+                                    wentHome -> "Home ${homeDelayMs}ms (APK tujuan belum ditemukan)"
+                                    else -> "Gagal ke Home"
+                                }
                             }
                         } else {
                             sink.onRecordStepDetail(
@@ -578,10 +714,57 @@ class UniversalActionDispatcher(
         }
         } finally {
             if (acquiresTouchLock) {
+                sink.ensureTouchLockSynchronized(false)
                 sink.onTouchLockChanged(false)
             }
         }
         return summary
+    }
+
+    private suspend fun dispatchWithTouchRetry(
+        startEpoch: Long,
+        allowRetry: Boolean,
+        enableLockOnConflict: Boolean,
+        dispatchCall: suspend () -> GestureOutcome
+    ): Pair<GestureOutcome, Int> = hardwareTouchMutex.withLock {
+        var attempt = 0
+        var conflictLockAcquired = false
+        try {
+            while (true) {
+                if (isAborted(startEpoch)) {
+                    return@withLock GestureOutcome.FAILED to attempt.coerceAtLeast(1)
+                }
+                attempt++
+                val outcome = dispatchCall()
+                if (outcome == GestureOutcome.COMPLETED) {
+                    return@withLock GestureOutcome.COMPLETED to attempt
+                }
+                val canRetry = allowRetry && GestureRetryPolicy.shouldRetry(
+                    outcome = outcome,
+                    attemptIndex = attempt - 1,
+                    aborted = isAborted(startEpoch)
+                )
+                if (!canRetry) {
+                    return@withLock outcome to attempt
+                }
+                // Pastikan layar tetap terkunci penuh & cepat tangkap celah milidetik berikutnya untuk eksekusi konsep
+                if (enableLockOnConflict && !conflictLockAcquired) {
+                    sink.onTouchLockChanged(true)
+                    sink.ensureTouchLockSynchronized(true)
+                    conflictLockAcquired = true
+                }
+                sink.onTouchConflictChanged("🔒 Layar Terkunci • Mengambil alih kontrol (${attempt + 1})...")
+                delay(GestureRetryPolicy.backoffDelayMs(attempt - 1))
+            }
+            @Suppress("UNREACHABLE_CODE")
+            GestureOutcome.FAILED to attempt
+        } finally {
+            sink.onTouchConflictChanged("")
+            if (conflictLockAcquired) {
+                sink.ensureTouchLockSynchronized(false)
+                sink.onTouchLockChanged(false)
+            }
+        }
     }
 
     private fun buildBeforeDelay(rule: UniversalTriggerRule): Long {

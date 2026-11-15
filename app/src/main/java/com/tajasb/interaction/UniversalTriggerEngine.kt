@@ -1336,11 +1336,12 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
                 "Error: ${t.message}"
             } finally {
                 isSingleTestRunningGuard.set(false)
-                _state.update {
-                    it.copy(
+                _state.update { st ->
+                    st.copy(
                         cooldownStatusHint = "",
                         touchConflictHint = "",
-                        isSingleTestRunning = false
+                        isSingleTestRunning = false,
+                        lastSimEvent = if (st.isPositionEditMode && !st.isFloatingHiddenForLive) st.lastSimEvent else null
                     )
                 }
             }
@@ -2174,7 +2175,8 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
             it.copy(
                 isFloatingHiddenForLive = hidden,
                 isPositionEditMode = if (hidden) false else it.isPositionEditMode,
-                isCoverEditMode = if (hidden) false else it.isCoverEditMode
+                isCoverEditMode = if (hidden) false else it.isCoverEditMode,
+                lastSimEvent = if (hidden) null else it.lastSimEvent
             )
         }
     }
@@ -2183,7 +2185,8 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
         _state.update {
             it.copy(
                 isPositionEditMode = editing,
-                isFloatingHiddenForLive = if (editing) false else it.isFloatingHiddenForLive
+                isFloatingHiddenForLive = if (editing) false else it.isFloatingHiddenForLive,
+                lastSimEvent = if (!editing) null else it.lastSimEvent
             )
         }
     }
@@ -2755,7 +2758,15 @@ class UniversalTriggerEngine private constructor(private val appContext: Context
     }
 
     override fun onInteractionTestSimulated(simEvent: InteractionTestSimEvent) {
-        _state.update { it.copy(lastSimEvent = simEvent) }
+        _state.update { st ->
+            if (st.isPositionEditMode && !st.isFloatingHiddenForLive) {
+                st.copy(lastSimEvent = simEvent)
+            } else if (st.lastSimEvent != null) {
+                st.copy(lastSimEvent = null)
+            } else {
+                st
+            }
+        }
     }
 
     override fun onRecordStepDetail(

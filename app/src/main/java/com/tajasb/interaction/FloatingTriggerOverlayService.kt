@@ -253,6 +253,7 @@ class FloatingTriggerOverlayService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var liveStageView: FrameLayout? = null
+    private var liveStageParams: WindowManager.LayoutParams? = null
     private var touchBlockerView: FrameLayout? = null
     private var touchBlockerParams: WindowManager.LayoutParams? = null
     private var touchBlockerStatusPill: TextView? = null
@@ -390,7 +391,9 @@ class FloatingTriggerOverlayService : Service() {
         }
 
         engine.setFloatingOverlayRunning(true)
-        attachSingleFloatingHudWindow()
+        if (!lastState.isFloatingHiddenForLive) {
+            attachSingleFloatingHudWindowIfNeeded()
+        }
         observeEngineState()
     }
 
@@ -411,6 +414,7 @@ class FloatingTriggerOverlayService : Service() {
                 engine.setFloatingHiddenForLive(false)
                 engine.updateFloatingConfig { it.copy(hudCollapsed = false) }
                 lastState = engine.state.value
+                attachSingleFloatingHudWindowIfNeeded()
                 refreshSingleHudVisuals()
                 applyHudPositionFromConfig(lastState.floatingConfig, forceApply = true)
                 clampHudIntoSafeBounds()
@@ -430,6 +434,8 @@ class FloatingTriggerOverlayService : Service() {
                 engine.setFloatingHiddenForLive(false)
                 engine.resetFloatingPosition()
                 lastState = engine.state.value
+                attachSingleFloatingHudWindowIfNeeded()
+                refreshSingleHudVisuals()
                 applyHudPositionFromConfig(lastState.floatingConfig, forceApply = true)
                 updateNotification(lastState.isFloatingHiddenForLive)
                 Toast.makeText(this, "↺ Posisi floating direset ke area aman", Toast.LENGTH_SHORT).show()
@@ -474,9 +480,14 @@ class FloatingTriggerOverlayService : Service() {
             engine.updateFloatingConfig { it.copy(hudCollapsed = false) }
         }
         lastState = engine.state.value
+        if (!lastState.isFloatingHiddenForLive) {
+            attachSingleFloatingHudWindowIfNeeded()
+        }
         refreshSingleHudVisuals()
-        applyHudPositionFromConfig(lastState.floatingConfig, forceApply = true)
-        clampHudIntoSafeBounds()
+        if (!lastState.isFloatingHiddenForLive) {
+            applyHudPositionFromConfig(lastState.floatingConfig, forceApply = true)
+            clampHudIntoSafeBounds()
+        }
         updateNotification(lastState.isFloatingHiddenForLive)
         return START_STICKY
     }
@@ -525,11 +536,7 @@ class FloatingTriggerOverlayService : Service() {
         serviceScope.cancel()
         removeAllMarkerWindows()
         removeAllCoverWindows()
-        subMenuComposeOwner?.onDetach()
-        subMenuComposeOwner = null
-        singleHudView?.let { safeRemoveViewImmediate(it) }
-        singleHudView = null
-        singleHudParams = null
+        detachSingleFloatingHudWindow()
         detachAllHoleBlockerPanels()
         detachTouchBlockerWindow()
         detachLiveStageWindow()
@@ -582,12 +589,15 @@ class FloatingTriggerOverlayService : Service() {
                     prev.activePinStepId != st.activePinStepId ||
                     prev.rules != st.rules ||
                     prev.isSingleTestRunning != st.isSingleTestRunning
+                val scanAreasMatter = (st.isPositionEditMode && !st.isFloatingHiddenForLive) ||
+                    (prev.isPositionEditMode && !prev.isFloatingHiddenForLive)
                 val stageChanged = isFirst ||
                     prev.activeOverlays != st.activeOverlays ||
-                    prev.lastSimEvent != st.lastSimEvent ||
+                    (st.isPositionEditMode && !st.isFloatingHiddenForLive && prev.lastSimEvent != st.lastSimEvent) ||
+                    (prev.lastSimEvent != null && st.lastSimEvent == null) ||
                     prev.isPositionEditMode != st.isPositionEditMode ||
                     prev.isFloatingHiddenForLive != st.isFloatingHiddenForLive ||
-                    prev.rules != st.rules
+                    (scanAreasMatter && prev.rules != st.rules)
                 val markerChanged = isFirst ||
                     prev.isPositionEditMode != st.isPositionEditMode ||
                     prev.isFloatingHiddenForLive != st.isFloatingHiddenForLive ||
@@ -621,14 +631,24 @@ class FloatingTriggerOverlayService : Service() {
                 lastState = st
 
                 if (!isTemporarilyHiddenForScan) {
-                    if (hudChanged) {
-                        refreshSingleHudVisuals()
-                    }
-                    if (!isDraggingHud && !st.isFloatingHiddenForLive && (hudLayoutRelevantChanged || cfgRatioChanged)) {
-                        if (cfgRatioChanged) {
-                            applyHudPositionFromConfig(st.floatingConfig, forceApply = false)
-                        } else {
-                            clampHudIntoSafeBounds()
+                    if (st.isFloatingHiddenForLive) {
+                        if (singleHudView != null) {
+                            detachSingleFloatingHudWindow()
+                        }
+                    } else {
+                        val justReattachedHud = singleHudView == null
+                        if (justReattachedHud) {
+                            attachSingleFloatingHudWindowIfNeeded()
+                        }
+                        if (hudChanged || justReattachedHud) {
+                            refreshSingleHudVisuals()
+                        }
+                        if (!isDraggingHud && (justReattachedHud || hudLayoutRelevantChanged || cfgRatioChanged)) {
+                            if (cfgRatioChanged || justReattachedHud) {
+                                applyHudPositionFromConfig(st.floatingConfig, forceApply = justReattachedHud)
+                            } else {
+                                clampHudIntoSafeBounds()
+                            }
                         }
                     }
                     if (stageChanged) {
@@ -656,12 +676,31 @@ class FloatingTriggerOverlayService : Service() {
 
     // ==================== Layer 1: Non-Blocking Feedback & Uploaded Overlay Stage ====================
 
-    private fun attachLiveStageWindowIfNeeded(): FrameLayout? {
-        liveStageView?.let { return it }
+    private fun attachLiveStageWindowIfNeeded(bounds: PixelRect): FrameLayout? {
+        val w = (bounds.right - bounds.left).coerceAtLeast(1)
+        val h = (bounds.bottom - bounds.top).coerceAtLeast(1)
+        val existing = liveStageView
+        val existingParams = liveStageParams
+        if (existing != null && existingParams != null) {
+            if (existingParams.x != bounds.left ||
+                existingParams.y != bounds.top ||
+                existingParams.width != w ||
+                existingParams.height != h
+            ) {
+                existingParams.x = bounds.left
+                existingParams.y = bounds.top
+                existingParams.width = w
+                existingParams.height = h
+                try {
+                    windowManager.updateViewLayout(existing, existingParams)
+                } catch (_: Throwable) {}
+            }
+            return existing
+        }
         val container = FrameLayout(this)
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
+            w,
+            h,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
@@ -670,13 +709,14 @@ class FloatingTriggerOverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 0
-            y = 0
+            x = bounds.left
+            y = bounds.top
             applyCutoutMode(this)
         }
         return try {
             windowManager.addView(container, params)
             liveStageView = container
+            liveStageParams = params
             container
         } catch (t: Throwable) {
             Log.e(TAG, "Gagal pasang live stage overlay: ${t.message}")
@@ -689,6 +729,7 @@ class FloatingTriggerOverlayService : Service() {
         stage.removeAllViews()
         safeRemoveViewImmediate(stage)
         liveStageView = null
+        liveStageParams = null
         scanHiddenStage = false
     }
 
@@ -898,14 +939,14 @@ class FloatingTriggerOverlayService : Service() {
         }
     }
 
-    private fun setTouchHoleForAutomation(holeRect: PixelRect?, active: Boolean) {
+    private fun setTouchHoleForAutomation(holeRect: PixelRect?, active: Boolean): Boolean {
         if (active) {
             if (!isTouchLockActuallyActive(lastState)) {
                 activeTouchHolePx = null
                 if (currentBlockerMode != BlockerWindowMode.DETACHED) {
                     updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
                 }
-                return
+                return false
             }
             isTemporarilyHiddenForAutomation = true
             activeTouchHolePx = holeRect
@@ -933,10 +974,12 @@ class FloatingTriggerOverlayService : Service() {
                 }
             }
             updateTouchBlockerState(lastState, temporarilyHiddenForAutomation = isTemporarilyHiddenForScan)
+            return true
         } else {
             clearAutomationTouchHoleAndRestoreUi(
                 refreshBlocker = currentBlockerMode != BlockerWindowMode.DETACHED || isTouchLockActuallyActive(lastState)
             )
+            return false
         }
     }
 
@@ -1031,23 +1074,34 @@ class FloatingTriggerOverlayService : Service() {
         }
     }
 
+    private data class StageChildPlacement(
+        val view: View,
+        val left: Int,
+        val top: Int,
+        val width: Int,
+        val height: Int
+    )
+
     private fun renderLiveStage(st: UniversalEngineUiState) {
         val hasScanAreas = st.isPositionEditMode && !st.isFloatingHiddenForLive &&
             st.rules.any { it.isPinVisible && it.enableVisualCooldownWait }
+        val showSimEvent = st.isPositionEditMode && !st.isFloatingHiddenForLive && st.lastSimEvent != null
         val shouldAttach = LiveStageLifecyclePlanner.shouldAttachStageWindow(
             hasScanAreas = hasScanAreas,
             activeOverlayCount = st.activeOverlays.size,
             hasSimEvent = st.lastSimEvent != null,
-            hiddenForScan = false
+            hiddenForScan = false,
+            isPositionEditMode = st.isPositionEditMode,
+            isFloatingHiddenForLive = st.isFloatingHiddenForLive
         )
         if (!shouldAttach) {
             detachLiveStageWindow()
             return
         }
-        val stage = attachLiveStageWindowIfNeeded() ?: return
-        stage.removeAllViews()
 
         val (screenW, screenH) = getDisplaySizePx()
+        val placements = mutableListOf<StageChildPlacement>()
+        val childRects = mutableListOf<PixelRect>()
 
         if (hasScanAreas) {
             for (rule in st.rules) {
@@ -1089,10 +1143,8 @@ class FloatingTriggerOverlayService : Service() {
                         Gravity.TOP or Gravity.END
                     )
                 )
-                stage.addView(scanFrame, FrameLayout.LayoutParams(boxW, boxH).apply {
-                    leftMargin = left
-                    topMargin = top
-                })
+                placements += StageChildPlacement(scanFrame, left, top, boxW, boxH)
+                childRects += PixelRect(left, top, left + boxW, top + boxH)
             }
         }
 
@@ -1236,29 +1288,60 @@ class FloatingTriggerOverlayService : Service() {
                 cardHeightPx = ch,
                 primaryMediaHeightPx = resolvedPrimaryMediaH
             )
-            stage.addView(card, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-                leftMargin = anchorTopLeft.left
-                topMargin = anchorTopLeft.top
-            })
+            placements += StageChildPlacement(
+                view = card,
+                left = anchorTopLeft.left,
+                top = anchorTopLeft.top,
+                width = FrameLayout.LayoutParams.WRAP_CONTENT,
+                height = FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+            childRects += PixelRect(
+                left = anchorTopLeft.left,
+                top = anchorTopLeft.top,
+                right = (anchorTopLeft.left + cw).coerceAtMost(screenW),
+                bottom = (anchorTopLeft.top + ch).coerceAtMost(screenH)
+            )
         }
 
-        st.lastSimEvent?.let { sim ->
-            val dotSize = dp(30)
-            val a11yOk = MlbbGestureAccessibilityService.peekInstance() != null
-            val ringColor = if (a11yOk) sim.colorHex.toInt() else Color.rgb(249, 115, 22)
-            val dot = View(this).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(Color.argb(120, Color.red(ringColor), Color.green(ringColor), Color.blue(ringColor)))
-                    setStroke(dp(3f), ringColor)
+        if (showSimEvent) {
+            st.lastSimEvent?.let { sim ->
+                val dotSize = dp(30)
+                val a11yOk = MlbbGestureAccessibilityService.peekInstance() != null
+                val ringColor = if (a11yOk) sim.colorHex.toInt() else Color.rgb(249, 115, 22)
+                val dot = View(this).apply {
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(Color.argb(120, Color.red(ringColor), Color.green(ringColor), Color.blue(ringColor)))
+                        setStroke(dp(3f), ringColor)
+                    }
                 }
+                val left = ((sim.posX * screenW) - dotSize / 2f).roundToInt().coerceIn(0, (screenW - dotSize).coerceAtLeast(0))
+                val top = ((sim.posY * screenH) - dotSize / 2f).roundToInt().coerceIn(0, (screenH - dotSize).coerceAtLeast(0))
+                placements += StageChildPlacement(dot, left, top, dotSize, dotSize)
+                childRects += PixelRect(left, top, (left + dotSize).coerceAtMost(screenW), (top + dotSize).coerceAtMost(screenH))
             }
-            val left = ((sim.posX * screenW) - dotSize / 2f).roundToInt().coerceIn(0, (screenW - dotSize).coerceAtLeast(0))
-            val top = ((sim.posY * screenH) - dotSize / 2f).roundToInt().coerceIn(0, (screenH - dotSize).coerceAtLeast(0))
-            stage.addView(dot, FrameLayout.LayoutParams(dotSize, dotSize).apply {
-                leftMargin = left
-                topMargin = top
-            })
+        }
+
+        val bounds = LiveStageBoundsPlanner.computeTightWindowRect(
+            childRects = childRects,
+            screenW = screenW,
+            screenH = screenH,
+            fullScreenForScanAreas = hasScanAreas
+        )
+        if (bounds == null) {
+            detachLiveStageWindow()
+            return
+        }
+        val stage = attachLiveStageWindowIfNeeded(bounds) ?: return
+        stage.removeAllViews()
+        for (item in placements) {
+            stage.addView(
+                item.view,
+                FrameLayout.LayoutParams(item.width, item.height).apply {
+                    leftMargin = (item.left - bounds.left).coerceAtLeast(0)
+                    topMargin = (item.top - bounds.top).coerceAtLeast(0)
+                }
+            )
         }
     }
 
@@ -1342,13 +1425,15 @@ class FloatingTriggerOverlayService : Service() {
 
             val stage = liveStageView
             if (stage != null && stage.visibility == View.VISIBLE && stage.childCount > 0) {
+                val stageOriginX = liveStageParams?.x ?: 0
+                val stageOriginY = liveStageParams?.y ?: 0
                 var stageOverlaps = false
                 for (i in 0 until stage.childCount) {
                     val child = stage.getChildAt(i) ?: continue
                     if (child.visibility != View.VISIBLE) continue
                     val lp = child.layoutParams as? FrameLayout.LayoutParams
-                    val cl = if (child.width > 0) child.left else (lp?.leftMargin ?: 0)
-                    val ct = if (child.height > 0) child.top else (lp?.topMargin ?: 0)
+                    val cl = stageOriginX + (if (child.width > 0) child.left else (lp?.leftMargin ?: 0))
+                    val ct = stageOriginY + (if (child.height > 0) child.top else (lp?.topMargin ?: 0))
                     val cw = child.width.coerceAtLeast(child.measuredWidth)
                     val ch = child.height.coerceAtLeast(child.measuredHeight)
                     if (cw > 0 && ch > 0 && ScanRegionGeometry.rectsIntersect(PixelRect(cl, ct, cl + cw, ct + ch), scanRect)) {
@@ -2194,7 +2279,8 @@ class FloatingTriggerOverlayService : Service() {
 
     // ==================== Layer 3: ONE Safe-Bounded Draggable Floating + Precision D-Pad + Dropdown ====================
 
-    private fun attachSingleFloatingHudWindow() {
+    private fun attachSingleFloatingHudWindowIfNeeded() {
+        if (singleHudView != null) return
         val cfg = engine.state.value.floatingConfig
         val owner = FloatingComposeOwner().apply { onAttach() }
         subMenuComposeOwner = owner
@@ -2393,6 +2479,37 @@ class FloatingTriggerOverlayService : Service() {
         }
         subMenuContainer = subMenuHolder
 
+        root.addView(headerDragContainer)
+        root.addView(subMenuHolder)
+
+        try {
+            windowManager.addView(root, params)
+            singleHudView = root
+            singleHudParams = params
+            refreshSingleHudVisuals()
+            applyHudPositionFromConfig(cfg, forceApply = true)
+        } catch (t: Throwable) {
+            owner.onDetach()
+            subMenuComposeOwner = null
+            subMenuContainer = null
+            Log.e(TAG, "Gagal pasang floating HUD: ${t.message}")
+        }
+    }
+
+    private fun ensureSubMenuComposeAttached(cfg: FloatingWindowConfig) {
+        val holder = subMenuContainer ?: return
+        val owner = subMenuComposeOwner ?: return
+        val targetDropW = computeSubMenuWidthPx(cfg)
+        val existing = subMenuComposeView
+        if (existing != null) {
+            val lp = existing.layoutParams
+            if (lp != null && abs(lp.width - targetDropW) >= dp(4)) {
+                lp.width = targetDropW
+                existing.layoutParams = lp
+                existing.requestLayout()
+            }
+            return
+        }
         val composeView = ComposeView(this).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
             setViewTreeLifecycleOwner(owner)
@@ -2433,24 +2550,46 @@ class FloatingTriggerOverlayService : Service() {
             }
         }
         subMenuComposeView = composeView
-        val dropWidth = computeSubMenuWidthPx(cfg)
-        subMenuHolder.addView(
+        holder.addView(
             composeView,
-            FrameLayout.LayoutParams(dropWidth, FrameLayout.LayoutParams.WRAP_CONTENT)
+            FrameLayout.LayoutParams(targetDropW, FrameLayout.LayoutParams.WRAP_CONTENT)
         )
+    }
 
-        root.addView(headerDragContainer)
-        root.addView(subMenuHolder)
+    private fun detachSubMenuCompose() {
+        val cv = subMenuComposeView ?: return
+        try { cv.disposeComposition() } catch (_: Throwable) {}
+        subMenuContainer?.removeView(cv)
+        subMenuComposeView = null
+    }
 
-        try {
-            windowManager.addView(root, params)
-            singleHudView = root
-            singleHudParams = params
-            refreshSingleHudVisuals()
-            applyHudPositionFromConfig(cfg, forceApply = true)
-        } catch (t: Throwable) {
-            Log.e(TAG, "Gagal pasang floating HUD: ${t.message}")
-        }
+    private fun detachSingleFloatingHudWindow() {
+        setHudFocusableForKeyboard(false)
+        detachSubMenuCompose()
+        subMenuComposeOwner?.onDetach()
+        subMenuComposeOwner = null
+        singleHudView?.let { safeRemoveViewImmediate(it) }
+        singleHudView = null
+        singleHudParams = null
+        subMenuContainer = null
+        dpadContainer = null
+        dpadColorDot = null
+        dpadTargetLabel = null
+        dpadCoordLabel = null
+        dpadEyeBtn = null
+        dpadStepBtn = null
+        dpadArrowRow = null
+        dpadHiddenBannerRow = null
+        hudTopRow = null
+        hudTitleBtn = null
+        btnEngineTiny = null
+        btnLockTiny = null
+        btnPinTiny = null
+        btnSubMenuTiny = null
+        btnMinTiny = null
+        btnCloseTiny = null
+        touchHiddenHudForHole = false
+        scanHiddenHud = false
     }
 
     private fun buildPrecisionCursorBar(): LinearLayout {
@@ -2776,15 +2915,21 @@ class FloatingTriggerOverlayService : Service() {
                 windowManager.updateViewLayout(hud, params)
             } catch (_: Throwable) {}
         }
-        val imm = getSystemService(android.view.inputmethod.InputMethodManager::class.java)
         if (focusable) {
+            val imm = getSystemService(android.view.inputmethod.InputMethodManager::class.java)
             hud.post {
                 hud.requestFocus()
                 val target = hud.findFocus() ?: hud
                 imm?.showSoftInput(target, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
             }
-        } else {
+        } else if (HudFocusGuardPlanner.shouldClearFocusAndIme(
+                currentlyFocusable = currentlyFocusable,
+                hasViewFocus = hud.hasFocus(),
+                requestedFocusable = false
+            )
+        ) {
             hud.clearFocus()
+            val imm = getSystemService(android.view.inputmethod.InputMethodManager::class.java)
             imm?.hideSoftInputFromWindow(hud.windowToken, 0)
         }
     }
@@ -2852,21 +2997,15 @@ class FloatingTriggerOverlayService : Service() {
 
     private fun refreshSingleHudVisuals() {
         val st = lastState
-        val cfg = st.floatingConfig
-        val hud = singleHudView ?: return
-        val hParams = singleHudParams
-
         if (st.isFloatingHiddenForLive) {
-            setHudFocusableForKeyboard(false)
-            if (hud.visibility != View.GONE) {
-                hud.visibility = View.GONE
-            }
-            if (hParams != null && (hParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0) {
-                hParams.flags = hParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                try { windowManager.updateViewLayout(hud, hParams) } catch (_: Throwable) {}
+            if (singleHudView != null) {
+                detachSingleFloatingHudWindow()
             }
             return
         }
+        val cfg = st.floatingConfig
+        val hud = singleHudView ?: return
+        val hParams = singleHudParams
         if (scanHiddenHud || isTemporarilyHiddenForScan) {
             if (hud.visibility != View.INVISIBLE) {
                 hud.visibility = View.INVISIBLE
@@ -2915,16 +3054,12 @@ class FloatingTriggerOverlayService : Service() {
         btnSubMenuTiny?.visibility = btnVis
         btnMinTiny?.visibility = btnVis
         btnCloseTiny?.visibility = btnVis
-        subMenuContainer?.visibility = if (showSubMenu) View.VISIBLE else View.GONE
-
-        subMenuComposeView?.let { cv ->
-            val targetDropW = computeSubMenuWidthPx(cfg)
-            val lp = cv.layoutParams
-            if (lp != null && abs(lp.width - targetDropW) >= dp(4)) {
-                lp.width = targetDropW
-                cv.layoutParams = lp
-                cv.requestLayout()
-            }
+        if (showSubMenu) {
+            ensureSubMenuComposeAttached(cfg)
+            subMenuContainer?.visibility = View.VISIBLE
+        } else {
+            subMenuContainer?.visibility = View.GONE
+            detachSubMenuCompose()
         }
 
         hudTitleBtn?.apply {

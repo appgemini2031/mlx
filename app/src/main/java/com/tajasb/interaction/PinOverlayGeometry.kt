@@ -279,8 +279,9 @@ object TouchBlockerLifecyclePlanner {
 }
 
 /**
- * Pure JVM planner determining whether the fullscreen liveStageView overlay should be attached.
- * Detaching liveStageView when empty guarantees zero MATCH_PARENT overlay windows over MLBB.
+ * Pure JVM planner determining whether the liveStageView overlay should be attached.
+ * Detaching liveStageView when empty or suppressing edit-only visuals during gameplay prevents
+ * spurious overlay window churn over MLBB.
  */
 object LiveStageLifecyclePlanner {
 
@@ -288,9 +289,68 @@ object LiveStageLifecyclePlanner {
         hasScanAreas: Boolean,
         activeOverlayCount: Int,
         hasSimEvent: Boolean,
-        hiddenForScan: Boolean
+        hiddenForScan: Boolean,
+        isPositionEditMode: Boolean = true,
+        isFloatingHiddenForLive: Boolean = false
     ): Boolean {
         if (hiddenForScan) return false
-        return hasScanAreas || activeOverlayCount > 0 || hasSimEvent
+        val effectiveScanAreas = hasScanAreas && isPositionEditMode && !isFloatingHiddenForLive
+        val effectiveSimEvent = hasSimEvent && isPositionEditMode && !isFloatingHiddenForLive
+        return effectiveScanAreas || activeOverlayCount > 0 || effectiveSimEvent
     }
 }
+
+/**
+ * Pure JVM planner computing the tight WindowManager bounds for liveStageView so live gameplay
+ * visual overlays wrap only their occupied rect rather than spanning MATCH_PARENT x MATCH_PARENT
+ * over the game joystick.
+ */
+object LiveStageBoundsPlanner {
+
+    fun computeTightWindowRect(
+        childRects: List<PixelRect>,
+        screenW: Int,
+        screenH: Int,
+        fullScreenForScanAreas: Boolean
+    ): PixelRect? {
+        val safeW = screenW.coerceAtLeast(2)
+        val safeH = screenH.coerceAtLeast(2)
+        if (fullScreenForScanAreas) {
+            return PixelRect(left = 0, top = 0, right = safeW, bottom = safeH)
+        }
+        if (childRects.isEmpty()) return null
+        var minL = Int.MAX_VALUE
+        var minT = Int.MAX_VALUE
+        var maxR = Int.MIN_VALUE
+        var maxB = Int.MIN_VALUE
+        for (r in childRects) {
+            val cl = r.left.coerceIn(0, safeW - 1)
+            val ct = r.top.coerceIn(0, safeH - 1)
+            val cr = r.right.coerceIn(cl + 1, safeW)
+            val cb = r.bottom.coerceIn(ct + 1, safeH)
+            if (cl < minL) minL = cl
+            if (ct < minT) minT = ct
+            if (cr > maxR) maxR = cr
+            if (cb > maxB) maxB = cb
+        }
+        if (minL >= maxR || minT >= maxB) return null
+        return PixelRect(left = minL, top = minT, right = maxR, bottom = maxB)
+    }
+}
+
+/**
+ * Pure JVM guard preventing redundant clearFocus() / hideSoftInputFromWindow() IPC calls when the
+ * floating HUD is already non-focusable and unfocused.
+ */
+object HudFocusGuardPlanner {
+
+    fun shouldClearFocusAndIme(
+        currentlyFocusable: Boolean,
+        hasViewFocus: Boolean,
+        requestedFocusable: Boolean
+    ): Boolean {
+        if (requestedFocusable) return false
+        return currentlyFocusable || hasViewFocus
+    }
+}
+

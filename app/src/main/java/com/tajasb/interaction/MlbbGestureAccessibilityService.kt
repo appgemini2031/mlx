@@ -159,7 +159,7 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         var onPrepareScreenForTouch: ((hideForTouch: Boolean) -> Unit)? = null
 
         @Volatile
-        var onPrepareScreenForTouchRegion: ((holeRectPx: PixelRect?, active: Boolean) -> Unit)? = null
+        var onPrepareScreenForTouchRegion: ((holeRectPx: PixelRect?, active: Boolean) -> Boolean)? = null
 
         @Volatile
         var onPrepareScreenForScan: ((hideForScan: Boolean) -> Unit)? = null
@@ -375,10 +375,26 @@ class MlbbGestureAccessibilityService : AccessibilityService() {
         val prepareRegion = onPrepareScreenForTouchRegion
         val prepareFallback = onPrepareScreenForTouch
         if (prepareRegion != null) {
-            preparedHoleRect = holeRect
-            hasActiveTouchPreparation = true
-            awaitMain { prepareRegion(holeRect, true) }
-            delay(28L)
+            val activated = withTimeoutOrNull(450L) {
+                val done = CompletableDeferred<Boolean>()
+                if (Looper.myLooper() == Looper.getMainLooper()) {
+                    done.complete(try { prepareRegion(holeRect, true) } catch (_: Throwable) { false })
+                } else {
+                    mainHandler.post {
+                        val res = try { prepareRegion(holeRect, true) } catch (_: Throwable) { false }
+                        done.complete(res)
+                    }
+                }
+                done.await()
+            } ?: false
+            if (activated) {
+                preparedHoleRect = holeRect
+                hasActiveTouchPreparation = true
+                delay(28L)
+            } else {
+                preparedHoleRect = null
+                hasActiveTouchPreparation = false
+            }
         } else if (prepareFallback != null) {
             preparedHoleRect = holeRect
             hasActiveTouchPreparation = true

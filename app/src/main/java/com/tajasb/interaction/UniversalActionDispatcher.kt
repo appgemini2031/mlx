@@ -29,6 +29,7 @@ import kotlin.random.Random
  */
 object GestureRetryPolicy {
     const val MAX_TOUCH_CONFLICT_RETRIES = 36
+    const val MAX_UNLOCKED_TOUCH_RETRIES = 2
 
     fun backoffDelayMs(attemptIndex: Int): Long = when {
         attemptIndex < 12 -> 35L
@@ -41,11 +42,22 @@ object GestureRetryPolicy {
         attemptIndex: Int,
         aborted: Boolean
     ): Boolean = outcome == GestureOutcome.CANCELLED_BY_TOUCH && !aborted && attemptIndex < MAX_TOUCH_CONFLICT_RETRIES
+
+    fun shouldRetryWithLockContext(
+        outcome: GestureOutcome,
+        attemptIndex: Int,
+        aborted: Boolean,
+        hasTouchLock: Boolean
+    ): Boolean {
+        if (outcome != GestureOutcome.CANCELLED_BY_TOUCH || aborted) return false
+        val cap = if (hasTouchLock) MAX_TOUCH_CONFLICT_RETRIES else MAX_UNLOCKED_TOUCH_RETRIES
+        return attemptIndex < cap
+    }
 }
 
 /**
  * Pure JVM helper computing which step indices should keep Screen Touch Lock continuously engaged
- * so inter-step gaps in touch choreography cannot be interrupted by accidental screen taps.
+ * so inter-step and inter-repeat gaps in touch choreography cannot bounce lock/unlock cycles.
  */
 object TouchExecutionPlanner {
     private const val MAX_BRIDGE_GAP_MS = 2500L
@@ -84,6 +96,33 @@ object TouchExecutionPlanner {
             }
         }
         return locked
+    }
+
+    fun shouldHoldLockAcrossRepeats(
+        steps: List<UniversalActionStep>,
+        repeatCount: Int,
+        intervalMs: Long
+    ): Boolean {
+        if (repeatCount <= 1) return false
+        val safeInterval = intervalMs.coerceAtLeast(0L)
+        if (safeInterval > MAX_BRIDGE_GAP_MS) return false
+        val touchIndices = steps.indices.filter { isHardwareTouchAction(steps[it].actionType) }
+        if (touchIndices.isEmpty()) return false
+        val locked = computeLockedStepIndices(steps)
+        val firstTouch = touchIndices.first()
+        val lastTouch = touchIndices.last()
+        if (firstTouch !in locked || lastTouch !in locked) return false
+
+        fun stepPauseMs(st: UniversalActionStep): Long {
+            val wait = if (st.actionType == ActionType.DELAY || st.actionType == ActionType.WAIT || st.actionType == ActionType.DURATION) {
+                (st.paramValue.trim().toLongOrNull() ?: st.durationMs).coerceAtLeast(0L)
+            } else 0L
+            return st.delayMs.coerceAtLeast(0L) + wait
+        }
+
+        val headPauseMs = (0 until firstTouch).sumOf { stepPauseMs(steps[it]) } + steps[firstTouch].delayMs.coerceAtLeast(0L)
+        val tailPauseMs = ((lastTouch + 1) until steps.size).sumOf { stepPauseMs(steps[it]) }
+        return (headPauseMs + tailPauseMs + safeInterval) <= MAX_BRIDGE_GAP_MS
     }
 }
 
@@ -188,22 +227,26 @@ class UniversalActionDispatcher(
         } else {
             emptySet()
         }
+        val holdLockAcrossRepeats = enableTouchLock && !isMlbbMatchActive &&
+            TouchExecutionPlanner.shouldHoldLockAcrossRepeats(stepsToRun, ruleRepeats, intervalMs)
 
-        for (repeatIdx in 0 until ruleRepeats) {
-            if (isAborted(startEpoch)) break
+        var isSpanTouchLocked = false
+        try {
+            for (repeatIdx in 0 until ruleRepeats) {
+                if (isAborted(startEpoch)) break
+                val hasMoreRepeatsAfterThis = holdLockAcrossRepeats && repeatIdx < ruleRepeats - 1
 
-            var isSpanTouchLocked = false
-            try {
                 var i = 0
                 while (i < stepsToRun.size) {
                     if (isAborted(startEpoch)) break
                     val step = stepsToRun[i]
 
-                    val shouldKeepLockedHere = enableTouchLock && !isMlbbMatchActive && (i in lockedStepIndices)
+                    val shouldKeepLockedHere = enableTouchLock && !isMlbbMatchActive &&
+                        ((i in lockedStepIndices) || (holdLockAcrossRepeats && isSpanTouchLocked))
                     if (shouldKeepLockedHere && !isSpanTouchLocked) {
                         engageTouchLock()
                         isSpanTouchLocked = true
-                    } else if (!shouldKeepLockedHere && isSpanTouchLocked) {
+                    } else if (!shouldKeepLockedHere && isSpanTouchLocked && !hasMoreRepeatsAfterThis) {
                         releaseTouchLockAndWindow()
                         isSpanTouchLocked = false
                     }
@@ -222,7 +265,8 @@ class UniversalActionDispatcher(
                             engageTouchLock()
                             isSpanTouchLocked = true
                         }
-                        val nextShouldLockAfterGroup = enableTouchLock && !isMlbbMatchActive && (i in lockedStepIndices)
+                        val nextShouldLockAfterGroup = (enableTouchLock && !isMlbbMatchActive && (i in lockedStepIndices)) ||
+                            hasMoreRepeatsAfterThis
                         val willUnlockAfterGroup = isSpanTouchLocked && !nextShouldLockAfterGroup
                         coroutineScope {
                             val jobs = mutableListOf<Job>()
@@ -237,7 +281,7 @@ class UniversalActionDispatcher(
                                         startEpoch = startEpoch,
                                         enableTouchLock = enableTouchLock,
                                         alreadySpanLocked = isSpanTouchLocked,
-                                        keepTouchWindowUntilSpanUnlock = willUnlockAfterGroup
+                                        keepTouchWindowUntilSpanUnlock = isSpanTouchLocked
                                     )
                                     synchronized(executedLabels) { executedLabels.add(label) }
                                 }
@@ -250,7 +294,8 @@ class UniversalActionDispatcher(
                         }
                     } else {
                         val nextIdx = i + 1
-                        val nextShouldLock = enableTouchLock && !isMlbbMatchActive && (nextIdx in lockedStepIndices)
+                        val nextShouldLock = (enableTouchLock && !isMlbbMatchActive && (nextIdx in lockedStepIndices)) ||
+                            hasMoreRepeatsAfterThis
                         val willUnlockAfterStep = isSpanTouchLocked && !nextShouldLock
                         val label = executeSingleStep(
                             rule = rule,
@@ -261,7 +306,7 @@ class UniversalActionDispatcher(
                             startEpoch = startEpoch,
                             enableTouchLock = enableTouchLock,
                             alreadySpanLocked = isSpanTouchLocked,
-                            keepTouchWindowUntilSpanUnlock = willUnlockAfterStep
+                            keepTouchWindowUntilSpanUnlock = isSpanTouchLocked
                         )
                         executedLabels.add(label)
                         i = nextIdx
@@ -275,17 +320,22 @@ class UniversalActionDispatcher(
                         delay(intervalMs)
                     }
                 }
-            } finally {
-                if (isSpanTouchLocked) {
+
+                if (!hasMoreRepeatsAfterThis && isSpanTouchLocked) {
                     releaseTouchLockAndWindow()
                     isSpanTouchLocked = false
                 }
-                sink.onTouchConflictChanged("")
-            }
 
-            if (intervalMs > 0L && repeatIdx < ruleRepeats - 1) {
-                delay(intervalMs)
+                if (intervalMs > 0L && repeatIdx < ruleRepeats - 1 && !isAborted(startEpoch)) {
+                    delay(intervalMs)
+                }
             }
+        } finally {
+            if (isSpanTouchLocked) {
+                releaseTouchLockAndWindow()
+                isSpanTouchLocked = false
+            }
+            sink.onTouchConflictChanged("")
         }
 
         // 3. Delay Sesudah Rule + Global Delay Sesudah Aksi
@@ -575,6 +625,7 @@ class UniversalActionDispatcher(
                             val (outcome, tries) = dispatchWithTouchRetry(
                                 startEpoch = startEpoch,
                                 allowRetry = true,
+                                hasTouchLock = enableTouchLock && !isMlbbMatchActive,
                                 enableLockOnConflict = enableTouchLock && !isMlbbMatchActive && !alreadySpanLocked && !acquiresTouchLock,
                                 releaseTouchWindowOnFinish = releaseWindowOnFinish
                             ) {
@@ -588,7 +639,7 @@ class UniversalActionDispatcher(
                                     autoReleaseTouchWindow = false
                                 )
                             }
-                            if (releaseWindowOnFinish) {
+                            if (releaseWindowOnFinish || (outcome == GestureOutcome.CANCELLED_BY_TOUCH && !enableTouchLock)) {
                                 touchWindowReleasedInLoop = true
                             }
                             summary = when {
@@ -600,6 +651,9 @@ class UniversalActionDispatcher(
                                     "$modeLabel dibatalkan sentuhan aktif (layar dikunci)"
                                 else ->
                                     "$modeLabel gagal di (${(px * 100).toInt()}%, ${(py * 100).toInt()}%)"
+                            }
+                            if (outcome == GestureOutcome.CANCELLED_BY_TOUCH && !enableTouchLock) {
+                                break
                             }
                         } else {
                             sink.onRecordStepDetail(
@@ -645,6 +699,7 @@ class UniversalActionDispatcher(
                             val (outcome, tries) = dispatchWithTouchRetry(
                                 startEpoch = startEpoch,
                                 allowRetry = true,
+                                hasTouchLock = enableTouchLock && !isMlbbMatchActive,
                                 enableLockOnConflict = enableTouchLock && !isMlbbMatchActive && !alreadySpanLocked && !acquiresTouchLock,
                                 releaseTouchWindowOnFinish = releaseWindowOnFinish
                             ) {
@@ -656,7 +711,7 @@ class UniversalActionDispatcher(
                                     autoReleaseTouchWindow = false
                                 )
                             }
-                            if (releaseWindowOnFinish) {
+                            if (releaseWindowOnFinish || (outcome == GestureOutcome.CANCELLED_BY_TOUCH && !enableTouchLock)) {
                                 touchWindowReleasedInLoop = true
                             }
                             summary = when {
@@ -668,6 +723,9 @@ class UniversalActionDispatcher(
                                     "Swipe ML dibatalkan sentuhan aktif (layar dikunci)"
                                 else ->
                                     "Swipe ML gagal"
+                            }
+                            if (outcome == GestureOutcome.CANCELLED_BY_TOUCH && !enableTouchLock) {
+                                break
                             }
                         } else {
                             sink.onRecordStepDetail(
@@ -765,6 +823,7 @@ class UniversalActionDispatcher(
     private suspend fun dispatchWithTouchRetry(
         startEpoch: Long,
         allowRetry: Boolean,
+        hasTouchLock: Boolean,
         enableLockOnConflict: Boolean,
         releaseTouchWindowOnFinish: Boolean = true,
         dispatchCall: suspend () -> GestureOutcome
@@ -781,10 +840,11 @@ class UniversalActionDispatcher(
                 if (outcome == GestureOutcome.COMPLETED) {
                     return@withLock GestureOutcome.COMPLETED to attempt
                 }
-                val canRetry = allowRetry && GestureRetryPolicy.shouldRetry(
+                val canRetry = allowRetry && GestureRetryPolicy.shouldRetryWithLockContext(
                     outcome = outcome,
                     attemptIndex = attempt - 1,
-                    aborted = isAborted(startEpoch)
+                    aborted = isAborted(startEpoch),
+                    hasTouchLock = hasTouchLock
                 )
                 if (!canRetry) {
                     return@withLock outcome to attempt
@@ -794,7 +854,9 @@ class UniversalActionDispatcher(
                     engageTouchLock()
                     conflictLockAcquired = true
                 }
-                sink.onTouchConflictChanged("🔒 Layar Terkunci • Mengambil alih kontrol (${attempt + 1})...")
+                if (hasTouchLock) {
+                    sink.onTouchConflictChanged("🔒 Layar Terkunci • Mengambil alih kontrol (${attempt + 1})...")
+                }
                 delay(GestureRetryPolicy.backoffDelayMs(attempt - 1))
             }
             @Suppress("UNREACHABLE_CODE")
